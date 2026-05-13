@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+.next/
+
+# Sandboxes (generated at runtime)
+backend/sandboxes/
+
+# Cloned repos (scanned targets)
+CTMS/
+
+# Pytest cache
+pytest-cache-files-*/
+.pytest_cache/
+
+# Environment
+.env
+*.env
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

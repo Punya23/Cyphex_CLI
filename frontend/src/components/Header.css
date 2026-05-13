@@ -1,0 +1,238 @@
+/* ─── Header Shell ────────────────────────────────────────────── */
+.hacker-header {
+  background: rgba(7, 0, 16, 0.85);
+  border-bottom: 1px solid rgba(124, 58, 237, 0.2);
+  height: 64px;
+  padding: 0 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  backdrop-filter: blur(16px);
+  z-index: 100;
+  position: relative;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Subtle top-edge glow */
+.hacker-header::after {
+  content: "";
+  position: absolute;
+  bottom: -1px; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--purple-core), transparent);
+  opacity: 0.5;
+}
+
+/* ─── Logo ────────────────────────────────────────────────────── */
+.header-left { flex-shrink: 0; }
+
+.logo-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo-text {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+  color: #fff;
+}
+
+/* ─── Center: Mode Toggle ─────────────────────────────────────── */
+.header-center {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.segmented-toggle {
+  display: flex;
+  background: rgba(124, 58, 237, 0.06);
+  border: 1px solid rgba(124, 58, 237, 0.2);
+  padding: 3px;
+  border-radius: 8px;
+  gap: 2px;
+}
+
+.toggle-item {
+  padding: 7px 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  border-radius: 5px;
+  letter-spacing: 0.5px;
+}
+
+.toggle-item.active {
+  background: rgba(124, 58, 237, 0.4);
+  color: #fff;
+  box-shadow: 0 0 12px rgba(124, 58, 237, 0.3);
+}
+
+/* ─── Action Buttons ──────────────────────────────────────────── */
+.header-actions { display: flex; align-items: center; gap: 10px; }
+
+.hacker-btn {
+  border: 1px solid var(--border-subtle);
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  transition: all 0.2s;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+
+.hacker-btn.secondary.glow-green {
+  background: rgba(57, 255, 20, 0.04);
+  border-color: rgba(57, 255, 20, 0.2);
+  color: var(--neon-green);
+}
+
+.hacker-btn:hover {
+  background: rgba(124, 58, 237, 0.1);
+  border-color: var(--border-strong);
+  color: #fff;
+}
+
+/* ─── Live URL Input ──────────────────────────────────────────── */
+.hacker-input-group {
+  display: flex;
+  align-items: center;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.hacker-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #fff;
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  width: 200px;
+}
+
+.prefix {
+  color: var(--purple-light);
+  padding: 0 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+/* ─── Deploy Button ───────────────────────────────────────────── */
+.deploy-btn-hacker {
+  background: rgba(124, 58, 237, 0.12);
+  border: 1.5px solid var(--purple-core);
+  color: var(--purple-light);
+  padding: 9px 20px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.75rem;
+  letter-spacing: 1px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.25s;
+}
+
+.deploy-btn-hacker:hover {
+  background: rgba(124, 58, 237, 0.3);
+  box-shadow: 0 0 24px rgba(124, 58, 237, 0.4);
+  border-color: var(--purple-light);
+}
+
+.deploy-btn-hacker.running {
+  border-color: var(--neon-green);
+  color: var(--neon-green);
+  background: rgba(57, 255, 20, 0.06);
+  animation: deployPulse 1.5s infinite;
+}
+
+@keyframes deployPulse {
+  0%   { opacity: 1; box-shadow: 0 0 8px rgba(57,255,20,0.3); }
+  50%  { opacity: 0.75; box-shadow: 0 0 24px rgba(57,255,20,0.5); }
+  100% { opacity: 1; box-shadow: 0 0 8px rgba(57,255,20,0.3); }
+}
+
+/* ─── Right side icons ────────────────────────────────────────── */
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.status-indicators {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.indicator {
+  position: relative;
+  width: 34px; height: 34px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.indicator:hover {
+  border-color: var(--border-strong);
+  color: #fff;
+  background: rgba(124, 58, 237, 0.08);
+}
+
+.badge {
+  position: absolute;
+  top: -5px; right: -5px;
+  background: var(--purple-light);
+  color: #fff;
+  font-size: 0.55rem;
+  padding: 2px 5px;
+  border-radius: 10px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+}
+
+.user-profile {
+  width: 34px; height: 34px;
+  background: rgba(124, 58, 237, 0.15);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--purple-light);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.user-profile:hover {
+  border-color: var(--purple-light);
+  background: rgba(124, 58, 237, 0.25);
+}

@@ -1,0 +1,49 @@
+version: '3.9'
+
+services:
+  # ═══════════════════════════════════════
+  # Vulnerable target application
+  # ═══════════════════════════════════════
+  vulncorp:
+    build: ./sandbox/vulncorp
+    ports:
+      - "3000:3000"
+    environment:
+      - DB_HOST=db
+      - DB_USER=root
+      - DB_PASS=vulncorp_pass
+      - DB_NAME=vulncorp
+      - PORT=3000
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cyphex-net
+
+  # ═══════════════════════════════════════
+  # MySQL Database for VulnCorp
+  # ═══════════════════════════════════════
+  db:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: vulncorp_pass
+      MYSQL_DATABASE: vulncorp
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-pvulncorp_pass"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cyphex-net
+
+networks:
+  cyphex-net:
+    driver: bridge
+
+volumes:
+  mysql_data:

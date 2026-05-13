@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "author": "CYPHEX Sentinel",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "wokwi-pi-pico",
+      "id": "pico",
+      "top": 0,
+      "left": 100,
+      "attrs": { "env": "micropython-20231227-v1.22.1" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-green",
+      "top": -120,
+      "left": 20,
+      "attrs": { "color": "green", "label": "SECURE" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-yellow",
+      "top": -120,
+      "left": 80,
+      "attrs": { "color": "yellow", "label": "WARNING" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-red",
+      "top": -120,
+      "left": 140,
+      "attrs": { "color": "red", "label": "CRITICAL" }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led-blue",
+      "top": -120,
+      "left": 200,
+      "attrs": { "color": "blue", "label": "SCANNING" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": -50,
+      "left": 20,
+      "attrs": { "value": "330" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": -50,
+      "left": 80,
+      "attrs": { "value": "330" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r3",
+      "top": -50,
+      "left": 140,
+      "attrs": { "value": "330" }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r4",
+      "top": -50,
+      "left": 200,
+      "attrs": { "value": "330" }
+    },
+    {
+      "type": "wokwi-buzzer",
+      "id": "buzzer",
+      "top": -120,
+      "left": 280,
+      "attrs": {}
+    },
+    {
+      "type": "board-ssd1306",
+      "id": "oled",
+      "top": -180,
+      "left": 350,
+      "attrs": {}
+    }
+  ],
+  "connections": [
+    ["pico:GP18", "r1:1", "green", ["v0"]],
+    ["r1:2", "led-green:A", "green", ["v0"]],
+    ["led-green:C", "pico:GND.1", "black", ["v0"]],
+
+    ["pico:GP19", "r2:1", "gold", ["v0"]],
+    ["r2:2", "led-yellow:A", "gold", ["v0"]],
+    ["led-yellow:C", "pico:GND.1", "black", ["v0"]],
+
+    ["pico:GP20", "r3:1", "red", ["v0"]],
+    ["r3:2", "led-red:A", "red", ["v0"]],
+    ["led-red:C", "pico:GND.1", "black", ["v0"]],
+
+    ["pico:GP21", "r4:1", "blue", ["v0"]],
+    ["r4:2", "led-blue:A", "blue", ["v0"]],
+    ["led-blue:C", "pico:GND.1", "black", ["v0"]],
+
+    ["pico:GP15", "buzzer:1", "white", ["v0"]],
+    ["buzzer:2", "pico:GND.1", "black", ["v0"]],
+
+    ["pico:GP4", "oled:SDA", "purple", ["v0"]],
+    ["pico:GP5", "oled:SCL", "gray", ["v0"]],
+    ["pico:3V3", "oled:VCC", "red", ["v0"]],
+    ["pico:GND.1", "oled:GND", "black", ["v0"]]
+  ]
+}

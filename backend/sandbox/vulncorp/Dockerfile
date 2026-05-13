@@ -1,0 +1,20 @@
+FROM node:18-alpine
+
+WORKDIR /var/www
+
+# Install ping and other utilities for command injection testing
+RUN apk add --no-cache iputils curl wget
+
+COPY package.json .
+RUN npm install
+
+COPY app.js .
+
+# Create some files for directory traversal testing
+RUN echo "This is a readme file" > readme.txt && \
+    echo "Sensitive config data" > config.txt && \
+    mkdir -p /var/www/uploads
+
+EXPOSE 3000
+
+CMD ["node", "app.js"]

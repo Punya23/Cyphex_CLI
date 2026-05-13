@@ -1,0 +1,229 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Space+Grotesk:wght@400;500;600;700;900&family=Orbitron:wght@600;800;900&display=swap');
+@import "tailwindcss";
+
+/* ══════════════════════════════════════════════════════════════════
+   CYPHEX · Design System
+   Theme: Cybersecurity / Dark Purple / Professional Hacker OS
+══════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Backgrounds */
+  --bg-base:     #070010;
+  --bg-deep:     #07000f;
+  --bg-card:     rgba(17, 10, 30, 0.92);
+  --bg-card-alt: rgba(12, 6, 22, 0.95);
+  --bg-charcoal: #0d0818;
+
+  /* Brand Accents */
+  --purple-core:   #7c3aed;
+  --purple-light:  #a855f7;
+  --purple-glow:   rgba(124, 58, 237, 0.4);
+  --magenta:       #c026d3;
+  --magenta-glow:  rgba(192, 38, 211, 0.3);
+
+  /* Semantic Neons (kept for data/alerts) */
+  --neon-green:  #39ff14;
+  --neon-blue:   #00e5ff;
+  --neon-purple: #a855f7;
+  --fire-red:    #ff3131;
+
+  /* Text */
+  --text-main:  #f0eeff;
+  --text-muted: #9d94c0;
+  --text-dim:   #5a5278;
+
+  /* Borders */
+  --border-subtle: rgba(124, 58, 237, 0.18);
+  --border-strong: rgba(168, 85, 247, 0.4);
+  --border-glow:   rgba(124, 58, 237, 0.15);
+  --border-white:  rgba(255, 255, 255, 0.07);
+
+  /* Utility */
+  --sidebar-width: 220px;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Space Grotesk', 'Outfit', sans-serif;
+  --font-display: 'Space Grotesk', sans-serif;
+}
+
+/* ─── Reset ──────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+}
+
+.mono { font-family: var(--font-mono); }
+
+body {
+  background-color: var(--bg-base);
+  color: var(--text-main);
+  overflow: hidden;
+  position: relative;
+}
+
+/* ─── CRT scanline overlay ───────────────────────────────────── */
+body::before {
+  content: "";
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  background-image:
+    linear-gradient(rgba(18,16,16,0) 50%, rgba(0,0,0,0.12) 50%);
+  background-size: 100% 3px;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.08;
+}
+
+/* ─── Cards ──────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card);
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255,255,255,0.04);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.3s, box-shadow 0.3s;
+  backdrop-filter: blur(12px);
+}
+
+/* Subtle top-edge purple highlight on cards */
+.card::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--purple-light), transparent);
+  opacity: 0.4;
+}
+
+.card:hover {
+  border-color: var(--border-glow);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.7), 0 0 20px rgba(124,58,237,0.08);
+}
+
+.card-title {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--neon-blue);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+/* ─── Neon text utilities ────────────────────────────────────── */
+.glow-purple { color: var(--purple-light); text-shadow: 0 0 12px rgba(168,85,247,0.6); }
+.glow-green  { color: var(--neon-green);   text-shadow: 0 0 12px rgba(57,255,20,0.5);  }
+.glow-blue   { color: var(--neon-blue);    text-shadow: 0 0 12px rgba(0,229,255,0.5);  }
+.glow-red    { color: var(--fire-red);     text-shadow: 0 0 12px rgba(255,49,49,0.5);  }
+
+/* ─── Card border glow variants ─────────────────────────────── */
+.bg-glow-purple { border-color: rgba(168,85,247,0.35) !important; box-shadow: 0 0 20px rgba(168,85,247,0.1); }
+.bg-glow-green  { border-color: rgba(57,255,20,0.25) !important;  box-shadow: 0 0 20px rgba(57,255,20,0.08); }
+.bg-glow-blue   { border-color: rgba(0,229,255,0.25) !important;  box-shadow: 0 0 20px rgba(0,229,255,0.08); }
+.bg-glow-red    { border-color: rgba(255,49,49,0.25) !important;  box-shadow: 0 0 20px rgba(255,49,49,0.08);  }
+
+/* ─── Dashboard layout ───────────────────────────────────────── */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
+  padding: 18px;
+  margin-top: 0;
+  animation: fadeIn 0.5s ease-out;
+}
+
+/* ─── Animations ─────────────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Aurora Hero Component (BackgroundScene)
+══════════════════════════════════════════════════════════════ */
+
+.scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  perspective: 800px;
+  background-color: var(--bg-base);
+  z-index: 0;
+}
+
+.floor {
+  position: absolute;
+  bottom: 0;
+  left: -50%;
+  width: 200%;
+  height: 60vh;
+  background-image:
+    linear-gradient(rgba(124,58,237,0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(124,58,237,0.12) 1px, transparent 1px);
+  background-size: 50px 50px;
+  transform: rotateX(70deg) translateY(50px);
+  transform-origin: bottom center;
+  animation: moveGrid 15s linear infinite, floorGlow 4s ease-in-out infinite;
+  -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0));
+  mask-image: linear-gradient(to top, rgba(0,0,0,1), rgba(0,0,0,0));
+}
+
+.main-column {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 200px;
+  height: 100vh;
+  transform: translateX(-50%);
+  background: linear-gradient(to top, rgba(124,58,237,0.5), transparent);
+  animation: mainGlow 4s alternate infinite;
+  filter: blur(30px);
+}
+
+.light-stream-container {
+  position: absolute;
+  inset: 0;
+}
+
+.light-beam {
+  position: absolute;
+  bottom: -20%;
+  background: linear-gradient(to top, var(--purple-light), transparent);
+  height: 120%;
+  opacity: 0;
+  animation-name: rise, fade;
+  animation-iteration-count: infinite;
+  animation-timing-function: linear;
+  filter: blur(2px);
+}
+
+@keyframes rise {
+  0%   { transform: translateY(100%); opacity: 0; }
+  10%  { opacity: 1; }
+  100% { transform: translateY(-10%); opacity: 0; }
+}
+
+@keyframes fade {
+  0%,100% { opacity: 0; }
+  5%,80%  { opacity: 0.6; }
+}
+
+@keyframes floorGlow {
+  0%,100% { opacity: 0.5; }
+  50%     { opacity: 0.9; }
+}
+
+@keyframes mainGlow {
+  from { opacity: 0.25; filter: blur(40px); }
+  to   { opacity: 0.6;  filter: blur(25px); }
+}
+
+@keyframes moveGrid {
+  from { background-position: 0 0; }
+  to   { background-position: -50px -50px; }
+}
