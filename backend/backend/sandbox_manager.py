@@ -177,6 +177,16 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
                 "error": f"npm install failed: {err_detail}",
                 "sandbox_id": sandbox_id,
             }
+            
+        try:
+            with open(pkg_json) as f:
+                pkg_data = json.load(f)
+            deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
+            if "prisma" in deps:
+                await _run_cmd(f"{npm_cmd} exec prisma generate", cwd=sandbox_dir, timeout=120)
+        except Exception:
+            pass
+
 
     # For Python sandboxes
     requirements = os.path.join(sandbox_dir, "requirements.txt")
@@ -192,7 +202,14 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     env = _NODE_ENV.copy()
     env["PORT"] = str(port)
 
-    if app_file.endswith(".js"):
+    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+    if app_file == "__NPM_RUN_START_DEV__":
+        cmd = f"{npm_cmd} run start:dev"
+    elif app_file == "__NPM_RUN_DEV__":
+        cmd = f"{npm_cmd} run dev"
+    elif app_file == "__NPM_RUN_START__":
+        cmd = f"{npm_cmd} run start"
+    elif app_file.endswith(".js"):
         cmd = f"node {app_file}"
     elif app_file.endswith(".py"):
         cmd = f"{sys.executable} {app_file}"
@@ -327,14 +344,17 @@ def _detect_entry_file(directory: str) -> Optional[str]:
         try:
             with open(pkg) as fh:
                 data = json.load(fh)
+            scripts = data.get("scripts", {})
+            if "start:dev" in scripts:
+                return "__NPM_RUN_START_DEV__"
+            elif "dev" in scripts:
+                return "__NPM_RUN_DEV__"
+            elif "start" in scripts:
+                return "__NPM_RUN_START__"
+                
             main = data.get("main")
             if main and os.path.exists(os.path.join(directory, main)):
                 return main
-            start = data.get("scripts", {}).get("start", "")
-            if "node " in start:
-                entry = start.split("node ")[-1].strip().split(" ")[0]
-                if os.path.exists(os.path.join(directory, entry)):
-                    return entry
         except Exception:
             pass
 
@@ -352,6 +372,9 @@ def _patch_port_in_entry(sandbox_dir: str, app_file: str, port: int):
     Many uploaded apps hardcode `const port = 3000`. This rewrites
     those patterns to `process.env.PORT || <port>`.
     """
+    if app_file and app_file.startswith("__NPM_RUN"):
+        return
+
     import re
 
     filepath = os.path.join(sandbox_dir, app_file)
