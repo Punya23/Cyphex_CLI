@@ -97,8 +97,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
 3. Never use phrases like "might be", "could potentially", "appears to be",
    "seems vulnerable". Every finding statement must be backed by evidence.
 4. If you are uncertain, set confirmed=false or approved=false. Never guess true.
-5. You MUST output your detailed, step-by-step reasoning inside a <thinking> ... </thinking> block BEFORE outputting the JSON. This is mandatory for transparency and strong reasoning.
-6. Return ONLY valid JSON after the thinking block. No preamble, no markdown outside the JSON.
+5. You MUST provide your detailed, step-by-step reasoning in a "thinking" key inside the final JSON object BEFORE the decision keys. This is mandatory for transparency and strong reasoning.
+6. Return ONLY valid JSON. No preamble, no markdown.
 """
 
     def __init__(self):
@@ -129,6 +129,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                                     {"role": "user", "content": prompt},
                                 ],
                                 "stream": False,
+                                "format": "json",
                                 "keep_alive": "10m",
                                 "options": {
                                     "temperature": 0.1,
@@ -141,31 +142,35 @@ ANTI-HALLUCINATION RULES — apply on every response:
                     raw = r.json()["message"]["content"]
                     live.update(Panel(f"[green bold]✓ Done[/green bold] [dim]({model})[/dim]", border_style="green"))
 
-                # Extract and display thinking
-                thinking_match = re.search(r'<thinking>(.*?)</thinking>', raw, re.DOTALL | re.IGNORECASE)
-                if thinking_match:
-                    thinking_content = thinking_match.group(1).strip()
+                # Strip markdown code fences just in case
+                clean = re.sub(r"```(?:json)?|```", "", raw).strip()
+                
+                try:
+                    parsed = json.loads(clean)
+                except json.JSONDecodeError:
+                    # Fallback to regex extraction
+                    match = re.search(r'(\{.*\}|\[.*\])', clean, re.DOTALL)
+                    if match:
+                        parsed = json.loads(match.group(1))
+                    else:
+                        raise json.JSONDecodeError("No JSON structure found", clean, 0)
+                
+                # Extract and display thinking from the JSON
+                if isinstance(parsed, dict) and "thinking" in parsed:
+                    thinking_content = str(parsed["thinking"]).strip()
                     if thinking_content:
                         console.print(Panel(thinking_content, title=f"[{model}] Thinking Process", border_style="blue"))
-
-                # Strip markdown code fences if model wrapped JSON
-                clean = re.sub(r"```(?:json)?|```", "", raw).strip()
-                # Strip thinking block so stray curly braces in text don't mess up JSON extraction
-                clean = re.sub(r"<thinking>.*?</thinking>", "", clean, flags=re.DOTALL | re.IGNORECASE).strip()
-                # Extract first JSON object or array
-                match = re.search(r'(\{.*\}|\[.*\])', clean, re.DOTALL)
-                if match:
-                    parsed = json.loads(match.group(1))
                     
-                    # Display the decision if applicable
+                # Display the decision if applicable
+                if isinstance(parsed, dict):
                     if "confirmed" in parsed:
                         c = "green" if parsed["confirmed"] else "red"
                         console.print(f"  └─ [{c}]{model} vote: {parsed['confirmed']}[/{c}] - {parsed.get('reason', '')}")
                     elif "approved" in parsed:
                         c = "green" if parsed["approved"] else "red"
                         console.print(f"  └─ [{c}]{model} review: {parsed['approved']}[/{c}] - {parsed.get('reason', '')}")
-                    
-                    return parsed
+                
+                return parsed
             except json.JSONDecodeError:
                 if attempt == 1:
                     raise CouncilCallError(f"{model} returned non-JSON after 2 attempts: {raw[:200]}")

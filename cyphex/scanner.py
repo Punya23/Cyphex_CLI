@@ -40,9 +40,13 @@ class StaticFinding:
 # ══════════════════════════════════════════════════════════════
 
 def semgrep_available() -> bool:
-    """Check if Semgrep CLI is installed. Semgrep has no native Windows support."""
+    """Check if Semgrep CLI is installed."""
     if os.name == "nt":
-        return False  # Semgrep requires WSL on Windows
+        try:
+            res = subprocess.run(["wsl", "semgrep", "--version"], capture_output=True, text=True, timeout=5)
+            return res.returncode == 0
+        except Exception:
+            return False
     return shutil.which("semgrep") is not None
 
 
@@ -52,9 +56,15 @@ def run_semgrep(source_dir: str, config: str = "auto") -> list[StaticFinding]:
     Uses 'auto' config (5000+ rules across 30+ languages).
     """
     try:
+        cmd = ["semgrep", "--config", config, "--json", "--quiet", "--timeout", "120"]
+        if os.name == "nt":
+            wsl_path = subprocess.run(["wsl", "wslpath", "-a", source_dir], capture_output=True, text=True).stdout.strip()
+            cmd = ["wsl", "semgrep", "--config", config, "--json", "--quiet", "--timeout", "120", wsl_path]
+        else:
+            cmd.append(source_dir)
+            
         result = subprocess.run(
-            ["semgrep", "--config", config, "--json", "--quiet",
-             "--timeout", "120", source_dir],
+            cmd,
             capture_output=True, text=True, timeout=300
         )
         if result.returncode not in (0, 1):  # 1 = findings found

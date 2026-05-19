@@ -116,56 +116,15 @@ class LFIAgent(BaseAgent):
         )
 
     async def _test_lfi(self, param, context: ScanContext):
-        """Test a parameter for Local File Inclusion."""
-        for payload, ptype in self.LFI_PAYLOADS:
-            encoded = quote(payload, safe="")
-            url = f"{param.url}?{param.name}={encoded}"
-
-            out = await self.terminal.run(
-                f'curl -s --max-time 10 "{url}"'
-            )
-
-            if not out.stdout:
-                continue
-
-            # Check for successful file read
-            is_lfi = False
-
-            # Linux indicators
-            if "root:x:0:0" in out.stdout or "root:" in out.stdout:
-                is_lfi = True
-            elif "uid=" in out.stdout:
-                is_lfi = True
-            # Windows indicators
-            elif "[fonts]" in out.stdout.lower() or "[extensions]" in out.stdout.lower():
-                is_lfi = True
-            # Base64 encoded content (PHP wrapper)
-            elif ptype == "php_filter" and len(out.stdout) > 50:
-                # Try to decode as base64
-                try:
-                    import base64
-                    decoded = base64.b64decode(out.stdout.strip()).decode()
-                    if "root:" in decoded or "<?php" in decoded:
-                        is_lfi = True
-                except Exception:
-                    pass
-
-            if is_lfi:
-                await self.add_vuln(Vuln(
-                    name=f"Local File Inclusion — {param.name}",
-                    severity="Critical",
-                    cvss_score=9.1,
-                    endpoint=param.url,
-                    payload=f"{param.name}={payload}",
-                    confirmed=True,
-                    evidence=out.stdout[:500],
-                    description=(
-                        f"Path traversal via {param.name} parameter. "
-                        f"Payload: {payload}"
-                    ),
-                    fix="Never use user input in file paths. Whitelist allowed files.",
-                ))
-                return  # Found, move on
+        """Test a parameter for Local File Inclusion using Autonomous AI Loop."""
+        task_desc = (
+            f"Test for LFI (Local File Inclusion) on endpoint: {param.url} "
+            f"via the parameter '{param.name}'. "
+            f"Attempt to read '/etc/passwd' or 'windows/win.ini'. "
+            f"Use different encoding, traversal depths, and --path-as-is. "
+            f"Check for WAF blocks and bypass them using -A 'CustomUserAgent'."
+        )
+        await self.autonomous_exploit_loop(context, task_description=task_desc, max_steps=5)
 
     async def _test_file_upload(self, form, context: ScanContext):
         """Test file upload for bypass vulnerabilities."""

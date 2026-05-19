@@ -13,6 +13,7 @@ import sys
 import shutil
 import asyncio
 import subprocess
+import platform
 from typing import Optional
 
 from rich.console import Console
@@ -26,6 +27,17 @@ console = Console()
 
 def _check_binary(name: str) -> tuple[bool, str]:
     """Check if a binary is available and return its version."""
+    if name == "semgrep" and os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["wsl", "semgrep", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                version = result.stdout.strip().split("\n")[0]
+                return True, version
+        except Exception:
+            pass
+
     path = shutil.which(name)
     if not path:
         return False, "not installed"
@@ -84,7 +96,7 @@ async def run_doctor():
     table.add_column("Key", style="bold")
     table.add_column("Value")
     table.add_row("Python", f"{sys.version.split()[0]}")
-    table.add_row("Platform", f"{sys.platform} ({os.uname().machine})")
+    table.add_row("Platform", f"{sys.platform} ({platform.machine()})")
     table.add_row("GPU", gpu_info["gpu_name"])
     table.add_row("VRAM", f"{gpu_info['vram_gb']} GB" if gpu_info["vram_gb"] > 0 else "None detected")
     table.add_row("Mode", f"[bold]{mode.upper()}[/bold] — {MODE_DESCRIPTIONS[mode]}")

@@ -18,6 +18,13 @@ import shutil
 import subprocess
 import platform
 
+# Fix Windows terminal encoding for rich characters like ✓
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 # Ensure project root is in path so existing modules resolve
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:

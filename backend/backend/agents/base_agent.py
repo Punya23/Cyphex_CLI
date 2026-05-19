@@ -313,3 +313,83 @@ class BaseAgent(ABC):
                 except json.JSONDecodeError:
                     pass
         return None
+
+    async def autonomous_exploit_loop(self, context: ScanContext, task_description: str, max_steps: int = 5) -> None:
+        """
+        AI-driven ReAct loop for advanced exploitation using the Cyphex Virtual Subsystem (CVS).
+        The agent iteratively generates `curl` commands, executes them, and reads the output.
+        """
+        await self.log(f"Starting Autonomous Exploit Loop: {task_description}", "warning")
+        
+        system_prompt = f"""You are an elite offensive security engineer.
+You are tasked with the following exploitation goal: {task_description}
+
+Target URL: {self.target}
+
+You have access to a pure-Python virtual Linux terminal (CVS).
+You can ONLY use the following tools:
+1. `curl` (Supports -X, -d, -H, -b, -c, -A, --path-as-is, etc.)
+2. `grep` (Supports -i, -v, -E, -o)
+Example: `curl -s -X GET "http://target/api" -H "Auth: Bearer token" | grep -o "secret=[a-zA-Z0-9]+"`
+
+You must iteratively explore, extract tokens, bypass WAFs, and exploit the target.
+
+RESPOND EXACTLY IN THIS JSON FORMAT:
+{{
+    "reasoning": "Explain what you are trying to achieve with this command and why.",
+    "command": "The exact bash command to execute in the terminal.",
+    "found_vuln": true/false,
+    "vuln_details": {{"name": "...", "severity": "...", "description": "...", "payload": "..."}} // Only if found_vuln is true
+}}
+
+If you have achieved the goal or found a vulnerability, set found_vuln to true and provide details. The loop will then terminate.
+If you need more information, generate the next command to gather it.
+"""
+        
+        conversation_history = "--- Terminal Output History ---\n"
+        
+        for step in range(max_steps):
+            await self.log(f"Autonomous Loop Step {step+1}/{max_steps}...", "info")
+            user_prompt = f"History so far:\n{conversation_history}\n\nWhat is your next command?"
+            
+            response_text = await self.call_cerebras(system_prompt, user_prompt)
+            data = self._parse_json(response_text)
+            
+            if not data or "command" not in data:
+                await self.log("Failed to parse AI response. Aborting loop.", "danger")
+                break
+                
+            await self.log(f"Reasoning: {data.get('reasoning', '')}", "info")
+            
+            if data.get("found_vuln"):
+                vuln_info = data.get("vuln_details", {})
+                if vuln_info:
+                    await self.add_vuln(Vuln(
+                        name=vuln_info.get("name", f"Autonomous Vuln - {self.__class__.__name__}"),
+                        severity=vuln_info.get("severity", "High"),
+                        cvss_score=8.5,
+                        endpoint=self.target,
+                        payload=vuln_info.get("payload", ""),
+                        description=vuln_info.get("description", ""),
+                        confirmed=True,
+                        fix="Review and remediate based on autonomous findings.",
+                    ))
+                break
+                
+            cmd = data["command"]
+            if not cmd.strip():
+                break
+                
+            # Execute command
+            result = await self.terminal.run(cmd)
+            
+            # Append to history
+            stdout_preview = result.stdout[:1000] + ("...\n[TRUNCATED]" if len(result.stdout) > 1000 else "")
+            stderr_preview = result.stderr[:500]
+            
+            conversation_history += f"\n$ {cmd}\nExit Code: {result.exit_code}\nSTDOUT:\n{stdout_preview}\nSTDERR:\n{stderr_preview}\n"
+            
+            # Small delay to avoid API limits
+            await asyncio.sleep(2)
+            
+        await self.log("Autonomous Exploit Loop Finished.", "info")
