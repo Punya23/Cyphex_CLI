@@ -27,7 +27,7 @@ class CyphexConfig:
     OLLAMA_MODEL: str = "qwen2.5-coder:7b"  # Best coding model you have installed
 
     # ─── Cerebras AI (Cloud — LEGACY, currently broken) ───
-    CEREBRAS_API_KEY: str = "csk-9wd82fm4xkhfrvyjm646848njjhnmfrw4jhcfn6ccyddn5jv"
+    CEREBRAS_API_KEY: str = ""  # Set via CEREBRAS_API_KEY env var
     CEREBRAS_MODEL: str = "llama-3.3-70b"
     CEREBRAS_MAX_TOKENS: int = 4096
     CEREBRAS_API_URL: str = "https://api.cerebras.ai/v1/chat/completions"

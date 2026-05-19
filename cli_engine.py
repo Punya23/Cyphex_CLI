@@ -9,10 +9,11 @@ import subprocess
 import time
 import uuid
 import json
+import hashlib
 import re
 import glob
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 import httpx
 from rich.console import Console
@@ -30,6 +31,7 @@ from immune.behavioral_genome import BehavioralGenome
 from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
 from models.scan import ScanContext, FormData, ParamData, Vuln
+from config import config as cyphex_config
 
 # Council system imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -42,9 +44,48 @@ except ImportError:
     COUNCIL_AVAILABLE = False
 
 class C:
-    R="\033[91m";G="\033[92m";Y="\033[93m";B="\033[94m"
-    M="\033[95m";CY="\033[96m";W="\033[97m";BOLD="\033[1m"
-    DIM="\033[2m";RST="\033[0m"
+    """Premium cyber-themed color palette — turquoise/purple/black."""
+    # ── Core palette ──
+    RST    = "\033[0m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    ITALIC = "\033[3m"
+    ULINE  = "\033[4m"
+    # Standard colors
+    R  = "\033[91m"
+    G  = "\033[92m"
+    Y  = "\033[93m"
+    B  = "\033[94m"
+    M  = "\033[95m"
+    CY = "\033[96m"
+    W  = "\033[97m"
+    # ── True-color cyber palette ──
+    CYAN   = "\033[38;2;0;255;255m"      # Turquoise/cyan primary
+    CYAN2  = "\033[38;2;72;209;204m"     # Muted teal
+    PURPLE = "\033[38;2;138;43;226m"     # Vivid purple
+    PURP2  = "\033[38;2;161;100;255m"    # Soft purple
+    NEON   = "\033[38;2;57;255;20m"      # Neon green (success)
+    FLAME  = "\033[38;2;255;69;0m"       # Orange-red (critical)
+    GHOST  = "\033[38;2;100;100;120m"    # Ghost gray (dim text)
+    SLATE  = "\033[38;2;140;150;170m"    # Slate (secondary text)
+    # Backgrounds
+    BG_DARK   = "\033[48;2;15;15;25m"    # Near-black bg
+    BG_PURPLE = "\033[48;2;30;20;50m"    # Dark purple bg
+    BG_CYAN   = "\033[48;2;0;50;60m"     # Dark cyan bg
+    BG_RED    = "\033[48;2;60;10;10m"    # Dark red bg
+
+    @staticmethod
+    def gradient(text, r1, g1, b1, r2, g2, b2):
+        """Apply a horizontal gradient across text."""
+        result = []
+        n = max(len(text) - 1, 1)
+        for i, ch in enumerate(text):
+            r = int(r1 + (r2 - r1) * i / n)
+            g = int(g1 + (g2 - g1) * i / n)
+            b = int(b1 + (b2 - b1) * i / n)
+            result.append(f"\033[38;2;{r};{g};{b}m{ch}")
+        result.append("\033[0m")
+        return "".join(result)
 
 WORK_DIR = os.path.join(os.path.dirname(__file__), "backend", "sandboxes")
 os.makedirs(WORK_DIR, exist_ok=True)
@@ -64,18 +105,58 @@ class CyphexEngine:
         self.non_interactive = False
         self.start_ts = 0.0
 
-    async def run(self, repo_url=None, local_path=None, branch="main",
+    async def run(self, repo_url=None, local_path=None, source_path=None,
+                  target_url=None, branch="main",
                   generations=10, output_file=None, auto_patch=True,
-                  judge_mode=False, non_interactive=False):
+                  judge_mode=False, judge=False, non_interactive=False):
         self.start_ts = time.time()
         self.repo_url = repo_url
-        self.judge_mode = judge_mode
+        self.judge_mode = judge_mode or judge
         self.non_interactive = non_interactive
+
+        # Show premium splash banner
+        self._splash_banner()
+
+        # Normalize: source_path is an alias for local_path
+        if source_path and not local_path:
+            local_path = source_path
 
         if self.judge_mode:
             random.seed(1337)
             generations = min(generations, 4)
             auto_patch = False
+
+        # ── Direct URL scan (no source code needed) ──
+        if target_url and not local_path and not repo_url:
+            self._step("1/8", "TARGET: LIVE URL")
+            print(f"  Scanning live target: {target_url}")
+            self.source_dir = None
+
+            # Skip steps 2-3, go directly to dynamic scan
+            self._step("4/8", "DYNAMIC VULNERABILITY SCAN")
+            self.context = await self._dynamic_scan(target_url)
+
+            # Continue with remaining steps (immune system, patching, report)
+            self._step("5/8", "AI IMMUNE SYSTEM")
+            try:
+                await self._build_and_evolve(self.context, generations)
+            except Exception as e:
+                print(f"  {C.Y}[SKIP]{C.RST} Immune system requires Ollama: {str(e)[:60]}")
+
+            self._step("6/8", "VULNERABILITY REPORT")
+            duration = time.time() - self.start_ts
+            await self._print_report(duration)
+
+            if auto_patch and self.context.confirmed_vulns:
+                self._step("7/8", "PATCH GENERATION")
+                try:
+                    await self._patch_workflow()
+                except Exception as e:
+                    print(f"  {C.Y}[SKIP]{C.RST} Patch generation requires Ollama: {str(e)[:60]}")
+
+            self._step("8/8", "COMPLETE")
+            self._final_banner()
+            return
 
         # Step 1: Get source code
         self._step("1/8", "GETTING SOURCE CODE")
@@ -86,6 +167,37 @@ class CyphexEngine:
         # Step 2: Analyze code files
         self._step("2/8", "STATIC CODE ANALYSIS")
         file_vulns = self._analyze_code_files(self.source_dir)
+
+        # Augment with multi-language scanner (Semgrep + 20-language fallback)
+        try:
+            from cyphex.scanner import run_static_analysis, semgrep_available
+            tool_name = "Semgrep" if semgrep_available() else "Built-in (20 languages)"
+            print(f"  {C.DIM}Running {tool_name} scanner...{C.RST}")
+            extra_findings = run_static_analysis(self.source_dir)
+            if extra_findings:
+                seen = {(v.endpoint, v.name) for v in file_vulns}
+                added = 0
+                for ef in extra_findings:
+                    key = (f"{ef.file_path}:{ef.line_number}", f"[STATIC] {ef.name}")
+                    if key not in seen:
+                        seen.add(key)
+                        sev = ef.severity if ef.severity in ("Critical", "High", "Medium", "Low") else "Medium"
+                        file_vulns.append(Vuln(
+                            name=f"[STATIC] {ef.name}",
+                            severity=sev,
+                            endpoint=f"{ef.file_path}:{ef.line_number}",
+                            confirmed=False,
+                            cwe=ef.cwe,
+                        ))
+                        c = "red" if sev == "Critical" else "magenta" if sev == "High" else "yellow"
+                        console.print(f"  [[{c}]{sev}[/{c}]] {ef.name} ({ef.cwe})")
+                        console.print(f"       {ef.file_path}:{ef.line_number}")
+                        console.print(f"       [dim]{ef.code_snippet[:100]}[/dim]")
+                        added += 1
+                if added:
+                    print(f"  {C.G}[OK]{C.RST} {tool_name}: +{added} additional findings")
+        except ImportError:
+            pass  # cyphex package not installed
 
         # Step 3: Deploy sandbox
         self._step("3/8", "DEPLOYING SANDBOX")
@@ -156,7 +268,7 @@ class CyphexEngine:
             except Exception as exc:
                 return False, str(exc)
 
-        npm_bin = "npm.cmd" if os.name == "nt" else "npm"
+        npm_bin = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
         tool_cmds = [
             ("git", ["git", "--version"]),
             ("node", ["node", "--version"]),
@@ -199,10 +311,134 @@ class CyphexEngine:
 
     def _step(self, num, title):
         elapsed = time.time() - self.start_ts if self.start_ts else 0.0
-        mode = "JUDGE" if self.judge_mode else "INTERACTIVE"
-        console.print(f"\n[bold cyan]{'=' * 70}[/]")
-        console.print(f"  [bold white on blue] STEP {num} [/] [bold]{title}[/bold]  [dim][{mode} t={elapsed:.1f}s][/dim]")
-        console.print(f"[bold cyan]{'=' * 70}[/]\n")
+        mode = "JUDGE" if self.judge_mode else "SCAN"
+
+        # Gradient top border
+        border = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+        print(f"\n{border}")
+
+        # Step badge with pill style
+        step_num, step_total = num.split("/")
+        pill = f"{C.BG_CYAN}{C.BOLD} ◆ STEP {step_num}/{step_total} {C.RST}"
+        title_text = f"{C.CYAN}{C.BOLD}{title}{C.RST}"
+        meta = f"{C.GHOST}[{mode} t={elapsed:.1f}s]{C.RST}"
+
+        print(f"  {pill}  {title_text}  {meta}")
+
+        # Gradient bottom border
+        print(f"{border}\n")
+
+    def _splash_banner(self):
+        """Premium cyber-themed splash screen."""
+        banner = f"""
+{C.CYAN}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
+{C.CYAN}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
+{C.CYAN2}  ██║      ╚████╔╝ ██████╔╝███████║█████╗   ╚███╔╝{C.RST}
+{C.PURP2}  ██║       ╚██╔╝  ██╔═══╝ ██╔══██║██╔══╝   ██╔██╗{C.RST}
+{C.PURPLE}  ╚██████╗   ██║   ██║     ██║  ██║███████╗██╔╝ ██╗{C.RST}
+{C.PURPLE}   ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C.RST}
+"""
+        divider = C.gradient("━" * 60, 0, 255, 255, 138, 43, 226)
+        print(banner)
+        print(f"  {divider}")
+        print(f"  {C.SLATE}Multi-Agent Security Pipeline{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}v2.0{C.RST}  {C.GHOST}│{C.RST}  {C.PURP2}AI-Powered{C.RST}")
+        print(f"  {divider}")
+        print(f"  {C.GHOST}Scan ID: {C.CYAN2}{self.scan_id}{C.RST}")
+        print()
+
+        # Show tool availability summary
+        self._tool_availability_summary()
+
+    def _tool_availability_summary(self):
+        """Show what tools are available before scanning starts."""
+        is_windows = os.name == "nt"
+
+        # ── Check each tool ──
+        tools = []
+
+        # Git
+        git_ok = shutil.which("git") is not None
+        tools.append(("Git", git_ok, "git-scm.com" if not git_ok else None))
+
+        # Docker
+        docker_ok = shutil.which("docker") is not None
+        if docker_ok:
+            try:
+                r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+                docker_ok = r.returncode == 0
+                docker_hint = None if docker_ok else "Start Docker Desktop"
+            except Exception:
+                docker_ok = False
+                docker_hint = "Start Docker Desktop"
+        else:
+            docker_hint = "docker.com/products/docker-desktop"
+        tools.append(("Docker", docker_ok, docker_hint))
+
+        # Ollama
+        ollama_ok = False
+        ollama_models = []
+        try:
+            r = httpx.get("http://localhost:11434/api/tags", timeout=3.0)
+            if r.status_code == 200:
+                ollama_ok = True
+                ollama_models = [m.get("name", "") for m in r.json().get("models", [])]
+        except Exception:
+            pass
+        if not ollama_ok:
+            tools.append(("Ollama", False, "ollama.com (AI council + patching)"))
+        else:
+            model_str = f"{len(ollama_models)} model(s)" if ollama_models else "no models"
+            tools.append(("Ollama", True, model_str))
+
+        # Semgrep
+        if is_windows:
+            semgrep_ok = False
+            tools.append(("Semgrep", False, "Requires WSL on Windows (optional)"))
+        else:
+            semgrep_ok = shutil.which("semgrep") is not None
+            tools.append(("Semgrep", semgrep_ok, "pip install semgrep" if not semgrep_ok else None))
+
+        # Nuclei
+        nuclei_ok = shutil.which("nuclei") is not None
+        tools.append(("Nuclei", nuclei_ok, "run: cyphex doctor" if not nuclei_ok else None))
+
+        # ── Display ──
+        active = sum(1 for _, ok, _ in tools if ok)
+        total = len(tools)
+
+        print(f"  {C.GHOST}┌─ Tool Readiness ({active}/{total} active) ─────────────────────┐{C.RST}")
+        for name, ok, hint in tools:
+            if ok:
+                icon = f"{C.G}✓{C.RST}"
+                detail = f"{C.SLATE}{hint}{C.RST}" if hint else ""
+                print(f"  {C.GHOST}│{C.RST}  {icon} {name:12s} {detail}")
+            else:
+                icon = f"{C.Y}○{C.RST}"
+                hint_str = f"{C.DIM}({hint}){C.RST}" if hint else ""
+                print(f"  {C.GHOST}│{C.RST}  {icon} {name:12s} {hint_str}")
+        print(f"  {C.GHOST}└──────────────────────────────────────────────────┘{C.RST}")
+
+        # Show Ollama model assignments if available
+        if ollama_ok and ollama_models:
+            try:
+                import asyncio
+                from backend.council.model_selector import ModelSelector
+                s = ModelSelector()
+                # Run discovery synchronously
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We're inside async context, just show model count
+                    print(f"  {C.GHOST}  Models: {', '.join(ollama_models[:4])}{C.RST}")
+                else:
+                    asyncio.run(s.discover(quiet=True))
+                    roles = {r: s.get(r) for r in s.ROLES}
+                    unique = set(roles.values())
+                    print(f"  {C.GHOST}  AI: {', '.join(unique)} → auto-assigned to {len(s.ROLES)} roles{C.RST}")
+            except Exception:
+                if ollama_models:
+                    print(f"  {C.GHOST}  Models: {', '.join(ollama_models[:4])}{C.RST}")
+
+        print()
 
     # Step 1: Clone or copy source
     async def _get_source(self, repo_url, local_path, branch):
@@ -240,9 +476,9 @@ class CyphexEngine:
 
         # Detect framework
         fw = self._detect_framework(dest)
-        print(f"  {C.BOLD}Framework:{C.RST}  {fw['name']}")
-        print(f"  {C.BOLD}Entry:{C.RST}      {fw['entry'] or 'auto-detect'}")
-        print(f"  {C.BOLD}Files:{C.RST}      {fw['file_count']} code files")
+        print(f"  {C.GHOST}Framework{C.RST}   {C.CYAN}{fw['name']}{C.RST}")
+        print(f"  {C.GHOST}Entry{C.RST}       {C.SLATE}{fw['entry'] or 'auto-detect'}{C.RST}")
+        print(f"  {C.GHOST}Files{C.RST}       {C.SLATE}{fw['file_count']} code files{C.RST}")
         return dest
 
     def _detect_framework(self, path):
@@ -359,18 +595,116 @@ class CyphexEngine:
                                     confirmed=False,
                                 )
                                 vulns.append(v)
-                                c = "red" if severity == "Critical" else "magenta" if severity == "High" else "yellow"
-                                console.print(f"  [[{c}]{severity}[/{c}]] {vuln_type}")
-                                console.print(f"       {rel_path}:{i}")
-                                console.print(f"       [dim]{line.strip()[:100]}[/dim]")
+                                sev_icon = {"Critical": f"{C.FLAME}▲", "High": f"{C.R}●", "Medium": f"{C.Y}◆", "Low": f"{C.SLATE}○"}
+                                icon = sev_icon.get(severity, f"{C.SLATE}○")
+                                print(f"  {icon} {C.BOLD}[{severity}]{C.RST} {C.CYAN}{vuln_type}{C.RST}")
+                                print(f"       {C.SLATE}{rel_path}:{i}{C.RST}")
+                                print(f"       {C.GHOST}{line.strip()[:100]}{C.RST}")
                                 break  # One per pattern per file
 
-        console.print(f"\n  [bold]SAST: {scanned} files, {len(vulns)} issues[/bold]")
+        print(f"\n  {C.CYAN}SAST:{C.RST} {C.SLATE}{scanned} files scanned, {C.BOLD}{C.CYAN}{len(vulns)} issues{C.RST}")
         return vulns
 
     # Step 3: Deploy sandbox
     async def _deploy(self, source_dir):
         import zipfile, tempfile
+
+        # ── Priority 1: Docker Compose (full stack with DB) ──
+        compose_file = os.path.join(source_dir, "docker-compose.yml")
+        if not os.path.exists(compose_file):
+            compose_file = os.path.join(source_dir, "docker-compose.yaml")
+
+        if os.path.exists(compose_file) and shutil.which("docker"):
+            print(f"  {C.CYAN}▸ [DOCKER]{C.RST} {C.SLATE}Found docker-compose.yml — deploying full stack (app + DB)...{C.RST}")
+            try:
+                # Strip obsolete 'version' key to prevent warnings
+                self._strip_compose_version(compose_file)
+
+                # Build and start containers
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["docker", "compose", "-f", compose_file, "up", "-d", "--build"],
+                    cwd=source_dir, capture_output=True, text=True, timeout=300
+                )
+
+                if proc.returncode != 0:
+                    # Common failure: a service has no Dockerfile
+                    # Try deploying only services with valid Dockerfiles
+                    stderr_text = proc.stderr or ""
+                    if "dockerfile" in stderr_text.lower() or "no such file" in stderr_text.lower():
+                        print(f"  {C.Y}▸ [INFO]{C.RST} {C.SLATE}Some services lack Dockerfiles — deploying buildable services only...{C.RST}")
+                        # Parse compose to find services with valid build contexts
+                        buildable = self._get_buildable_services(compose_file, source_dir)
+                        if buildable:
+                            print(f"  {C.GHOST}Deploying: {C.CYAN2}{', '.join(buildable)}{C.RST}")
+                            proc = await asyncio.to_thread(
+                                subprocess.run,
+                                ["docker", "compose", "-f", compose_file, "up", "-d", "--build"] + buildable,
+                                cwd=source_dir, capture_output=True, text=True, timeout=300
+                            )
+
+                if proc.returncode == 0:
+                    # Find the exposed app port from docker-compose
+                    port = self._extract_compose_port(compose_file, source_dir)
+                    if not port:
+                        port = 3000  # Default
+
+                    # Wait for app to be ready
+                    url = f"http://localhost:{port}"
+                    print(f"  {C.GHOST}Waiting for containers to start...{C.RST}")
+                    for attempt in range(20):
+                        await asyncio.sleep(3)
+                        try:
+                            async with httpx.AsyncClient(timeout=3) as c:
+                                r = await c.get(url)
+                                if r.status_code < 500:
+                                    self.sandbox_info = {
+                                        "sandbox_id": self.scan_id,
+                                        "port": port,
+                                        "url": url,
+                                        "status": "running",
+                                        "type": "docker-compose",
+                                        "source_dir": source_dir,
+                                    }
+                                    self._docker_compose_dir = source_dir
+                                    print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker stack ready (attempt {attempt + 1}){C.RST}")
+                                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                                    print(f"  {sb}")
+                                    print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
+                                    print(f"  {C.GHOST}  Full stack: app + database + all services{C.RST}")
+                                    print(f"  {sb}")
+                                    return url
+                        except Exception:
+                            continue
+
+                    print(f"  {C.Y}[WARN]{C.RST} Docker stack started but app not responding on port {port}")
+                else:
+                    print(f"  {C.Y}[WARN]{C.RST} docker-compose failed: {proc.stderr[:150]}")
+            except subprocess.TimeoutExpired:
+                print(f"  {C.Y}[WARN]{C.RST} Docker build timed out (300s)")
+            except Exception as e:
+                print(f"  {C.Y}[WARN]{C.RST} Docker error: {str(e)[:100]}")
+
+        # ── Priority 2: Dockerfile only ──
+        elif os.path.exists(os.path.join(source_dir, "Dockerfile")) and shutil.which("docker"):
+            print(f"  {C.G}[DOCKER]{C.RST} Found Dockerfile — building container...")
+            try:
+                from cyphex.docker_sandbox import DockerSandbox
+                sandbox = DockerSandbox(source_dir)
+                result = await asyncio.to_thread(sandbox.build_and_run)
+                if result and result.get("url"):
+                    self.sandbox_info = result
+                    url = result["url"]
+                    print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{C.RST}")
+                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                    print(f"  {sb}")
+                    print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
+                    print(f"  {sb}")
+                    return url
+            except Exception as e:
+                print(f"  {C.Y}[WARN]{C.RST} Dockerfile deploy failed: {str(e)[:100]}")
+
+        # ── Priority 3: Native npm install (original method) ──
         zip_path = os.path.join(tempfile.gettempdir(), f"{self.scan_id}.zip")
 
         # Create zip from source
@@ -383,7 +717,7 @@ class CyphexEngine:
                     arcname = os.path.relpath(fp, source_dir)
                     zf.write(fp, arcname)
 
-        print(f"  Deploying sandbox...")
+        print(f"  Deploying sandbox (native)...")
         deploy_id = f"{self.scan_id}_run"
         result = await deploy_sandbox(zip_path, deploy_id)
 
@@ -451,13 +785,14 @@ class CyphexEngine:
             print(f"  {C.Y}[INFO]{C.RST} Companion API detected at {companion_api}. Directing scan to backend.")
             url = companion_api
 
-        print(f"  {C.G}[OK]{C.RST} Sandbox deployed successfully!")
-        print(f"  {C.DIM}PID: {self.sandbox_info.get('pid')}, Port: {port}{C.RST}")
-        print(f"")
-        print(f"  {C.CY}+{'-' * 62}+{C.RST}")
-        print(f"  {C.CY}|{C.RST}  {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.G}{url}{C.RST}")
-        print(f"  {C.CY}|{C.RST}  {C.DIM}Open in browser to see the target app{C.RST}")
-        print(f"  {C.CY}+{'-' * 62}+{C.RST}")
+        print(f"  {C.NEON}✓{C.RST} {C.SLATE}Sandbox deployed successfully!{C.RST}")
+        print(f"  {C.GHOST}PID: {self.sandbox_info.get('pid')}, Port: {port}{C.RST}")
+        print()
+        sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+        print(f"  {sb}")
+        print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
+        print(f"  {C.GHOST}  Open in browser to see the target app{C.RST}")
+        print(f"  {sb}")
         return url
 
     async def _detect_companion_api(self):
@@ -487,16 +822,108 @@ class CyphexEngine:
                 pass
         return None
 
+    def _extract_compose_port(self, compose_file, source_dir):
+        """Parse docker-compose.yml to find the app's exposed port."""
+        try:
+            import yaml
+        except ImportError:
+            # Fallback: regex parse for ports
+            pass
+
+        try:
+            with open(compose_file) as f:
+                content = f.read()
+
+            # Look for port mappings like "3000:3000" or "- 3000:3000"
+            import re
+            port_matches = re.findall(r'["\']?(\d{4,5}):(\d{4,5})["\']?', content)
+            if port_matches:
+                # Return the host port of the first non-DB service port
+                db_ports = {'3306', '5432', '27017', '6379', '5672'}
+                for host_port, container_port in port_matches:
+                    if container_port not in db_ports:
+                        return int(host_port)
+                # If all are DB ports, return first one anyway
+                return int(port_matches[0][0])
+        except Exception:
+            pass
+        return None
+
+    def _strip_compose_version(self, compose_file):
+        """Remove obsolete 'version' key from docker-compose.yml to prevent warnings."""
+        try:
+            with open(compose_file, 'r') as f:
+                lines = f.readlines()
+            # Remove lines that start with 'version:' (top-level only)
+            cleaned = [l for l in lines if not re.match(r'^version\s*:', l)]
+            if len(cleaned) < len(lines):
+                with open(compose_file, 'w') as f:
+                    f.writelines(cleaned)
+        except Exception:
+            pass
+
+    def _get_buildable_services(self, compose_file, source_dir):
+        """Find services that have valid Dockerfiles or use pre-built images."""
+        import re
+        try:
+            with open(compose_file) as f:
+                content = f.read()
+
+            buildable = []
+            # Parse service blocks — look for services with 'image:' or valid 'build:'
+            current_service = None
+            has_image = False
+            has_valid_build = False
+            indent_level = 0
+
+            for line in content.split("\n"):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+
+                # Detect service names (indented under 'services:')
+                match = re.match(r'^  (\w[\w-]*):', line)
+                if match and not stripped.startswith(("image:", "build:", "ports:", "environment:",
+                                                      "volumes:", "networks:", "depends_on:",
+                                                      "command:", "restart:")):
+                    # Save previous service if valid
+                    if current_service and (has_image or has_valid_build):
+                        buildable.append(current_service)
+                    current_service = match.group(1)
+                    has_image = False
+                    has_valid_build = False
+
+                if current_service:
+                    if "image:" in stripped:
+                        has_image = True
+                    if "build:" in stripped:
+                        # Check if Dockerfile exists at build context
+                        build_match = re.search(r'build:\s*(.+)', stripped)
+                        if build_match:
+                            build_ctx = build_match.group(1).strip().strip("'\"")
+                            dockerfile = os.path.join(source_dir, build_ctx, "Dockerfile")
+                            if os.path.exists(dockerfile):
+                                has_valid_build = True
+
+            # Don't forget the last service
+            if current_service and (has_image or has_valid_build):
+                buildable.append(current_service)
+
+            return buildable
+        except Exception:
+            return []
+
     # Step 4: Dynamic scan
     async def _dynamic_scan(self, target_url):
         """CLI-focused dynamic scan with explicit per-agent visibility."""
         context = ScanContext(target_url=target_url)
 
         def agent_header(agent_id: str, name: str, objective: str):
-            print(f"\n  {C.CY}{'-' * 72}{C.RST}")
-            print(f"  {C.BOLD}[{agent_id}] {name}{C.RST}")
-            print(f"  {C.DIM}{objective}{C.RST}")
-            print(f"  {C.CY}{'-' * 72}{C.RST}")
+            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
+            print(f"\n  {border}")
+            print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
+            print(f"  {C.GHOST}{objective}{C.RST}")
+            print(f"  {border}")
 
         def show_cmd(agent: str, cmd: str):
             print(f"  {C.DIM}[{agent}]$ {cmd}{C.RST}")
@@ -1001,18 +1428,48 @@ class CyphexEngine:
                 print(f"  [Recon] X-Powered-By: {powered}")
 
             if COUNCIL_AVAILABLE and context.confirmed_vulns:
-                agent_header("Council", "Multi-Model Debate", "Validating dynamic findings against false positives")
-                debater = DebateProtocol()
-                validated_vulns = []
-                for v in context.confirmed_vulns:
-                    # Only debate dynamic vulns (not static file vulns which haven't been added yet)
-                    is_valid, conf, votes = await debater.debate_finding(v.name, str(v.evidence) if v.evidence else str(v.payload))
-                    if is_valid:
-                        validated_vulns.append(v)
-                
-                discarded = len(context.confirmed_vulns) - len(validated_vulns)
-                context.confirmed_vulns = validated_vulns
-                print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} findings. {C.Y}Discarded {discarded} false positives.{C.RST}")
+                try:
+                    agent_header("Council", "Multi-Model Debate", "Validating dynamic findings against false positives")
+                    debater = DebateProtocol()
+                    original_count = len(context.confirmed_vulns)
+                    validated_vulns = await debater.debate_batch(context.confirmed_vulns)
+
+                    discarded = original_count - len(validated_vulns)
+                    context.confirmed_vulns = validated_vulns
+                    print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} findings. {C.Y}Discarded {discarded} false positives.{C.RST}")
+                except Exception as e:
+                    print(f"\n  {C.Y}[COUNCIL][SKIP]{C.RST} Ollama not available — keeping all {len(context.confirmed_vulns)} findings unvalidated")
+                    print(f"  {C.DIM}Start Ollama for AI false-positive filtering: ollama serve{C.RST}")
+
+            # ── Nuclei / ZAP DAST Integration ──
+            try:
+                from cyphex.dynamic_scanner import run_dynamic_analysis, nuclei_available, zap_available
+                if nuclei_available() or zap_available():
+                    tool_name = "Nuclei" if nuclei_available() else "OWASP ZAP"
+                    agent_header("DAST", tool_name, f"Running {tool_name} scan for additional coverage")
+                    dast_findings, tool_used = await run_dynamic_analysis(target_url)
+                    if dast_findings:
+                        # Convert DAST findings to Vuln objects and merge
+                        for df in dast_findings:
+                            # Avoid duplicates
+                            dupe = any(
+                                v.name == df.name and v.endpoint == df.url
+                                for v in context.confirmed_vulns
+                            )
+                            if not dupe:
+                                context.confirmed_vulns.append(Vuln(
+                                    name=df.name,
+                                    severity=df.severity,
+                                    endpoint=df.url,
+                                    evidence=df.evidence or df.curl_command,
+                                    cwe=df.cwe,
+                                    description=df.description,
+                                ))
+                        print(f"  {C.G}[OK]{C.RST} {tool_used}: {len(dast_findings)} findings ({len([f for f in dast_findings if f.severity in ('Critical','High')])} critical/high)")
+                    else:
+                        print(f"  {C.G}[OK]{C.RST} {tool_used}: No additional findings")
+            except ImportError:
+                pass  # cyphex package not installed — skip DAST tools
 
             print(f"\n  {C.G}[SCAN][OK]{C.RST} endpoints={len(context.all_endpoints)} forms={len(forms_found)} vulns={len(context.confirmed_vulns)}")
 
@@ -1020,11 +1477,30 @@ class CyphexEngine:
 
     async def _build_and_evolve(self, context, generations):
         genome = BehavioralGenome()
+
+        # ── Try loading existing genome for this target ──
+        target_hash = hashlib.md5(context.target_url.encode()).hexdigest()[:12]
+        genome_path = os.path.join(cyphex_config.GENOME_STORAGE_DIR, f"genome_{target_hash}")
+        if os.path.exists(genome_path + ".pkl"):
+            try:
+                genome = BehavioralGenome.load(genome_path)
+                print(f"  {C.G}[OK]{C.RST} Loaded existing genome for this target (continuing evolution)")
+            except Exception:
+                genome = BehavioralGenome()
+
         genome.build_from_scan(context)
         print(f"  {C.G}[OK]{C.RST} Genome built: {len(genome.endpoint_profiles)} endpoints")
 
         controller = EvolutionController()
+        controller.genome = genome  # Use loaded/built genome
         results = await controller.run_evolution(context, generations=generations, payloads_per_gen=30)
+
+        # ── Save genome for next scan ──
+        try:
+            controller.genome.save(genome_path)
+            print(f"  {C.G}[OK]{C.RST} Genome saved to {genome_path}")
+        except Exception as e:
+            print(f"  {C.Y}[WARN]{C.RST} Could not save genome: {e}")
 
         # ── Endpoint Map Box ──
         if context.all_endpoints:
@@ -1040,10 +1516,12 @@ class CyphexEngine:
                 f"    Trained:        YES\n"
                 f"    Profiles:       {len(genome.endpoint_profiles)}\n"
                 f"    Block History:  {len(results)} gens\n\n"
-                f"    [bold]Feature Vector (9 dims):[/bold]\n"
-                f"      [0] input_length\n      [1] entropy\n      [2] special_char_ratio\n"
-                f"      [3] url_encoding_ratio\n      [4] uppercase_ratio\n      [5] digit_ratio\n"
-                f"      [6] max_token_length\n      [7] sql_keyword_score\n      [8] sqli_pattern_score\n"
+                f"    [bold]Feature Vector (15 dims):[/bold]\n"
+                f"      [0] input_length      [1] entropy         [2] special_char_ratio\n"
+                f"      [3] url_encoding_ratio [4] uppercase_ratio [5] digit_ratio\n"
+                f"      [6] max_token_length   [7] keyword_score   [8] sqli_pattern_score\n"
+                f"      [9] null_byte         [10] traversal_depth [11] bracket_imbalance\n"
+                f"     [12] unicode_ratio     [13] repetition_ratio[14] token_count\n"
             )
             console.print(Panel(gen_lines, title="BEHAVIORAL GENOME", border_style="bright_magenta", padding=(1, 2)))
 
@@ -1118,30 +1596,67 @@ class CyphexEngine:
         low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
         total = len(vulns)
         score = max(0, 100 - crit * 25 - high * 10 - med * 5 - low)
-        c = "green" if score > 70 else "yellow" if score > 40 else "red"
+        # Diminishing returns: duplicate findings of same severity don't stack fully
+        import math
+        penalty = 0
+        if crit: penalty += 20 + 10 * math.log2(1 + crit)  # ~20 first, +10 per doubling
+        if high: penalty += 10 + 8 * math.log2(1 + high)   # ~10 first, +8 per doubling
+        if med:  penalty += 3 + 4 * math.log2(1 + med)
+        if low:  penalty += 1 + 2 * math.log2(1 + low)
+        score = max(0, min(100, round(100 - penalty)))
+
+        if score >= 80:
+            sc_rich, sc_label = "green", "SECURE"
+        elif score >= 60:
+            sc_rich, sc_label = "cyan", "FAIR"
+        elif score >= 40:
+            sc_rich, sc_label = "yellow", "AT RISK"
+        elif score >= 20:
+            sc_rich, sc_label = "red", "POOR"
+        else:
+            sc_rich, sc_label = "red bold", "CRITICAL"
+
+        # Score panel
+        bar_filled = int(score / 100 * 30)
+        bar_empty = 30 - bar_filled
+        score_bar = f"[{sc_rich}]{'█' * bar_filled}[/{sc_rich}][dim]{'░' * bar_empty}[/dim]"
 
         console.print(Panel(
-            f"[bold]CYPHEX Score: [{c}]{score}/100[/{c}][/bold]\n\n"
-            f"  [red]Critical: {crit}[/red]  |  [magenta]High: {high}[/magenta]  |  "
-            f"[yellow]Medium: {med}[/yellow]  |  [blue]Low: {low}[/blue]\n"
-            f"  Total: {total}  |  Time: {duration:.1f}s\n"
-            f"  Scan ID: {self.scan_id}",
-            title="SECURITY ASSESSMENT", border_style="cyan"
+            f"  {score_bar}  [bold {sc_rich}]{score}/100[/bold {sc_rich}]  [{sc_rich}]{sc_label}[/{sc_rich}]\n\n"
+            f"  [red]▲ Critical: {crit}[/red]  [magenta]● High: {high}[/magenta]  "
+            f"[yellow]◆ Medium: {med}[/yellow]  [dim]○ Low: {low}[/dim]  │  "
+            f"[cyan]Total: {total}[/cyan]\n"
+            f"  [dim]Duration: {duration:.1f}s  │  Scan ID: {self.scan_id}[/dim]",
+            title="[bold cyan]◈ SECURITY ASSESSMENT ◈[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2)
         ))
 
         if vulns:
-            table = Table(title=f"Confirmed Vulnerabilities ({total})", box=ROUNDED)
-            table.add_column("#", justify="right", width=3)
-            table.add_column("Sev", justify="center", width=8)
-            table.add_column("Name", max_width=35)
-            table.add_column("CWE", width=8)
-            table.add_column("Endpoint", max_width=42)
-            
+            table = Table(
+                title=f"[bold]Confirmed Vulnerabilities ({total})[/bold]",
+                box=ROUNDED,
+                border_style="cyan",
+                title_style="bold cyan",
+                header_style="bold magenta",
+                row_styles=["", "dim"],
+            )
+            table.add_column("#", justify="right", width=3, style="dim")
+            table.add_column("Sev", justify="center", width=10)
+            table.add_column("Vulnerability", max_width=35, style="cyan")
+            table.add_column("CWE", width=10, style="dim cyan")
+            table.add_column("Location", max_width=42, style="dim")
+
+            sev_icons = {
+                "Critical": "[bold red]▲ Critical[/bold red]",
+                "High": "[magenta]● High[/magenta]",
+                "Medium": "[yellow]◆ Medium[/yellow]",
+                "Low": "[dim]○ Low[/dim]",
+            }
+
             for i, v in enumerate(vulns, 1):
-                sc = {"Critical": "red", "High": "magenta", "Medium": "yellow", "Low": "blue"}.get(v.severity, "white")
-                vuln_type = v.name.replace("[STATIC] ", "").replace("[DYNAMIC] ", "")[:35]
+                vuln_type = v.name.replace("[STATIC] ", "⚡ ").replace("[DYNAMIC] ", "⚔ ")[:35]
                 endpoint = (v.endpoint or "")[:42]
-                # Fallback CWE logic if not mapped
                 cwe = getattr(v, "cwe", "CWE-???") if getattr(v, "cwe", None) else "CWE-???"
                 if cwe == "CWE-???":
                     if "SQL" in vuln_type: cwe = "CWE-89"
@@ -1151,33 +1666,37 @@ class CyphexEngine:
                     elif "SSRF" in vuln_type: cwe = "CWE-918"
                     elif "JWT" in vuln_type: cwe = "CWE-287"
                     elif "Data Exposure" in vuln_type: cwe = "CWE-200"
-                
-                table.add_row(str(i), f"[{sc}]{v.severity}[/{sc}]", vuln_type, cwe, endpoint)
+
+                sev_display = sev_icons.get(v.severity, f"[dim]{v.severity}[/dim]")
+                table.add_row(str(i), sev_display, vuln_type, cwe, endpoint)
             console.print(table)
 
         if COUNCIL_AVAILABLE and vulns:
-            analyzer = AnalysisCouncil()
-            # Convert to simple dicts for the prompt
-            vuln_dicts = [{"name": v.name, "severity": v.severity, "endpoint": v.endpoint, "evidence": str(v.evidence)} for v in vulns]
-            analysis_data = await analyzer.analyse_findings(vuln_dicts)
-            
-            if analysis_data:
-                console.print("\n[bold]Council Security Analysis[/bold]")
-                for item in analysis_data:
-                    validated = item.pop("_validated", True)
-                    v_color = "green" if validated else "yellow"
-                    console.print(Panel(
-                        f"[bold red]Business Impact:[/bold red] {item.get('business_impact', 'N/A')}\n"
-                        f"[bold yellow]Attack Scenario:[/bold yellow] {item.get('attack_scenario', 'N/A')}\n"
-                        f"[bold cyan]Root Cause:[/bold cyan] {item.get('root_cause', 'N/A')}\n"
-                        f"\n[{v_color}]✓ Fact-checked by Phi-3: {validated}[/{v_color}]",
-                        title=f"{item.get('vuln_name', 'Vulnerability')} ({item.get('cwe', '')})",
-                        border_style="magenta"
-                    ))
+            try:
+                analyzer = AnalysisCouncil()
+                vuln_dicts = [{"name": v.name, "severity": v.severity, "endpoint": v.endpoint, "evidence": str(v.evidence)} for v in vulns]
+                analysis_data = await analyzer.analyse_findings(vuln_dicts)
+
+                if analysis_data:
+                    print(f"\n  {C.PURP2}{C.BOLD}◈ Council Security Analysis{C.RST}")
+                    for item in analysis_data:
+                        validated = item.pop("_validated", True)
+                        v_style = "green" if validated else "yellow"
+                        console.print(Panel(
+                            f"[bold red]Business Impact:[/bold red] {item.get('business_impact', 'N/A')}\n"
+                            f"[bold yellow]Attack Scenario:[/bold yellow] {item.get('attack_scenario', 'N/A')}\n"
+                            f"[bold cyan]Root Cause:[/bold cyan] {item.get('root_cause', 'N/A')}\n"
+                            f"\n[{v_style}]✓ Validated by AI Council: {validated}[/{v_style}]",
+                            title=f"[bold]{item.get('vuln_name', 'Vulnerability')}[/bold] [dim]({item.get('cwe', '')})[/dim]",
+                            border_style="magenta",
+                            padding=(0, 2)
+                        ))
+            except Exception:
+                print(f"  {C.Y}⚠{C.RST} {C.GHOST}Council analysis skipped — start Ollama: {C.CYAN}ollama serve{C.RST}")
 
         return {
             "scan_id": self.scan_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "score": score,
             "summary": {
                 "critical": crit,
@@ -1459,7 +1978,13 @@ class CyphexEngine:
 
     async def _get_llm_fix_package(self, vuln, code_snippet, filepath) -> Optional[dict[str, str]]:
         """Try Ollama (local LLM) first, then fall back to built-in rule-based patches."""
-        model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+        # Dynamically select best patcher model
+        try:
+            from backend.council.model_selector import get_selector
+            selector = await get_selector(quiet=True)
+            model_name = os.getenv("OLLAMA_MODEL", selector.get("patcher"))
+        except Exception:
+            model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
         prompt = (
             "You are a Senior Cyber Security Engineer and Secure Code Expert. "
             "Your task is to analyze the following vulnerability, think step-by-step about the root cause and how to fix it, "
@@ -1489,7 +2014,7 @@ class CyphexEngine:
                         raw = ""
                         thinking_text = ""
                         from rich.live import Live
-                        with Live(Panel("Initializing AI Analysis...", title="Qwen Coder Thinking", style="dim italic"), refresh_per_second=10) as live:
+                        with Live(Panel("Initializing AI Analysis...", title=f"{model_name} Thinking", style="dim italic"), refresh_per_second=10) as live:
                             async for chunk in resp.aiter_lines():
                                 if not chunk: continue
                                 try:
@@ -1498,9 +2023,9 @@ class CyphexEngine:
                                     raw += token
                                     if "<thinking>" in raw and "</thinking>" not in raw:
                                         thinking_text = raw.split("<thinking>")[-1]
-                                        live.update(Panel(thinking_text, title="Qwen Coder Thinking", style="dim italic", box=ROUNDED))
+                                        live.update(Panel(thinking_text, title=f"{model_name} Thinking", style="dim italic", box=ROUNDED))
                                     elif "</thinking>" in raw and thinking_text != "Done":
-                                        live.update(Panel(thinking_text + "\n\n[bold green]✓ Analysis Complete[/bold green]", title="Qwen Coder Thinking", style="dim italic", box=ROUNDED))
+                                        live.update(Panel(thinking_text + "\n\n[bold green]✓ Analysis Complete[/bold green]", title=f"{model_name} Thinking", style="dim italic", box=ROUNDED))
                                         thinking_text = "Done"
                                 except json.JSONDecodeError:
                                     pass
@@ -1672,16 +2197,73 @@ class CyphexEngine:
             print(f"  {C.R}[ERR]{C.RST} Push failed: {e}")
 
     def _final_banner(self):
+        # Cleanup Docker Compose if used
+        if hasattr(self, '_docker_compose_dir') and self._docker_compose_dir:
+            try:
+                subprocess.run(
+                    ["docker", "compose", "down", "--remove-orphans"],
+                    cwd=self._docker_compose_dir,
+                    capture_output=True, timeout=30
+                )
+            except Exception:
+                pass
+
         elapsed = time.time() - self.start_ts
         vulns = self.context.confirmed_vulns if self.context else []
         crit = sum(1 for v in vulns if v.severity == "Critical")
         high = sum(1 for v in vulns if v.severity == "High")
+        med = sum(1 for v in vulns if v.severity == "Medium")
+        low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
         total = len(vulns)
-        score = max(0, 100 - crit * 25 - high * 10)
-        sc = C.G if score >= 80 else C.Y if score >= 50 else C.R
+        score = max(0, 100 - crit * 25 - high * 10 - med * 5 - low)
+        # Diminishing returns: duplicate findings of same severity don't stack fully
+        import math
+        penalty = 0
+        if crit: penalty += 20 + 10 * math.log2(1 + crit)  # ~20 first, +10 per doubling
+        if high: penalty += 10 + 8 * math.log2(1 + high)   # ~10 first, +8 per doubling
+        if med:  penalty += 3 + 4 * math.log2(1 + med)
+        if low:  penalty += 1 + 2 * math.log2(1 + low)
+        score = max(0, min(100, round(100 - penalty)))
 
-        print(f"\n{C.CY}{'\u2550' * 72}{C.RST}")
-        print(f"  {C.G}\u2713 CYPHEX SCAN COMPLETE{C.RST}  {C.DIM}|  {elapsed:.1f}s  |  {total} vulnerabilities  |  Score: {sc}{score}/100{C.RST}")
-        print(f"  {C.DIM}All 8 phases finished. Sandbox cleaned up.{C.RST}")
-        print(f"  {C.DIM}Agents deployed: Crawler, XSS, SQLi, Auth, LFI, CMDi, CORS, IDOR, SSRF, SDE, JWT, Supply Chain, API Discovery{C.RST}")
-        print(f"{C.CY}{'\u2550' * 72}{C.RST}\n")
+        # Score color
+        if score >= 80:
+            sc, sc_label = C.NEON, "SECURE"
+        elif score >= 60:
+            sc, sc_label = C.CYAN, "FAIR"
+        elif score >= 40:
+            sc, sc_label = C.Y, "AT RISK"
+        elif score >= 20:
+            sc, sc_label = C.R, "POOR"
+        else:
+            sc, sc_label = C.FLAME, "CRITICAL"
+
+        border = C.gradient("━" * 72, 138, 43, 226, 0, 255, 255)
+        border2 = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+
+        print(f"\n{border}")
+        print(f"  {C.NEON}✓{C.RST} {C.BOLD}{C.CYAN}CYPHEX SCAN COMPLETE{C.RST}")
+        print(f"{border2}\n")
+
+        # Score display
+        bar_filled = int(score / 100 * 20)
+        bar_empty = 20 - bar_filled
+        score_bar = f"{sc}{'█' * bar_filled}{C.GHOST}{'░' * bar_empty}{C.RST}"
+        print(f"  {C.SLATE}Security Score{C.RST}   {score_bar}  {sc}{C.BOLD}{score}/100{C.RST}  {sc}{sc_label}{C.RST}")
+        print()
+
+        # Severity breakdown
+        if total > 0:
+            print(f"  {C.FLAME}● Critical: {crit}{C.RST}  {C.R}● High: {high}{C.RST}  {C.Y}● Medium: {med}{C.RST}  {C.SLATE}● Low: {low}{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}Total: {total}{C.RST}")
+        else:
+            print(f"  {C.NEON}● No vulnerabilities found{C.RST}")
+        print()
+
+        # Metadata
+        print(f"  {C.GHOST}Duration    {C.SLATE}{elapsed:.1f}s{C.RST}")
+        print(f"  {C.GHOST}Scan ID     {C.CYAN2}{self.scan_id}{C.RST}")
+        print(f"  {C.GHOST}Agents      {C.SLATE}13 deployed (Crawler, XSS, SQLi, Auth, LFI, CMDi, CORS, IDOR, SSRF, SDE, JWT, SupplyChain, API){C.RST}")
+        print(f"  {C.GHOST}Tools       {C.SLATE}Semgrep + Nuclei + Built-in Scanner + Immune System{C.RST}")
+
+        print(f"\n{border}")
+        print(f"  {C.PURP2}cyphex{C.RST} {C.GHOST}— Multi-Agent Security Pipeline v2.0{C.RST}")
+        print(f"{border2}\n")

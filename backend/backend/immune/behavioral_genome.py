@@ -14,6 +14,7 @@ Dependencies: scikit-learn, numpy (both CPU-only, work on Pi 5)
 import math
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime
 from typing import Optional
@@ -95,21 +96,27 @@ class BehavioralGenome:
 
     def extract_features(self, text: str) -> np.ndarray:
         """
-        Extract 9-dimensional feature vector from an input string.
+        Extract 15-dimensional feature vector from an input string.
 
         Features:
-        1. input_length
-        2. entropy (Shannon entropy)
-        3. special_char_ratio (non-alphanumeric %)
-        4. url_encoding_ratio (% of %XX sequences)
-        5. uppercase_ratio
-        6. digit_ratio
-        7. max_token_length (longest "word")
-        8. sql_keyword_score (presence of SQL/JS keywords)
-        9. sqli_pattern_score (regex pattern matching for injection syntax)
+         1. input_length
+         2. entropy (Shannon entropy)
+         3. special_char_ratio (non-alphanumeric %)
+         4. url_encoding_ratio (% of %XX sequences)
+         5. uppercase_ratio
+         6. digit_ratio
+         7. max_token_length (longest "word")
+         8. sql_keyword_score (presence of SQL/JS keywords)
+         9. sqli_pattern_score (regex pattern matching for injection syntax)
+        10. null_byte_present (\x00 or %00)
+        11. path_traversal_depth (count of ../ sequences)
+        12. bracket_imbalance (unmatched {, [, (, <)
+        13. unicode_ratio (non-ASCII character %)
+        14. repetition_ratio (most repeated char / length)
+        15. token_count (number of tokens)
         """
         if not text:
-            return np.zeros(9)
+            return np.zeros(15)
 
         length = len(text)
         entropy = self._shannon_entropy(text)
@@ -119,9 +126,8 @@ class BehavioralGenome:
         special_ratio = special / max(length, 1)
 
         # URL encoding ratio
-        import re
         url_encoded = len(re.findall(r'%[0-9A-Fa-f]{2}', text))
-        url_ratio = url_encoded * 3 / max(length, 1)  # Each %XX is 3 chars
+        url_ratio = url_encoded * 3 / max(length, 1)
 
         # Uppercase ratio
         upper = sum(1 for c in text if c.isupper())
@@ -133,9 +139,10 @@ class BehavioralGenome:
 
         # Max token length
         tokens = re.split(r'[\s+\-=&?/]', text)
-        max_token = max((len(t) for t in tokens if t), default=0)
+        non_empty_tokens = [t for t in tokens if t]
+        max_token = max((len(t) for t in non_empty_tokens), default=0)
 
-        # SQL/JS keyword score (expanded list)
+        # SQL/JS keyword score
         keywords = [
             'select', 'union', 'insert', 'update', 'delete', 'drop', 'exec',
             'script', 'alert', 'onerror', 'onload', 'eval', 'document',
@@ -147,28 +154,53 @@ class BehavioralGenome:
         ]
         text_lower = text.lower()
         keyword_hits = sum(1 for kw in keywords if kw in text_lower)
-        keyword_score = min(keyword_hits / 2.0, 1.0)  # More aggressive: /2 instead of /3
+        keyword_score = min(keyword_hits / 2.0, 1.0)
 
-        # SQLi/XSS pattern matching (regex-based, catches structural attacks)
+        # SQLi/XSS pattern matching
         sqli_patterns = [
-            r"'\s*(or|and)\s+.*[=<>]",      # ' OR 1=1, ' AND 1=1
-            r"'\s*;\s*(drop|delete|insert|update)",  # '; DROP TABLE
-            r"\d+\s*=\s*\d+",               # 1=1, 2=2 (tautology)
-            r"'\s*=\s*'",                   # ''=''
-            r"union\s+(all\s+)?select",      # UNION SELECT
-            r"order\s+by\s+\d+",            # ORDER BY 10
-            r"(;|\|\||&&)\s*(ls|cat|dir|whoami|id|ping|curl|wget)",  # CMDi
-            r"<\s*script[^>]*>",             # <script>
-            r"<\s*\w+[^>]+on\w+\s*=",        # <tag onerror=, <img onload=
-            r"<\s*(img|svg|body|iframe|input|details|marquee|object)",  # HTML injection tags
-            r"javascript\s*:",               # javascript: URI
-            r"\$\(|`[^`]+`",                # $(cmd) or `cmd` (shell)
+            r"'\s*(or|and)\s+.*[=<>]",
+            r"'\s*;\s*(drop|delete|insert|update)",
+            r"\d+\s*=\s*\d+",
+            r"'\s*=\s*'",
+            r"union\s+(all\s+)?select",
+            r"order\s+by\s+\d+",
+            r"(;|\|\||&&)\s*(ls|cat|dir|whoami|id|ping|curl|wget)",
+            r"<\s*script[^>]*>",
+            r"<\s*\w+[^>]+on\w+\s*=",
+            r"<\s*(img|svg|body|iframe|input|details|marquee|object)",
+            r"javascript\s*:",
+            r"\$\(|`[^`]+`",
         ]
-        pattern_hits = sum(
-            1 for p in sqli_patterns
-            if re.search(p, text_lower)
-        )
+        pattern_hits = sum(1 for p in sqli_patterns if re.search(p, text_lower))
         sqli_pattern_score = min(pattern_hits / 2.0, 1.0)
+
+        # ── New features (10-15) ──
+
+        # 10. Null byte detection
+        null_byte = 1.0 if ('\x00' in text or '%00' in text_lower) else 0.0
+
+        # 11. Path traversal depth
+        traversal_count = len(re.findall(r'\.\.\/|\.\.\.\\', text))
+        traversal_depth = min(traversal_count / 3.0, 1.0)
+
+        # 12. Bracket imbalance (unmatched delimiters = likely injection)
+        openers = sum(1 for c in text if c in '{[(<')
+        closers = sum(1 for c in text if c in '}])>')
+        bracket_imbalance = abs(openers - closers) / max(openers + closers, 1)
+
+        # 13. Unicode ratio (non-ASCII chars — evasion technique)
+        non_ascii = sum(1 for c in text if ord(c) > 127)
+        unicode_ratio = non_ascii / max(length, 1)
+
+        # 14. Repetition ratio (most-repeated char / length — DoS padding)
+        if text:
+            freq = Counter(text)
+            repetition_ratio = freq.most_common(1)[0][1] / length
+        else:
+            repetition_ratio = 0.0
+
+        # 15. Token count
+        token_count = len(non_empty_tokens) / max(length / 5.0, 1.0)
 
         return np.array([
             length,
@@ -180,6 +212,12 @@ class BehavioralGenome:
             max_token,
             keyword_score,
             sqli_pattern_score,
+            null_byte,
+            traversal_depth,
+            bracket_imbalance,
+            unicode_ratio,
+            repetition_ratio,
+            token_count,
         ])
 
     def score_request(self, endpoint: str, payload: str) -> float:
@@ -316,31 +354,106 @@ class BehavioralGenome:
             sample_count=100,
         )
 
+    # ── Realistic input generators for training data ──
+    _REALISTIC_NAMES = [
+        "john_doe", "alice.smith", "bob_jones", "María García", "O'Brien",
+        "jean-claude", "user2024", "admin_test", "sarah.connor", "mike_t",
+        "李明", "Hans Müller", "François", "nakamura_yuki", "dev.user",
+    ]
+    _REALISTIC_EMAILS = [
+        "john@example.com", "alice.smith@company.co", "user+tag@gmail.com",
+        "admin@localhost", "support@web-app.io", "test.user@domain.org",
+        "name@sub.domain.com", "hello@company.co.uk", "user@192.168.1.1",
+    ]
+    _REALISTIC_SEARCHES = [
+        "laptop 16gb ram", "how to reset password", "O'Brien report 2024",
+        "best price < $500", "shoes size 10.5", "café near me",
+        "node.js tutorial", "error: connection refused", "meeting 3pm",
+        "annual report Q3", "blue dress size M", "python3 --version",
+        "flight LAX → JFK", "résumé template", "2024-01-15 log",
+    ]
+    _REALISTIC_PASSWORDS = [
+        "P@ssw0rd!2024", "MyS3cur3#Pass", "hunter2", "correct-horse-battery",
+        "X9#kL2$mN", "Summer2024!", "qwerty123", "iloveyou",
+    ]
+    _REALISTIC_PATHS = [
+        "/home/user/docs/report.pdf", "C:\\Users\\admin\\file.txt",
+        "./src/index.js", "../config/settings.json", "/var/log/app.log",
+        "uploads/avatar.png", "static/css/style.css",
+    ]
+
     def _generate_normal_samples(
         self, profile: EndpointProfile, n: int = 100, seed: int = 42
     ) -> list[np.ndarray]:
         """
         Generate synthetic "normal" traffic samples for an endpoint.
-        These represent typical user inputs (search queries, form data, etc.)
-        Uses different seeds each time for diversity.
+        Uses REALISTIC input patterns based on field names to produce
+        training data that resembles actual user traffic.
         """
         samples = []
         rng = np.random.default_rng(seed)
 
+        # Infer field type from field names in the profile
+        field_types = []
+        for field_name in (profile.input_fields or ["generic"]):
+            fn = field_name.lower()
+            if any(k in fn for k in ["email", "mail"]):
+                field_types.append("email")
+            elif any(k in fn for k in ["user", "name", "login", "author"]):
+                field_types.append("username")
+            elif any(k in fn for k in ["pass", "pwd", "secret", "token"]):
+                field_types.append("password")
+            elif any(k in fn for k in ["search", "q", "query", "keyword", "term"]):
+                field_types.append("search")
+            elif any(k in fn for k in ["id", "uid", "pid", "num", "page", "limit"]):
+                field_types.append("id")
+            elif any(k in fn for k in ["file", "path", "dir", "url", "href", "src"]):
+                field_types.append("path")
+            else:
+                field_types.append("generic")
+
+        if not field_types:
+            field_types = ["generic"]
+
         for _ in range(n):
-            # Simulate normal input with varied patterns
-            length = max(1, int(rng.normal(profile.input_length_mean, profile.input_length_std)))
-            chars = 'abcdefghijklmnopqrstuvwxyz0123456789 '
-            text = ''.join(rng.choice(list(chars)) for _ in range(length))
+            field_type = rng.choice(field_types)
+            text = self._generate_realistic_input(field_type, rng)
             features = self.extract_features(text)
             samples.append(features)
 
         return samples
 
+    def _generate_realistic_input(self, field_type: str, rng) -> str:
+        """Generate a realistic input string for a given field type."""
+        if field_type == "email":
+            return str(rng.choice(self._REALISTIC_EMAILS))
+        elif field_type == "username":
+            return str(rng.choice(self._REALISTIC_NAMES))
+        elif field_type == "password":
+            return str(rng.choice(self._REALISTIC_PASSWORDS))
+        elif field_type == "search":
+            return str(rng.choice(self._REALISTIC_SEARCHES))
+        elif field_type == "id":
+            return str(rng.integers(1, 10000))
+        elif field_type == "path":
+            return str(rng.choice(self._REALISTIC_PATHS))
+        else:
+            # Generic: mix of realistic patterns
+            generators = [
+                lambda: str(rng.choice(self._REALISTIC_NAMES)),
+                lambda: str(rng.choice(self._REALISTIC_SEARCHES)),
+                lambda: str(rng.integers(1, 99999)),
+                lambda: str(rng.choice(self._REALISTIC_EMAILS)),
+                lambda: f"page {rng.integers(1, 50)} results",
+                lambda: f"{rng.integers(2020, 2026)}-{rng.integers(1,13):02d}-{rng.integers(1,29):02d}",
+            ]
+            return rng.choice(generators)()
+
     def _heuristic_score(self, features: np.ndarray) -> float:
         """
         Heuristic scoring based on feature thresholds.
         Catches attacks that Isolation Forest may miss.
+        Uses all 15 features for comprehensive detection.
         """
         score = 0.0
 
@@ -349,7 +462,11 @@ class BehavioralGenome:
         special_ratio = features[2]
         url_ratio = features[3]
         keyword_score = features[7]
-        sqli_pattern = features[8] if len(features) > 8 else 0.0
+        sqli_pattern = features[8]
+        null_byte = features[9] if len(features) > 9 else 0.0
+        traversal_depth = features[10] if len(features) > 10 else 0.0
+        bracket_imbalance = features[11] if len(features) > 11 else 0.0
+        unicode_ratio = features[12] if len(features) > 12 else 0.0
 
         # Very long inputs are suspicious
         if length > 100:
@@ -380,11 +497,28 @@ class BehavioralGenome:
             score += 0.2
 
         # SQLi/XSS PATTERN match (strongest signal!)
-        # Even one regex pattern hit = almost certainly an attack
         if sqli_pattern > 0.0:
             score += 0.5
         if sqli_pattern > 0.5:
             score += 0.3
+
+        # ── New feature-based heuristics ──
+
+        # Null byte = almost always an attack
+        if null_byte > 0.0:
+            score += 0.7
+
+        # Path traversal
+        if traversal_depth > 0.0:
+            score += 0.5
+
+        # Bracket imbalance = injection syntax
+        if bracket_imbalance > 0.5:
+            score += 0.2
+
+        # High unicode ratio with other signals = evasion
+        if unicode_ratio > 0.3 and keyword_score > 0.1:
+            score += 0.2
 
         return min(score, 1.0)
 

@@ -165,7 +165,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         if os.path.exists(stale_lock):
             os.remove(stale_lock)
 
-        npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+        npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
         install_result = await _run_cmd(
             f"{npm_cmd} install --no-audit --no-fund",
             cwd=sandbox_dir,
@@ -202,7 +202,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     env = _NODE_ENV.copy()
     env["PORT"] = str(port)
 
-    npm_cmd = "npm.cmd" if os.name == "nt" else "npm"
+    npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
     if app_file == "__NPM_RUN_START_DEV__":
         cmd = f"{npm_cmd} run start:dev"
     elif app_file == "__NPM_RUN_DEV__":

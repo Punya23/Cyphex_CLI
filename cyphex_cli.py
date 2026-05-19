@@ -110,7 +110,7 @@ def main():
         REQUIRED_MODELS = [
             ("deepseek-coder:1.3b",  "Detector",    "always-on",   1.0),
             ("phi3:mini",             "Validator",   "always-on",   2.2),
-            ("llama3.2:3b",           "Narrator",    "phase-swap",  2.0),
+            ("llama3.2:1b",           "Narrator",    "phase-swap",  1.0),
             ("cyphex-patch",          "Patch Agent", "patch-only",  4.5),
         ]
 

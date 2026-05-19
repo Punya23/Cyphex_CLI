@@ -1,6 +1,7 @@
 import json
 from rich.console import Console
 from backend.council.council_orchestrator import CouncilOrchestrator
+from backend.council.model_selector import get_selector
 
 console = Console()
 
@@ -30,24 +31,41 @@ List any sentences that make claims not in the evidence.
 class AnalysisCouncil(CouncilOrchestrator):
     async def analyse_findings(self, confirmed_vulns: list[dict]) -> list[dict]:
         """
-        Llama 3.2 writes the analysis. Phi-3 validates the reasoning.
-        Returns the analysis only if Phi-3 finds no unsupported claims.
+        Dynamically selects the best available models:
+          - Narrator (largest general model) writes the analysis
+          - Validator (second-best model) cross-checks claims
+        Returns the analysis only if validation finds no unsupported claims.
         """
         if not confirmed_vulns:
             return []
 
         console.print("\n[bold blue]Analysis Council:[/bold blue] Drafting Security Report...")
 
+        # Dynamically discover best models for each role
+        selector = await get_selector(quiet=True)
+        self.vram.update_costs(selector.get_vram_costs())
+
+        narrator_model = selector.get("narrator")
+        validator_model = selector.get("validator")
+
+        console.print(f"[dim]  Narrator:  {narrator_model}[/dim]")
+        console.print(f"[dim]  Validator: {validator_model}[/dim]")
+
+        # Unload previous models to free VRAM for narrator
         for m in list(self.vram.loaded.keys()):
             await self.vram.unload(m)
 
         try:
-            await self.vram.ensure_loaded("llama3.2:3b")
-            model = "llama3.2:3b"
+            await self.vram.ensure_loaded(narrator_model)
         except Exception:
-            console.print("[yellow]⚠ Llama 3.2 not found. Falling back to phi3:mini for Narrator role.[/yellow]")
-            await self.vram.ensure_loaded("phi3:mini")
-            model = "phi3:mini"
+            # Fallback to any available model
+            if selector.models:
+                narrator_model = selector.models[0].name
+                console.print(f"[yellow]⚠ Narrator failed. Using {narrator_model}.[/yellow]")
+                await self.vram.ensure_loaded(narrator_model)
+            else:
+                console.print("[red]⚠ No models available for report generation.[/red]")
+                return []
 
         # Create a clean version of the dicts to send to model to save tokens
         clean_vulns = []
@@ -65,7 +83,7 @@ class AnalysisCouncil(CouncilOrchestrator):
         )
 
         try:
-            analysis = await self._call(model, ANALYSIS_SYSTEM, analysis_prompt, task_name="Report Generation")
+            analysis = await self._call(narrator_model, ANALYSIS_SYSTEM, analysis_prompt, task_name="Report Generation")
             if not isinstance(analysis, list):
                 if "analysis" in analysis:
                     analysis = analysis["analysis"]
@@ -77,10 +95,13 @@ class AnalysisCouncil(CouncilOrchestrator):
             console.print(f"[red]Failed to generate analysis: {e}[/red]")
             return []
 
-        console.print("[dim]Report Drafted. Phi-3 validating claims...[/dim]")
+        console.print(f"[dim]Report Drafted. {validator_model} validating claims...[/dim]")
 
-        # Phi-3 validates: are any claims unsupported by the evidence?
-        await self.vram.ensure_loaded("phi3:mini")
+        # Validator cross-checks: are any claims unsupported by the evidence?
+        try:
+            await self.vram.ensure_loaded(validator_model)
+        except Exception:
+            validator_model = narrator_model  # fallback to same model
 
         validation_prompt = (
             f"Evidence:\n{json.dumps(clean_vulns, indent=2)}\n\n"
@@ -88,19 +109,19 @@ class AnalysisCouncil(CouncilOrchestrator):
         )
 
         try:
-            validation = await self._call("phi3:mini", ANALYSIS_VALIDATION_SYSTEM, validation_prompt, task_name="Report Validation")
+            validation = await self._call(validator_model, ANALYSIS_VALIDATION_SYSTEM, validation_prompt, task_name="Report Validation")
         except Exception as e:
             console.print(f"[red]Validation failed: {e}[/red]")
             validation = {"valid": True}  # fallback
 
         if not validation.get("valid", False):
             unsupported = validation.get("unsupported_claims", [])
-            console.print(f"[yellow]⚠ Phi-3 flagged {len(unsupported)} unsupported claims in the report.[/yellow]")
+            console.print(f"[yellow]⚠ {validator_model} flagged {len(unsupported)} unsupported claims in the report.[/yellow]")
             for item in analysis:
                 item["_validated"] = False
                 item["_unsupported_claims"] = unsupported
         else:
-            console.print("[green]✓ Phi-3 validated all claims in the report.[/green]")
+            console.print(f"[green]✓ {validator_model} validated all claims in the report.[/green]")
             for item in analysis:
                 item["_validated"] = True
 

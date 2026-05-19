@@ -3,6 +3,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from backend.council.council_orchestrator import CouncilOrchestrator
+from backend.council.model_selector import get_selector
 
 console = Console()
 
@@ -39,22 +40,40 @@ class PatchCouncil(CouncilOrchestrator):
         file_path: str
     ) -> dict:
         """
+        Dynamically selects models:
+          - Patcher: best coding model (generates the fix)
+          - Reviewers: 2 distinct models (validate the fix)
+
         Returns patch result dict with keys:
           fixed_code, unsafe_reason, patch_safety, approvals, dissent_reasons
         """
         console.print(f"\n[bold magenta]Patching Vulnerability:[/bold magenta] {vuln_name}")
 
-        # Stage 1: Unload everything, load Qwen-7B alone
+        # Dynamically discover best models
+        selector = await get_selector(quiet=True)
+        self.vram.update_costs(selector.get_vram_costs())
+
+        patch_model = selector.get("patcher")
+        reviewer_models = selector.get_validators(count=2)
+
+        console.print(f"[dim]  Patcher:   {patch_model}[/dim]")
+        console.print(f"[dim]  Reviewers: {', '.join(reviewer_models)}[/dim]")
+
+        # Stage 1: Unload everything, load patcher
         for model in list(self.vram.loaded.keys()):
             await self.vram.unload(model)
-        
+
         try:
-            await self.vram.ensure_loaded("cyphex-patch")
-            patch_model = "cyphex-patch"
+            await self.vram.ensure_loaded(patch_model)
         except Exception:
-            console.print("[yellow]⚠ Fine-tuned 'cyphex-patch' not found. Falling back to base 'qwen2.5-coder:7b'[/yellow]")
-            await self.vram.ensure_loaded("qwen2.5-coder:7b")
-            patch_model = "qwen2.5-coder:7b"
+            # Fallback to any available model
+            if selector.models:
+                patch_model = selector.models[0].name
+                console.print(f"[yellow]⚠ Patcher failed. Using {patch_model}.[/yellow]")
+                await self.vram.ensure_loaded(patch_model)
+            else:
+                return {"fixed_code": "", "patch_safety": "rejected",
+                        "unsafe_reason": "No models available", "dissent_reasons": ["No Ollama models"]}
 
         patch_prompt = (
             f"Vulnerability: {vuln_name} ({cwe})\n"
@@ -63,7 +82,7 @@ class PatchCouncil(CouncilOrchestrator):
             f"Generate the fixed version of this code."
         )
 
-        console.print("[dim]Stage 1: Qwen-Coder Generating Patch...[/dim]")
+        console.print(f"[dim]Stage 1: {patch_model} Generating Patch...[/dim]")
         try:
             patch_result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, patch_prompt, task_name="Patch Generation")
         except Exception as e:
@@ -71,16 +90,14 @@ class PatchCouncil(CouncilOrchestrator):
             return {"fixed_code": "", "patch_safety": "rejected", "unsafe_reason": "Error", "dissent_reasons": ["Generation failed"]}
 
         fixed_code = patch_result.get("fixed_code", "")
-        
-        # Display the generated code
-        lang = "javascript" if file_path.endswith(".js") or file_path.endswith(".jsx") else "python" if file_path.endswith(".py") else "php" if file_path.endswith(".php") else "python"
-        console.print(Panel(Syntax(fixed_code, lang, theme="monokai", line_numbers=True), title="[cyphex-patch] Generated Fix", border_style="green"))
 
-        # Stage 2: Unload Qwen, reload validators
-        console.print("[dim]Stage 2 & 3: Deepseek and Phi-3 Validating Patch...[/dim]")
-        await self.vram.unload("cyphex-patch")
-        await self.vram.ensure_loaded("deepseek-coder:1.3b")
-        await self.vram.ensure_loaded("phi3:mini")
+        # Display the generated code
+        lang = "javascript" if file_path.endswith((".js", ".jsx")) else "python" if file_path.endswith(".py") else "php" if file_path.endswith(".php") else "python"
+        console.print(Panel(Syntax(fixed_code, lang, theme="monokai", line_numbers=True), title=f"[{patch_model}] Generated Fix", border_style="green"))
+
+        # Stage 2: Unload patcher, reload reviewers
+        console.print(f"[dim]Stage 2: {' & '.join(reviewer_models)} Validating Patch...[/dim]")
+        await self.vram.unload(patch_model)
 
         review_prompt = (
             f"Vulnerability: {vuln_name} ({cwe})\n\n"
@@ -89,8 +106,9 @@ class PatchCouncil(CouncilOrchestrator):
         )
 
         approvals = []
-        for model in ["deepseek-coder:1.3b", "phi3:mini"]:
+        for model in reviewer_models:
             try:
+                await self.vram.ensure_loaded(model)
                 review = await self._call(model, PATCH_REVIEW_SYSTEM, review_prompt, task_name=f"Patch Review ({model})")
                 approvals.append({"model": model, **review})
             except Exception as e:
@@ -98,12 +116,13 @@ class PatchCouncil(CouncilOrchestrator):
                 approvals.append({"model": model, "approved": False, "reason": "Error during call"})
 
         approved_count = sum(1 for a in approvals if a.get("approved", False))
+        total_reviewers = len(approvals)
         dissent_reasons = [a["reason"] for a in approvals if not a.get("approved", False)]
 
-        if approved_count == 2:
+        if approved_count == total_reviewers:
             final_safety = "safe"
             c = "green"
-        elif approved_count == 1:
+        elif approved_count >= 1:
             final_safety = "review_needed"
             c = "yellow"
         else:
@@ -118,5 +137,5 @@ class PatchCouncil(CouncilOrchestrator):
             "patch_safety": final_safety,
             "approvals": approvals,
             "dissent_reasons": dissent_reasons,
-            "vote_summary": f"{approved_count}/2 validators approved"
+            "vote_summary": f"{approved_count}/{total_reviewers} validators approved"
         }
