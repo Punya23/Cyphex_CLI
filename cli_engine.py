@@ -31,6 +31,16 @@ from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
 from models.scan import ScanContext, FormData, ParamData, Vuln
 
+# Council system imports
+sys.path.insert(0, os.path.dirname(__file__))
+try:
+    from backend.council.patch_council import PatchCouncil
+    from backend.council.debate_protocol import DebateProtocol
+    from backend.council.analysis_council import AnalysisCouncil
+    COUNCIL_AVAILABLE = True
+except ImportError:
+    COUNCIL_AVAILABLE = False
+
 class C:
     R="\033[91m";G="\033[92m";Y="\033[93m";B="\033[94m"
     M="\033[95m";CY="\033[96m";W="\033[97m";BOLD="\033[1m"
@@ -107,7 +117,7 @@ class CyphexEngine:
 
         # Step 7: Report
         self._step("7/8", "SECURITY REPORT")
-        report = self._print_report(time.time() - self.start_ts)
+        report = await self._print_report(time.time() - self.start_ts)
         if output_file:
             self._save_report(report, output_file)
         if self.judge_mode:
@@ -990,6 +1000,20 @@ class CyphexEngine:
                 context.technologies.append(f"X-Powered-By:{powered}")
                 print(f"  [Recon] X-Powered-By: {powered}")
 
+            if COUNCIL_AVAILABLE and context.confirmed_vulns:
+                agent_header("Council", "Multi-Model Debate", "Validating dynamic findings against false positives")
+                debater = DebateProtocol()
+                validated_vulns = []
+                for v in context.confirmed_vulns:
+                    # Only debate dynamic vulns (not static file vulns which haven't been added yet)
+                    is_valid, conf, votes = await debater.debate_finding(v.name, str(v.evidence) if v.evidence else str(v.payload))
+                    if is_valid:
+                        validated_vulns.append(v)
+                
+                discarded = len(context.confirmed_vulns) - len(validated_vulns)
+                context.confirmed_vulns = validated_vulns
+                print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} findings. {C.Y}Discarded {discarded} false positives.{C.RST}")
+
             print(f"\n  {C.G}[SCAN][OK]{C.RST} endpoints={len(context.all_endpoints)} forms={len(forms_found)} vulns={len(context.confirmed_vulns)}")
 
         return context
@@ -1086,7 +1110,7 @@ class CyphexEngine:
         rate = (blocked / mal * 100) if mal else 0
         console.print(f"\n  Blocked: {blocked}/{mal} ({rate:.0f}%)  |  False positives: {fp}")
 
-    def _print_report(self, duration):
+    async def _print_report(self, duration):
         vulns = self.context.confirmed_vulns
         crit = sum(1 for v in vulns if v.severity == "Critical")
         high = sum(1 for v in vulns if v.severity == "High")
@@ -1130,6 +1154,26 @@ class CyphexEngine:
                 
                 table.add_row(str(i), f"[{sc}]{v.severity}[/{sc}]", vuln_type, cwe, endpoint)
             console.print(table)
+
+        if COUNCIL_AVAILABLE and vulns:
+            analyzer = AnalysisCouncil()
+            # Convert to simple dicts for the prompt
+            vuln_dicts = [{"name": v.name, "severity": v.severity, "endpoint": v.endpoint, "evidence": str(v.evidence)} for v in vulns]
+            analysis_data = await analyzer.analyse_findings(vuln_dicts)
+            
+            if analysis_data:
+                console.print("\n[bold]Council Security Analysis[/bold]")
+                for item in analysis_data:
+                    validated = item.pop("_validated", True)
+                    v_color = "green" if validated else "yellow"
+                    console.print(Panel(
+                        f"[bold red]Business Impact:[/bold red] {item.get('business_impact', 'N/A')}\n"
+                        f"[bold yellow]Attack Scenario:[/bold yellow] {item.get('attack_scenario', 'N/A')}\n"
+                        f"[bold cyan]Root Cause:[/bold cyan] {item.get('root_cause', 'N/A')}\n"
+                        f"\n[{v_color}]✓ Fact-checked by Phi-3: {validated}[/{v_color}]",
+                        title=f"{item.get('vuln_name', 'Vulnerability')} ({item.get('cwe', '')})",
+                        border_style="magenta"
+                    ))
 
         return {
             "scan_id": self.scan_id,
@@ -1225,8 +1269,14 @@ class CyphexEngine:
             print(f"  {C.G}No critical/high vulns to patch.{C.RST}")
             return
 
-        print(f"\n  {C.BOLD}Found {len(vulns)} Critical/High vulnerabilities to review.{C.RST}")
-        print(f"  {C.DIM}For each vuln: unsafe reason -> patch -> safety notes.{C.RST}\n")
+        console.print(Panel(
+            f"[bold]Found {len(vulns)} Critical/High vulnerabilities to review.[/bold]\n"
+            f"[dim]Council Mode: {'ENABLED' if COUNCIL_AVAILABLE else 'DISABLED (fallback)'}[/dim]",
+            title="PATCH WORKFLOW", border_style="magenta"
+        ))
+
+        # Initialize the council if available
+        patch_council = PatchCouncil() if COUNCIL_AVAILABLE else None
 
         patched_files = []
         skipped = 0
@@ -1253,27 +1303,85 @@ class CyphexEngine:
                 continue
 
             sev_color = C.R if v.severity == "Critical" else C.Y
-            print(f"  {sev_color}{'-' * 70}{C.RST}")
-            print(f"  {sev_color}[{i}/{len(vulns)}] {v.name} ({v.severity}){C.RST}")
-            print(f"  File: {C.CY}{rel_path}:{line_num}{C.RST}")
+            vuln_type = v.name.replace("[STATIC] ", "").replace("[DYNAMIC] ", "")
+            console.print(f"\n[bold]{'-' * 70}[/bold]")
+            console.print(f"[bold][{i}/{len(vulns)}] {vuln_type} ({v.severity})[/bold]")
+            console.print(f"File: [cyan]{rel_path}:{line_num}[/cyan]")
 
             start_l = max(0, line_num - 3)
             end_l = min(len(lines), line_num + 2)
             snippet = "".join(lines[start_l:end_l])
 
-            print(f"\n  {C.BOLD}Vulnerable Code:{C.RST}")
+            console.print(f"\n[bold]Vulnerable Code:[/bold]")
             for j in range(start_l, end_l):
                 ln = j + 1
                 marker = "->" if ln == line_num else "  "
-                print(f"  {marker} {ln:4} | {lines[j].rstrip()[:120]}")
+                console.print(f"  {marker} {ln:4} | {lines[j].rstrip()[:120]}")
 
-            patch_pkg = await self._get_llm_fix_package(v, snippet, rel_path)
+            # --- COUNCIL PATCH GENERATION ---
+            patch_pkg = None
+            if patch_council:
+                try:
+                    # Determine CWE from vulnerability type
+                    cwe_map = {
+                        "sql injection": "CWE-89", "xss": "CWE-79",
+                        "command injection": "CWE-78", "cmdi": "CWE-78",
+                        "ssrf": "CWE-918", "idor": "CWE-284",
+                        "jwt": "CWE-287", "sensitive data": "CWE-200",
+                        "hardcoded": "CWE-798", "cors": "CWE-942",
+                        "lfi": "CWE-22", "path traversal": "CWE-22",
+                    }
+                    cwe = "CWE-unknown"
+                    for key, val in cwe_map.items():
+                        if key in vuln_type.lower():
+                            cwe = val
+                            break
+
+                    council_result = await patch_council.generate_and_validate_patch(
+                        vuln_name=vuln_type, cwe=cwe,
+                        vulnerable_code=snippet, file_path=rel_path
+                    )
+                    if council_result and council_result.get("fixed_code"):
+                        patch_pkg = {
+                            "unsafe_reason": council_result.get("unsafe_reason", ""),
+                            "fixed_code": council_result.get("fixed_code", ""),
+                            "justifications": council_result.get("vote_summary", ""),
+                            "patch_safety": council_result.get("patch_safety", ""),
+                        }
+                        # Show council approval details
+                        approvals = council_result.get("approvals", [])
+                        dissent = council_result.get("dissent_reasons", [])
+                        vote_table = Table(title="Council Patch Validation", box=ROUNDED)
+                        vote_table.add_column("Model", width=22)
+                        vote_table.add_column("Verdict", justify="center", width=10)
+                        vote_table.add_column("Reason", max_width=45)
+                        for a in approvals:
+                            verdict_color = "green" if a.get("approved") else "red"
+                            verdict_text = "APPROVED" if a.get("approved") else "REJECTED"
+                            vote_table.add_row(
+                                a.get("model", "unknown"),
+                                f"[{verdict_color}]{verdict_text}[/{verdict_color}]",
+                                a.get("reason", "")
+                            )
+                        console.print(vote_table)
+
+                        if dissent:
+                            console.print(Panel(
+                                "\n".join(f"[red]•[/red] {r}" for r in dissent),
+                                title="Dissenting Reasons", border_style="red"
+                            ))
+                except Exception as e:
+                    console.print(f"[yellow]⚠ Council error: {str(e)[:80]}. Falling back to single-model.[/yellow]")
+
+            # Fallback to old single-model if council failed
             if not patch_pkg:
-                print(f"\n  {C.Y}[SKIP]{C.RST} Could not generate patch package\n")
+                patch_pkg = await self._get_llm_fix_package(v, snippet, rel_path)
+
+            if not patch_pkg:
+                console.print(f"[yellow][SKIP][/yellow] Could not generate patch\n")
                 skipped += 1
                 continue
 
-            print("\n")
             analysis = patch_pkg.get('unsafe_reason', 'No rationale provided.')
             justifications = patch_pkg.get('justifications', 'N/A')
             llm_patch_safety = patch_pkg.get("patch_safety", "").strip()
@@ -1286,7 +1394,7 @@ class CyphexEngine:
 
             fixed = patch_pkg.get("fixed_code", "").strip()
             if not fixed:
-                print(f"\n  {C.Y}[SKIP]{C.RST} Model did not return fixed code\n")
+                console.print(f"[yellow][SKIP][/yellow] Model did not return fixed code\n")
                 skipped += 1
                 continue
 
@@ -1304,7 +1412,8 @@ class CyphexEngine:
 
             safety_text = ""
             if llm_patch_safety:
-                safety_text += f"[bold]Model:[/bold] {llm_patch_safety}\n"
+                sc = "green" if llm_patch_safety == "safe" else "yellow" if llm_patch_safety == "review_needed" else "red"
+                safety_text += f"[bold]Council Verdict:[/bold] [{sc}]{llm_patch_safety.upper()}[/{sc}]\n"
             for note in safety_notes:
                 safety_text += f"- {note}\n"
             
@@ -1313,7 +1422,7 @@ class CyphexEngine:
 
             if self.non_interactive:
                 choice = "y"
-                print(f"\n  {C.DIM}non-interactive mode: auto applying patch{C.RST}")
+                console.print(f"[dim]non-interactive mode: auto applying patch[/dim]")
             else:
                 print(f"\n  {C.Y}Apply this patch? (y/n/q):{C.RST} ", end="")
                 try:
@@ -1325,7 +1434,7 @@ class CyphexEngine:
                 break
             if choice != "y":
                 skipped += 1
-                print(f"  {C.DIM}[SKIPPED]{C.RST}\n")
+                console.print(f"[dim][SKIPPED][/dim]\n")
                 continue
 
             for j in range(start_l, end_l):
@@ -1334,10 +1443,10 @@ class CyphexEngine:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.writelines(lines)
             patched_files.append(rel_path)
-            print(f"  {C.G}[APPLIED]{C.RST} Patch applied to {rel_path}\n")
+            console.print(f"[green][APPLIED][/green] Patch applied to {rel_path}\n")
 
-        print(f"\n  {C.BOLD}{'-' * 50}{C.RST}")
-        print(f"  {C.G}Applied:{C.RST} {len(patched_files)}  {C.Y}Skipped:{C.RST} {skipped}")
+        console.print(f"\n[bold]{'-' * 50}[/bold]")
+        console.print(f"[green]Applied:[/green] {len(patched_files)}  [yellow]Skipped:[/yellow] {skipped}")
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")

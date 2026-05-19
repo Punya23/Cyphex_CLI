@@ -83,6 +83,7 @@ def main():
     )
 
     sub.add_parser("doctor", help="Check local runtime/tooling readiness")
+    sub.add_parser("council-doctor", help="Check all 4 council models are available in Ollama")
 
     args = parser.parse_args()
     if not args.command:
@@ -98,6 +99,46 @@ def main():
         engine = CyphexEngine()
         ok = engine.doctor()
         raise SystemExit(0 if ok else 1)
+
+    if args.command == "council-doctor":
+        os.system("cls" if os.name == "nt" else "clear")
+        print(BANNER)
+        import httpx
+        from rich.console import Console
+        console = Console()
+
+        REQUIRED_MODELS = [
+            ("deepseek-coder:1.3b",  "Detector",    "always-on",   1.0),
+            ("phi3:mini",             "Validator",   "always-on",   2.2),
+            ("llama3.2:3b",           "Narrator",    "phase-swap",  2.0),
+            ("cyphex-patch",          "Patch Agent", "patch-only",  4.5),
+        ]
+
+        console.print("[bold cyan]CYPHEX Council Model Health Check[/bold cyan]\n")
+        all_ok = True
+        for tag, role, schedule, vram in REQUIRED_MODELS:
+            try:
+                r = httpx.post(
+                    "http://localhost:11434/api/generate",
+                    json={"model": tag, "prompt": "respond with the word ready", "stream": False},
+                    timeout=30.0
+                )
+                response = r.json().get("response", "")
+                if "ready" in response.lower():
+                    console.print(f"  [green]✓[/green] {role:12} {tag:30} {vram} GB  ({schedule})")
+                else:
+                    console.print(f"  [yellow]⚠[/yellow] {role:12} {tag:30} {vram} GB  ({schedule}) — unexpected response")
+            except Exception:
+                console.print(f"  [red]✗[/red] {role:12} {tag:30} NOT FOUND")
+                console.print(f"       → Run: [bold]ollama pull {tag}[/bold]")
+                all_ok = False
+
+        print()
+        if all_ok:
+            console.print("[bold green]All council models are ready![/bold green]")
+        else:
+            console.print("[bold yellow]Some models are missing. Pull them with ollama.[/bold yellow]")
+        raise SystemExit(0 if all_ok else 1)
 
     if args.command == "scan":
         if not args.repo and not args.path:
