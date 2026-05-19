@@ -14,20 +14,28 @@ console = Console()
 class VRAMManager:
     """
     Tracks which models are currently loaded and enforces VRAM budget.
-    RTX 3050 6 GB limit: never exceed 5.5 GB loaded at once.
+    VRAM costs are dynamically populated by ModelSelector; unknown models
+    are estimated at ~2.0 GB.
     """
 
+    # Seed costs for known models (overridden by ModelSelector at runtime)
     VRAM_COST = {
         "deepseek-coder:1.3b": 1.0,
         "phi3:mini":            2.2,
-        "llama3.2:3b":          2.0,
+        "llama3.2:1b":          1.0,
         "cyphex-patch":         4.5,
+        "qwen2.5-coder:7b":    4.5,
+        "qwen2.5-coder:3b":    2.0,
     }
 
     VRAM_LIMIT = 5.5  # GB — leave 0.5 GB for OS/driver overhead
 
     def __init__(self):
         self.loaded: dict[str, float] = {}  # model → VRAM cost
+
+    def update_costs(self, dynamic_costs: dict[str, float]):
+        """Merge dynamically discovered VRAM costs (from ModelSelector)."""
+        self.VRAM_COST.update(dynamic_costs)
 
     def can_load(self, model: str) -> bool:
         cost = self.VRAM_COST.get(model, 2.0)
@@ -106,25 +114,32 @@ ANTI-HALLUCINATION RULES — apply on every response:
         await self.vram.ensure_loaded(model)
 
         full_system = f"{system}\n\n{self.UNIVERSAL_ANTI_HALLUCINATION_RULES}"
-        full_prompt = f"[INST] <<SYS>>\n{full_system}\n<</SYS>>\n\n{prompt} [/INST]"
 
         for attempt in range(2):
             try:
-                # Use Live to show thinking process
-                with Live(Panel(f"[cyan bold]Evaluating[/cyan bold]\n[dim]Model: {model}[/dim]\n[yellow]Status: Thinking...[/yellow]", border_style="cyan"), refresh_per_second=4, console=console) as live:
-                    async with httpx.AsyncClient(timeout=None) as client:
+                # Use Live to show thinking process — 90s timeout prevents infinite hangs
+                with Live(Panel(f"[cyan bold]Evaluating[/cyan bold]\n[dim]Model: {model}[/dim]\n[yellow]Status: Thinking...[/yellow]", border_style="cyan"), refresh_per_second=2, console=console, transient=True) as live:
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=10.0)) as client:
                         r = await client.post(
-                            f"{OLLAMA_BASE}/api/generate",
+                            f"{OLLAMA_BASE}/api/chat",
                             json={
                                 "model": model,
-                                "prompt": full_prompt,
+                                "messages": [
+                                    {"role": "system", "content": full_system},
+                                    {"role": "user", "content": prompt},
+                                ],
                                 "stream": False,
                                 "keep_alive": "10m",
-                                "options": {"temperature": 0.1, "top_p": 0.9}
+                                "options": {
+                                    "temperature": 0.1,
+                                    "top_p": 0.9,
+                                    "num_predict": 512,   # Cap response length — prevents rambling
+                                    "num_ctx": 2048,      # Smaller context = faster inference
+                                }
                             }
                         )
-                    raw = r.json()["response"]
-                    live.update(Panel(f"[green bold]Completed[/green bold]\n[dim]Model: {model}[/dim]\n[green]Status: Response received.[/green]", border_style="green"))
+                    raw = r.json()["message"]["content"]
+                    live.update(Panel(f"[green bold]✓ Done[/green bold] [dim]({model})[/dim]", border_style="green"))
 
                 # Extract and display thinking
                 thinking_match = re.search(r'<thinking>(.*?)</thinking>', raw, re.DOTALL | re.IGNORECASE)

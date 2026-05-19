@@ -1,0 +1,336 @@
+"""
+CYPHEX CLI — Main Entry Point
+
+Usage:
+    cyphex scan ./my-app              # Scan local source code
+    cyphex scan https://example.com   # Scan a live URL
+    cyphex scan --repo https://...    # Clone and scan a repo
+    cyphex setup                      # Auto-install optional tools
+    cyphex doctor                     # System health check
+    cyphex version                    # Show version
+"""
+
+import sys
+import os
+import asyncio
+import argparse
+import shutil
+import subprocess
+import platform
+
+# Ensure project root is in path so existing modules resolve
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+# Backend modules expect backend/backend on the path
+_BACKEND_DIR = os.path.join(_PROJECT_ROOT, "backend", "backend")
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
+
+def _setup_tools():
+    """Auto-install optional security tools for enhanced scanning."""
+    # Cyber palette
+    CY = "\033[38;2;0;255;255m"
+    P2 = "\033[38;2;161;100;255m"
+    GH = "\033[38;2;100;100;120m"
+    SL = "\033[38;2;140;150;170m"
+    NE = "\033[38;2;57;255;20m"
+    FL = "\033[38;2;255;69;0m"
+    BD = "\033[1m"
+    RS = "\033[0m"
+    YL = "\033[93m"
+
+    def _grad(text, r1, g1, b1, r2, g2, b2):
+        out = []
+        n = max(len(text) - 1, 1)
+        for i, ch in enumerate(text):
+            r = int(r1 + (r2 - r1) * i / n)
+            g = int(g1 + (g2 - g1) * i / n)
+            b = int(b1 + (b2 - b1) * i / n)
+            out.append(f"\033[38;2;{r};{g};{b}m{ch}")
+        out.append(RS)
+        return "".join(out)
+
+    border = _grad("━" * 56, 0, 255, 255, 138, 43, 226)
+    print(f"\n{border}")
+    print(f"  {CY}{BD}◈ CYPHEX{RS} {SL}— One-Time Setup{RS}")
+    print(f"{border}\n")
+
+    installed = []
+    skipped = []
+
+    # 1. Semgrep (Python package — cross-platform)
+    if shutil.which("semgrep"):
+        print(f"  {NE}✓{RS} {SL}Semgrep already installed{RS}")
+        skipped.append("semgrep")
+    else:
+        print(f"  {CY}⏳{RS} {SL}Installing Semgrep (5000+ SAST rules)...{RS}")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "semgrep", "--quiet"],
+                check=True, timeout=120
+            )
+            print(f"  {NE}✓{RS} {SL}Semgrep installed{RS}")
+            installed.append("semgrep")
+        except Exception as e:
+            print(f"  {FL}✗{RS} Semgrep failed: {e}")
+
+    # 2. Nuclei (Go binary — platform-specific download)
+    if shutil.which("nuclei"):
+        print(f"  {NE}✓{RS} {SL}Nuclei already installed{RS}")
+        skipped.append("nuclei")
+    else:
+        print(f"  {CY}⏳{RS} {SL}Installing Nuclei (8000+ DAST templates)...{RS}")
+        system = platform.system().lower()
+        machine = platform.machine().lower()
+
+        if system == "darwin":
+            # macOS — try Homebrew first
+            if shutil.which("brew"):
+                try:
+                    subprocess.run(
+                        ["brew", "install", "nuclei"],
+                        check=True, timeout=180, capture_output=True
+                    )
+                    print(f"  {NE}✓{RS} {SL}Nuclei installed via Homebrew{RS}")
+                    installed.append("nuclei")
+                except Exception:
+                    _install_nuclei_binary(system, machine, installed)
+            else:
+                _install_nuclei_binary(system, machine, installed)
+
+        elif system == "linux":
+            # Linux — try apt, then binary
+            if shutil.which("apt-get"):
+                try:
+                    subprocess.run(
+                        ["sudo", "apt-get", "install", "-y", "nuclei"],
+                        check=True, timeout=120, capture_output=True
+                    )
+                    print(f"  {NE}✓{RS} {SL}Nuclei installed via apt{RS}")
+                    installed.append("nuclei")
+                except Exception:
+                    _install_nuclei_binary(system, machine, installed)
+            else:
+                _install_nuclei_binary(system, machine, installed)
+
+        elif system == "windows":
+            # Windows — try winget or scoop
+            if shutil.which("winget"):
+                try:
+                    subprocess.run(
+                        ["winget", "install", "ProjectDiscovery.Nuclei"],
+                        check=True, timeout=180, capture_output=True
+                    )
+                    print(f"  {NE}✓{RS} {SL}Nuclei installed via winget{RS}")
+                    installed.append("nuclei")
+                except Exception:
+                    print("  ✗ Nuclei: Install manually from https://github.com/projectdiscovery/nuclei/releases")
+            elif shutil.which("scoop"):
+                try:
+                    subprocess.run(
+                        ["scoop", "install", "nuclei"],
+                        check=True, timeout=180, capture_output=True
+                    )
+                    print(f"  {NE}✓{RS} {SL}Nuclei installed via scoop{RS}")
+                    installed.append("nuclei")
+                except Exception:
+                    print("  ✗ Nuclei: Install manually from https://github.com/projectdiscovery/nuclei/releases")
+
+    # 3. Ollama models (auto-pull if Ollama is installed)
+    if shutil.which("ollama"):
+        print(f"  {NE}✓{RS} {SL}Ollama installed{RS}")
+        # Check if Ollama is running
+        try:
+            import urllib.request
+            urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3)
+            ollama_running = True
+        except Exception:
+            ollama_running = False
+            print(f"  {CY}⏳{RS} {SL}Starting Ollama...{RS}")
+            subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            import time
+            time.sleep(3)
+            ollama_running = True
+
+        if ollama_running:
+            # Dynamic model discovery — use whatever the user has
+            try:
+                result = subprocess.run(["ollama", "list"], capture_output=True, text=True, timeout=10)
+                existing_lines = [l for l in result.stdout.strip().split("\n")[1:] if l.strip()]
+                existing_models = [l.split()[0] for l in existing_lines if l.split()]
+            except Exception:
+                existing_models = []
+
+            if existing_models:
+                # User already has models — report them, don't force specific ones
+                print(f"  {NE}✓{RS} {SL}Found {len(existing_models)} Ollama model(s) — CYPHEX will auto-select the best:{RS}")
+                for m in existing_models:
+                    print(f"    • {m}")
+                skipped.extend(existing_models)
+            else:
+                # No models at all — pull lightweight defaults based on system resources
+                print(f"  {CY}⏳{RS} {SL}No Ollama models found. Pulling lightweight defaults...{RS}")
+                defaults = ["deepseek-coder:1.3b", "phi3:mini"]
+                for model in defaults:
+                    print(f"  ⏳ Pulling {model} (this may take a few minutes)...")
+                    try:
+                        subprocess.run(
+                            ["ollama", "pull", model],
+                            timeout=600, check=True
+                        )
+                        print(f"  ✓ Model {model} ready")
+                        installed.append(model)
+                    except subprocess.TimeoutExpired:
+                        print(f"  {FL}✗{RS} {model} pull timed out (try manually: ollama pull {model})")
+                    except Exception as e:
+                        print(f"  {FL}✗{RS} {model} failed: {e}")
+    else:
+        print(f"  {YL}⚠{RS} {SL}Ollama not found — needed for AI council & patching{RS}")
+        print("    Install from: https://ollama.ai")
+
+    # 4. Docker status
+    if shutil.which("docker"):
+        try:
+            result = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+            if result.returncode == 0:
+                print(f"  {NE}✓{RS} {SL}Docker is running{RS}")
+                skipped.append("docker")
+            else:
+                print(f"  {YL}⚠{RS} {SL}Docker is installed but not running — start Docker Desktop{RS}")
+        except Exception:
+            print(f"  {YL}⚠{RS} {SL}Docker check failed{RS}")
+    else:
+        print(f"  {YL}⚠{RS} {SL}Docker not found — needed for full-stack scanning{RS}")
+        print("    Install from: https://www.docker.com/products/docker-desktop/")
+
+    border = _grad("━" * 56, 138, 43, 226, 0, 255, 255)
+    print(f"\n{border}")
+    print(f"  {NE}✓{RS} {BD}Setup complete:{RS} {CY}{len(installed)} installed{RS}, {SL}{len(skipped)} already present{RS}")
+    print(f"  {GH}Run '{CY}cyphex doctor{GH}' to verify everything{RS}")
+    print(f"{border}\n")
+
+
+def _install_nuclei_binary(system: str, machine: str, installed: list):
+    """Download Nuclei binary directly from GitHub releases."""
+    try:
+        import urllib.request
+        import zipfile
+        import tempfile
+
+        # Map platform to release name
+        os_map = {"darwin": "macOS", "linux": "linux"}
+        arch_map = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+        os_name = os_map.get(system, system)
+        arch_name = arch_map.get(machine, "amd64")
+
+        url = f"https://github.com/projectdiscovery/nuclei/releases/latest/download/nuclei_{os_name}_{arch_name}.zip"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = os.path.join(tmp, "nuclei.zip")
+            urllib.request.urlretrieve(url, zip_path)
+
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(tmp)
+
+            nuclei_bin = os.path.join(tmp, "nuclei")
+            if os.path.exists(nuclei_bin):
+                # Install to user bin
+                user_bin = os.path.expanduser("~/.local/bin")
+                os.makedirs(user_bin, exist_ok=True)
+                dest = os.path.join(user_bin, "nuclei")
+                shutil.copy2(nuclei_bin, dest)
+                os.chmod(dest, 0o755)
+                print(f"  ✓ Nuclei installed to {dest}")
+                print(f"    (Add {user_bin} to your PATH if not already)")
+                installed.append("nuclei")
+            else:
+                print("  ✗ Nuclei binary not found in archive")
+
+    except Exception as e:
+        print(f"  {FL}✗{RS} Nuclei download failed: {e}")
+        print("    Install manually: https://github.com/projectdiscovery/nuclei/releases")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="cyphex",
+        description="CYPHEX — AI Security Scanner with Adversarial Immune System",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # ── cyphex scan ──
+    scan_parser = subparsers.add_parser("scan", help="Run a security scan")
+    scan_parser.add_argument("target", nargs="?", type=str,
+                             help="Path to source code OR live URL (e.g. ./my-app or http://...)")
+    scan_parser.add_argument("--path", type=str, help="Path to local source code")
+    scan_parser.add_argument("--repo", type=str, help="Git repo URL to clone and scan")
+    scan_parser.add_argument("--format", type=str, default="table",
+                             choices=["table", "json", "sarif", "markdown"],
+                             help="Output format (default: table)")
+    scan_parser.add_argument("--judge", action="store_true",
+                             help="Deterministic mode for benchmarking (SARIF output)")
+    scan_parser.add_argument("--no-patch", action="store_true",
+                             help="Skip patch generation step")
+    scan_parser.add_argument("--mode", type=str,
+                             choices=["full", "standard", "lite", "cloud"],
+                             help="Override auto-detected hardware mode")
+
+    # ── cyphex setup ──
+    subparsers.add_parser("setup", help="Auto-install optional security tools (Semgrep, Nuclei)")
+
+    # ── cyphex doctor ──
+    subparsers.add_parser("doctor", help="Check system dependencies and hardware")
+
+    # ── cyphex version ──
+    subparsers.add_parser("version", help="Show CYPHEX version")
+
+    # ── cyphex council-doctor ──
+    subparsers.add_parser("council-doctor", help="Check council model status")
+
+    args = parser.parse_args()
+
+    if args.command == "setup":
+        _setup_tools()
+
+    elif args.command == "doctor":
+        from cyphex.doctor import run_doctor
+        asyncio.run(run_doctor())
+
+    elif args.command == "version":
+        from cyphex import __version__
+        print(f"cyphex {__version__}")
+
+    elif args.command == "scan":
+        # Resolve target: positional arg > --path > --repo
+        target = getattr(args, "target", None) or args.path or args.repo
+        if not target:
+            scan_parser.error("Provide a target: cyphex scan ./my-app  OR  cyphex scan http://example.com")
+
+        from cli_engine import CyphexEngine
+        engine = CyphexEngine()
+
+        is_url = target.startswith("http://") or target.startswith("https://")
+        is_repo = target.endswith(".git") or (is_url and "github.com" in target)
+
+        if is_repo or args.repo:
+            asyncio.run(engine.run(repo_url=target, judge=args.judge))
+        elif is_url:
+            # Live URL scan — skip sandbox, go directly to dynamic scan
+            asyncio.run(engine.run(target_url=target, judge=args.judge))
+        else:
+            # Local source path
+            asyncio.run(engine.run(source_path=target, judge=args.judge))
+
+    elif args.command == "council-doctor":
+        sys.path.insert(0, _PROJECT_ROOT)
+        from cyphex_cli import council_doctor
+        asyncio.run(council_doctor())
+
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

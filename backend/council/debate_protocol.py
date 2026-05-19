@@ -1,6 +1,8 @@
 import json
+import time
 from rich.console import Console
 from backend.council.council_orchestrator import CouncilOrchestrator
+from backend.council.model_selector import get_selector
 
 console = Console()
 
@@ -21,72 +23,161 @@ STRICT RULES:
 4. Never reference CVE numbers. Never guess.
 """
 
+# ── Performance tuning ──────────────────────────────────────────
+MAX_DEBATE_VULNS = 5          # Only debate the first N vulns (Critical/High first)
+DEBATE_TIMEOUT_TOTAL = 180    # 3 min max for entire debate phase
+MIN_MODEL_PARAMS_FOR_DEBATE = 7  # Models need at least 7B params for reliable debate
+
+
 class DebateProtocol(CouncilOrchestrator):
+
+    async def should_debate(self) -> tuple[bool, str]:
+        """
+        Check if the installed models are large enough for reliable debate.
+        Models <7B produce too many JSON errors and hallucinated rejections,
+        which causes REAL vulnerabilities to be discarded.
+
+        Returns: (should_debate: bool, reason: str)
+        """
+        selector = await get_selector(quiet=True)
+        if not selector.models:
+            return False, "No Ollama models available"
+
+        max_param = max(m.param_size for m in selector.models)
+        if max_param < MIN_MODEL_PARAMS_FOR_DEBATE:
+            model_summary = ", ".join(f"{m.name} ({m.param_size}B)" for m in selector.models)
+            return False, f"Models too small for reliable debate ({model_summary}). Need ≥7B."
+
+        return True, f"Largest model: {max_param}B — sufficient for debate"
+
     async def debate_finding(self, vuln_name: str, evidence: str) -> tuple[bool, float, list[dict]]:
         """
+        Multi-model debate for false-positive filtering.
+        IMPORTANT: Errors/timeouts count as ABSTAIN (not reject).
+        Only actual "confirmed: false" votes count as rejection.
+
         Returns: (confirmed: bool, avg_confidence: float, vote_log: list)
         """
-        VALIDATORS = ["deepseek-coder:1.3b", "phi3:mini", "llama3.2:3b"]
+        selector = await get_selector(quiet=True)
+        VALIDATORS = selector.get_validators(count=3)
+        self.vram.update_costs(selector.get_vram_costs())
 
-        console.print(f"\n[bold cyan]Debating finding: {vuln_name}[/bold cyan]")
-        
-        # Load narration models for this phase
+        console.print(f"\n[bold cyan]⚡ Debating:[/bold cyan] {vuln_name}")
+        console.print(f"[dim]  Council: {' + '.join(set(VALIDATORS))}[/dim]")
+
+        # Load models
         for i, model in enumerate(VALIDATORS):
             try:
                 await self.vram.ensure_loaded(model)
             except Exception:
-                console.print(f"[yellow]⚠ {model} not found. Falling back to phi3:mini.[/yellow]")
-                await self.vram.ensure_loaded("phi3:mini")
-                VALIDATORS[i] = "phi3:mini"
+                fallback = selector.models[0].name if selector.models else None
+                if fallback:
+                    VALIDATORS[i] = fallback
+                    try:
+                        await self.vram.ensure_loaded(fallback)
+                    except Exception:
+                        pass
 
-        prompt = f"Vulnerability type: {vuln_name}\n\nEvidence (request + response):\n{evidence}"
+        # Truncate evidence to save tokens
+        evidence_trimmed = evidence[:1500] if len(evidence) > 1500 else evidence
+        prompt = f"Vulnerability type: {vuln_name}\n\nEvidence (request + response):\n{evidence_trimmed}"
 
         # Round 1: independent votes
-        console.print("[dim]Starting Round 1 Voting...[/dim]")
+        console.print("[dim]Round 1: Voting...[/dim]")
         votes = []
         for model in VALIDATORS:
             try:
-                vote = await self._call(model, VALIDATION_SYSTEM, prompt, task_name="Debate Round 1")
-                votes.append({"model": model, "round": 1, **vote})
+                vote = await self._call(model, VALIDATION_SYSTEM, prompt, task_name="Debate R1")
+                votes.append({"model": model, "round": 1, "status": "voted", **vote})
             except Exception as e:
-                console.print(f"[red]Error from {model}: {e}[/red]")
-                votes.append({"model": model, "round": 1, "confirmed": False, "confidence": 0.0, "reason": "Error during call"})
+                console.print(f"[yellow]  ⚠ {model}: abstained ({str(e)[:50]})[/yellow]")
+                # ABSTAIN — do NOT count as confirmed=false
+                votes.append({"model": model, "round": 1, "status": "abstained",
+                              "confirmed": None, "confidence": 0.0, "reason": "Error/timeout"})
 
-        confirmed_count = sum(1 for v in votes if v.get("confirmed", False))
+        # Count only actual votes (not abstentions)
+        actual_votes = [v for v in votes if v.get("status") == "voted"]
+        abstained = len(votes) - len(actual_votes)
+        confirmed_count = sum(1 for v in actual_votes if v.get("confirmed", False))
+        rejected_count = sum(1 for v in actual_votes if not v.get("confirmed", True))
+        num_actual = len(actual_votes)
 
-        # Early exit: unanimous
-        if confirmed_count == 3 or confirmed_count == 0:
-            avg_conf = sum(v.get("confidence", 0.5) for v in votes) / 3
-            result = confirmed_count == 3
+        # If majority abstained → not enough data to reject, KEEP the finding
+        if num_actual == 0:
+            console.print(f"  [yellow]→ All models abstained — KEEPING finding (no reliable votes)[/yellow]")
+            return True, 0.5, votes
+
+        # Early exit: unanimous actual votes
+        if num_actual > 0 and (confirmed_count == num_actual or rejected_count == num_actual):
+            avg_conf = sum(v.get("confidence", 0.5) for v in actual_votes) / max(num_actual, 1)
+            result = confirmed_count == num_actual
             c = "green" if result else "red"
-            console.print(f"[bold {c}]Debate Concluded (Unanimous): {result}[/bold {c}]")
+            label = "CONFIRMED" if result else "REJECTED"
+            extra = f", {abstained} abstained" if abstained else ""
+            console.print(f"  [{c}]→ Unanimous: {label}[/{c}] (conf={avg_conf:.0%}{extra})")
             return result, avg_conf, votes
 
-        # Round 2: re-prompt dissenters
-        console.print("[dim]Starting Round 2 Voting (Re-evaluating Dissenters)...[/dim]")
-        majority_view = confirmed_count >= 2
-        majority_reasons = [
-            v["reason"] for v in votes
-            if v.get("confirmed", False) == majority_view
-        ]
+        # Split vote → for safety, KEEP the finding (conservative approach)
+        # Only reject if ALL actual voters say "not confirmed"
+        avg_conf = sum(v.get("confidence", 0.5) for v in actual_votes) / max(num_actual, 1)
+        if confirmed_count >= 1:
+            # At least one model confirmed → keep it
+            console.print(f"  [green]→ Split vote ({confirmed_count}/{num_actual} confirmed) — KEEPING finding[/green]")
+            return True, avg_conf, votes
+        else:
+            # All actual voters rejected → reject
+            extra = f", {abstained} abstained" if abstained else ""
+            console.print(f"  [red]→ All voters rejected ({rejected_count}/{num_actual}{extra}) — REJECTED[/red]")
+            return False, avg_conf, votes
 
-        for i, vote in enumerate(votes):
-            if vote.get("confirmed", False) != majority_view:
-                re_prompt = (
-                    f"Vulnerability type: {vuln_name}\n\nEvidence:\n{evidence}\n\n"
-                    f"The other council members noted: {' | '.join(majority_reasons)}\n"
-                    f"Reconsider your verdict with this context. Same JSON format."
+    async def debate_batch(self, vulns: list, max_vulns: int = MAX_DEBATE_VULNS) -> list:
+        """
+        Debate a batch of vulnerabilities with intelligence:
+        - Checks if models are large enough for reliable debate
+        - If models are too small, SKIPS debate (keeps all findings)
+        - Has a total time cap
+        - Prioritizes Critical > High > Medium > Low
+        """
+        if not vulns:
+            return []
+
+        # Check if debate is worthwhile with current models
+        should_run, reason = await self.should_debate()
+        if not should_run:
+            console.print(f"[yellow]  ⚡ Council Debate SKIPPED:[/yellow] [dim]{reason}[/dim]")
+            console.print(f"[dim]  → Keeping all {len(vulns)} findings (install a 7B+ model for AI false-positive filtering)[/dim]")
+            return vulns
+
+        # Sort by severity (critical first)
+        severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+        sorted_vulns = sorted(vulns, key=lambda v: severity_order.get(v.severity, 5))
+
+        # Limit the number of vulns to debate
+        to_debate = sorted_vulns[:max_vulns]
+        auto_keep = sorted_vulns[max_vulns:]
+
+        if auto_keep:
+            console.print(f"[dim]  Debating top {len(to_debate)} findings, auto-keeping {len(auto_keep)} lower-priority...[/dim]")
+
+        validated = list(auto_keep)
+        start = time.time()
+
+        for v in to_debate:
+            elapsed = time.time() - start
+            if elapsed > DEBATE_TIMEOUT_TOTAL:
+                console.print(f"[yellow]⏱ Debate timeout ({DEBATE_TIMEOUT_TOTAL}s). Keeping remaining findings.[/yellow]")
+                validated.append(v)
+                continue
+
+            try:
+                is_valid, conf, _ = await self.debate_finding(
+                    v.name,
+                    str(v.evidence) if v.evidence else str(getattr(v, 'payload', ''))
                 )
-                try:
-                    re_vote = await self._call(vote["model"], VALIDATION_SYSTEM, re_prompt, task_name="Debate Round 2")
-                    votes[i] = {"model": vote["model"], "round": 2, **re_vote}
-                except Exception as e:
-                    console.print(f"[red]Error from {vote['model']} in round 2: {e}[/red]")
+                if is_valid:
+                    validated.append(v)
+            except Exception as e:
+                console.print(f"[yellow]⚠ Debate error for {v.name}: {str(e)[:50]}. Keeping finding.[/yellow]")
+                validated.append(v)
 
-        final_confirmed = sum(1 for v in votes if v.get("confirmed", False))
-        avg_conf = sum(v.get("confidence", 0.5) for v in votes) / 3
-        result = final_confirmed >= 2
-        c = "green" if result else "red"
-        console.print(f"[bold {c}]Debate Concluded (Majority): {result}[/bold {c}]")
-        
-        return result, avg_conf, votes
+        return validated
