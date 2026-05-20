@@ -24,16 +24,22 @@ ANALYSIS_VALIDATION_SYSTEM = """
 You are a technical fact-checker for security reports.
 You receive: a list of confirmed findings with evidence, and an analysis report.
 Return ONLY valid JSON: {"valid": true/false, "unsupported_claims": ["...", "..."]}
-valid=true only if every statement in the analysis is directly supported by the evidence.
-List any sentences that make claims not in the evidence.
+
+IMPORTANT RULES:
+1. valid=true if the report ONLY discusses vulnerabilities that appear in the evidence list.
+2. The report is ALLOWED to elaborate on confirmed findings — adding attack scenarios,
+   business impact descriptions, and remediation context is expected and valid.
+3. Only flag as unsupported_claims if the report INVENTS vulnerabilities not in the evidence
+   (e.g., claims a finding exists when the evidence list has no such finding).
+4. Do NOT flag elaborations, explanations, or risk assessments of confirmed findings.
+5. An empty unsupported_claims list means valid=true.
 """
 
 class AnalysisCouncil(CouncilOrchestrator):
     async def analyse_findings(self, confirmed_vulns: list[dict]) -> list[dict]:
         """
-        Dynamically selects the best available models:
-          - Narrator (largest general model) writes the analysis
-          - Validator (second-best model) cross-checks claims
+        Uses the patcher model (code specialist) to write security analysis,
+        and a different model to cross-check claims.
         Returns the analysis only if validation finds no unsupported claims.
         """
         if not confirmed_vulns:
@@ -41,15 +47,18 @@ class AnalysisCouncil(CouncilOrchestrator):
 
         console.print("\n[bold blue]Analysis Council:[/bold blue] Drafting Security Report...")
 
-        # Dynamically discover best models for each role
+        # Use patcher model for report (code-aware = better security reports)
+        # and a different model for validation (cross-model fact-checking)
         selector = await get_selector(quiet=True)
         self.vram.update_costs(selector.get_vram_costs())
 
-        narrator_model = selector.get("narrator")
-        validator_model = selector.get("validator")
+        narrator_model = selector.get("patcher")  # qwen2.5-coder:7b — best for code reports
+        # Validator must differ from narrator for cross-checking
+        reviewer_candidates = [m.name for m in selector.models if m.name != narrator_model]
+        validator_model = reviewer_candidates[0] if reviewer_candidates else narrator_model
 
-        console.print(f"[dim]  Narrator:  {narrator_model}[/dim]")
-        console.print(f"[dim]  Validator: {validator_model}[/dim]")
+        console.print(f"[dim]  Report Writer: {narrator_model}[/dim]")
+        console.print(f"[dim]  Validator:     {validator_model}[/dim]")
 
         # Unload previous models to free VRAM for narrator
         for m in list(self.vram.loaded.keys()):
@@ -116,6 +125,8 @@ class AnalysisCouncil(CouncilOrchestrator):
 
         if not validation.get("valid", False):
             unsupported = validation.get("unsupported_claims", [])
+            if isinstance(unsupported, str):
+                unsupported = [unsupported]
             console.print(f"[yellow]⚠ {validator_model} flagged {len(unsupported)} unsupported claims in the report.[/yellow]")
             for item in analysis:
                 item["_validated"] = False

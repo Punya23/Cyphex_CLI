@@ -45,17 +45,37 @@ REASONING_MODEL_PATTERNS = [
 ]
 
 
-def _extract_param_size(model_name: str, model_size_bytes: int = 0) -> float:
+def _extract_param_size(model_name: str, model_size_bytes: int = 0,
+                        reported_param_size: str = "") -> float:
     """
-    Extract parameter count in billions from model name or file size.
+    Extract parameter count in billions from Ollama metadata or model name.
+
+    Priority:
+      1. Ollama's reported parameter_size (e.g., "7.6B", "268.10M")
+      2. Regex from model name tag (e.g., ":7b", ":1.3b")
+      3. Estimate from file size
+      4. Known name heuristics ("mini", "tiny", etc.)
 
     Examples:
-        "llama3.2:70b"        → 70.0
-        "deepseek-coder:33b"  → 33.0
-        "phi3:mini"           → 3.8  (estimated from file size)
-        "qwen2.5-coder:7b"   → 7.0
+        reported="7.6B"            → 7.6
+        reported="268.10M"         → 0.27
+        "llama3.2:70b"             → 70.0
+        "phi3:mini" (2.1GB file)   → 3.8
     """
-    # Try to extract from tag (e.g., ":70b", ":7b", ":1.3b", ":0.5b")
+    # 1. Prefer Ollama's reported parameter_size (most accurate)
+    if reported_param_size:
+        reported = reported_param_size.strip().upper()
+        match = re.match(r"([\d.]+)\s*(B|M|K)?", reported)
+        if match:
+            val = float(match.group(1))
+            unit = match.group(2) or "B"
+            if unit == "M":
+                return round(val / 1000, 2)   # 268.10M → 0.27B
+            elif unit == "K":
+                return round(val / 1e6, 4)
+            return val  # Already in billions
+
+    # 2. Try to extract from tag (e.g., ":70b", ":7b", ":1.3b", ":0.5b")
     match = re.search(r":.*?(\d+\.?\d*)b", model_name.lower())
     if match:
         return float(match.group(1))
@@ -67,12 +87,12 @@ def _extract_param_size(model_name: str, model_size_bytes: int = 0) -> float:
         if val >= 0.1:  # Avoid matching version numbers like "3.2"
             return val
 
-    # Estimate from file size (rough: 1B params ≈ 0.6 GB quantized)
+    # 3. Estimate from file size (rough: 1B params ≈ 0.6 GB quantized)
     if model_size_bytes > 0:
         estimated = round(model_size_bytes / (0.6 * 1e9), 1)
         return max(estimated, 0.5)
 
-    # Known small models
+    # 4. Known small models
     name_lower = model_name.lower()
     if "mini" in name_lower:
         return 3.8
@@ -163,7 +183,7 @@ class ModelSelector:
       4. Never forces 2 models when 1 bigger model is better
     """
 
-    ROLES = ("detector", "validator", "narrator", "patcher")
+    ROLES = ("detector", "validator", "patcher")
 
     def __init__(self):
         self.models: list[ModelInfo] = []
@@ -193,12 +213,37 @@ class ModelSelector:
                 console.print("[yellow]⚠ No Ollama models installed[/yellow]")
             return False
 
-        # Build model info list
+        # Build model info list — filter cloud/remote models
         self.models = []
+        seen_digests = set()  # Deduplicate identical weights (e.g., phi3:mini == phi3:3.8b)
+
         for m in raw_models:
             name = m.get("name", "")
+
+            # ── FILTER: Skip cloud-proxied models ──
+            # Ollama returns remote_model/remote_host for cloud stubs
+            if m.get("remote_model") or m.get("remote_host"):
+                if not quiet:
+                    console.print(f"  [dim]  Skipping cloud model: {name} (remote proxy)[/dim]")
+                continue
+            # Safety net: catch by naming convention
+            if ":cloud" in name.lower() or "-cloud" in name.lower():
+                if not quiet:
+                    console.print(f"  [dim]  Skipping cloud model: {name}[/dim]")
+                continue
+
+            # ── DEDUPLICATE: Skip models with identical digests ──
+            digest = m.get("digest", "")
+            if digest and digest in seen_digests:
+                if not quiet:
+                    console.print(f"  [dim]  Skipping duplicate: {name} (same weights)[/dim]")
+                continue
+            if digest:
+                seen_digests.add(digest)
+
             size_bytes = m.get("size", 0)
-            param_size = _extract_param_size(name, size_bytes)
+            reported_params = m.get("details", {}).get("parameter_size", "")
+            param_size = _extract_param_size(name, size_bytes, reported_params)
             is_code = _is_code_model(name)
             vram = _vram_estimate(param_size)
             self.models.append(ModelInfo(name, param_size, is_code, vram, size_bytes))
@@ -321,13 +366,14 @@ class ModelSelector:
                     "review_models": 2,
                 }
             else:
-                # Even 2 models don't fit — use biggest for everything, others sequential
+                # Even 2 models don't fit simultaneously — but still use 2 reviewers
+                # sequentially (load one, review, unload, load next, review)
                 self.strategy = STRATEGY_SOLO
                 self._execution_plan = {
-                    "reason": f"VRAM too tight ({self.vram_budget:.1f}GB) for parallel — using {largest.name} as primary",
+                    "reason": f"VRAM too tight ({self.vram_budget:.1f}GB) for parallel — using {largest.name} as primary, sequential reviews",
                     "parallel_review": False,
                     "debate_models": n_models,
-                    "review_models": 1,
+                    "review_models": min(n_models, 2),
                 }
 
         # ── Step 4: Optimize validator assignment for diversity ──
@@ -350,10 +396,9 @@ class ModelSelector:
 
     def get_validators(self, count: int = 3) -> list[str]:
         """
-        Get models for council debate. INTELLIGENT selection:
-        - Returns only as many DISTINCT models as make sense for the VRAM budget
-        - Never pads with duplicates just to hit a count — that wastes compute
-        - If only 1 model fits at a time, returns 1 (not 3 copies of it)
+        Get models for council debate (false-positive filtering).
+        Picks the top N models by quality score (param_size) for maximum
+        reliability. Uses distinct models only — no duplicate padding.
         """
         if not self.models:
             raise RuntimeError("No Ollama models available. Run: ollama pull phi3:mini")
@@ -362,7 +407,7 @@ class ModelSelector:
         max_useful = self._execution_plan.get("debate_models", len(self.models))
         actual_count = min(count, max_useful, len(self.models))
 
-        # Score all models for validation quality
+        # Sort by quality score — biggest/best models first
         scored = sorted(
             self.models,
             key=lambda m: _quality_score(m, "validator"),
@@ -386,9 +431,11 @@ class ModelSelector:
 
     def get_reviewers(self, count: int = 2) -> list[str]:
         """
-        Get models for patch review. Resource-aware:
-        - If VRAM allows parallel review, returns 2 distinct models
-        - If VRAM is tight, returns just the 1 best model (no wasted sequential re-runs)
+        Get models for patch review. Key design rule:
+        - EXCLUDES the patcher model — the model that wrote the patch should
+          NOT review its own work (avoids self-confirmation bias)
+        - Picks the best remaining models by quality score
+        - Resource-aware: respects the execution plan's review_models limit
         """
         if not self.models:
             raise RuntimeError("No Ollama models available. Run: ollama pull phi3:mini")
@@ -396,10 +443,18 @@ class ModelSelector:
         max_reviewers = self._execution_plan.get("review_models", 1)
         actual_count = min(count, max_reviewers, len(self.models))
 
-        # For reviews, prefer code-aware models (they understand patches better)
+        # Exclude the patcher — a model should NOT review its own work
+        patcher_name = self.assignments.get("patcher", "")
+        candidates = [m for m in self.models if m.name != patcher_name]
+
+        # If excluding patcher leaves no candidates, fall back to all models
+        if not candidates:
+            candidates = list(self.models)
+
+        # Sort by quality score — best reviewers first
         scored = sorted(
-            self.models,
-            key=lambda m: _quality_score(m, "patcher"),
+            candidates,
+            key=lambda m: _quality_score(m, "validator"),
             reverse=True
         )
 

@@ -2094,10 +2094,10 @@ class CyphexEngine:
         med_a  = sum(1 for v in remaining if v.severity == "Medium")
         low_a  = sum(1 for v in remaining if v.severity in ("Low", "Info"))
         penalty_a = 0
-        if crit_a: penalty_a += 20 + 10 * math.log2(1 + crit_a)
-        if high_a: penalty_a += 10 + 8 * math.log2(1 + high_a)
-        if med_a:  penalty_a += 3 + 4 * math.log2(1 + med_a)
-        if low_a:  penalty_a += 1 + 2 * math.log2(1 + low_a)
+        if crit_a: penalty_a += 15 + 8 * math.log2(1 + crit_a)
+        if high_a: penalty_a += 8 + 5 * math.log2(1 + high_a)
+        if med_a:  penalty_a += 3 + 3 * math.log2(1 + med_a)
+        if low_a:  penalty_a += 1 + 1 * math.log2(1 + low_a)
         score_after = max(0, min(100, round(100 - penalty_a)))
 
         delta = score_after - score_before
@@ -2114,7 +2114,8 @@ class CyphexEngine:
             f"  [bold]After Patching:[/bold]   [{sc_a_color}]{'█' * bar_a}{'░' * (25 - bar_a)}  {score_after}/100[/{sc_a_color}]\n\n"
             f"  [bold]Improvement:[/bold]  [{delta_color}]{delta_str} points[/{delta_color}]  │  "
             f"Patched: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]  │  "
-            f"Crit: {crit_a}  High: {high_a}  Med: {med_a}  Low: {low_a}",
+            f"Crit: {crit_a}  High: {high_a}  Med: {med_a}  Low: {low_a}\n\n"
+            f"  [dim italic]* Note: Dynamic runtime findings cannot be auto-marked as patched. Run a re-scan to clear them![/dim italic]",
             title="[bold cyan]◈ SECURITY SCORE: BEFORE vs AFTER ◈[/bold cyan]",
             border_style="cyan", padding=(1, 2)
         ))

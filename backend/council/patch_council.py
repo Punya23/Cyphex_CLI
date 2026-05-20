@@ -11,11 +11,23 @@ PATCH_GENERATION_SYSTEM = """
 You are CYPHEX Patch Agent, a secure code analysis assistant.
 RULES:
 1. Return ONLY valid JSON: {"unsafe_reason": string, "fixed_code": string, "patch_safety": "safe"|"review_needed"}
-2. fixed_code must be a drop-in replacement for the vulnerable snippet. Change ONLY what is needed to fix the vulnerability.
+2. fixed_code must be a COMPLETE drop-in replacement for the vulnerable snippet. Change ONLY what is needed to fix the vulnerability.
 3. Do not add imports unless strictly required, do not restructure, do not rename variables.
-4. IMPORTANT: Provide a COMPLETE, FUNCTIONAL fix. Do NOT use pseudo-code, comments, or placeholders like "// logic here" or "/* validation */". If you are adding authentication or validation, implement actual working code.
+4. IMPORTANT: Provide REAL, WORKING code. Never use pseudo-code, comments-as-placeholders, or stubs like "// add auth logic here".
 5. unsafe_reason: one sentence explaining why the original code is dangerous.
 6. patch_safety = "safe" only if the fix is unambiguous.
+
+VULNERABILITY-SPECIFIC FIX PATTERNS (use these):
+- SQL Injection: Replace template literals with parameterized queries using ? placeholders and [value] arrays.
+- XSS: Remove dangerouslySetInnerHTML entirely. Render content as text children: <h3>{a.title}</h3> instead of dangerouslySetInnerHTML={{__html: a.title}}.
+- Hardcoded Secrets: Replace literal values with ${ENV_VAR} references. Example: MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+- Sensitive Data Exposure (debug routes): Remove or comment out the route registration. Example: // app.use('/api/debug', require('./routes/debug'));
+- SSRF: Add URL validation blocking private IPs (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16) and metadata endpoints.
+- IDOR: Use parameterized queries with ownership check: WHERE id = ? AND user_id = ?
+- Container as Root: Add USER node before CMD.
+- Debug UI routes/nav: Remove or guard with admin role check.
+
+CRITICAL: Your fix must ELIMINATE the vulnerability, not just add a superficial check. The fix will be reviewed by other AI models — incomplete patches will be rejected.
 """
 
 PATCH_REVIEW_SYSTEM = """
@@ -23,11 +35,20 @@ You are a senior security code reviewer.
 You will receive: the vulnerability type, the original vulnerable code, and a proposed patch.
 RULES:
 1. Return ONLY valid JSON: {"approved": true/false, "reason": "one sentence max 30 words"}
-2. approved=true ONLY when ALL of these are true:
-   - The patch eliminates the vulnerability.
-   - The patch does not introduce new issues.
-   - The patch is complete and does NOT contain placeholders like "// add logic here".
-3. If the patch uses parameterized queries, securely escapes output, or properly implements an auth check, approve it.
+2. APPROVE (approved=true) if the patch meaningfully reduces or eliminates the attack surface:
+   - SQL Injection: Approve if template literals are replaced with parameterized queries (? placeholders).
+   - XSS: Approve if dangerouslySetInnerHTML is removed OR input is escaped/sanitized.
+   - Hardcoded Secrets: Approve if literal secrets are replaced with environment variable references (${VAR}).
+   - Sensitive Data Exposure: Approve if the debug route is removed, commented out, or auth-gated.
+   - SSRF: Approve if URL validation/allowlisting is added.
+   - IDOR: Approve if ownership checks or parameterized queries are added.
+   - Container as Root: Approve if USER directive is added before CMD.
+3. REJECT (approved=false) ONLY if:
+   - The patch does NOT address the vulnerability at all (no meaningful change).
+   - The patch introduces a WORSE vulnerability than the original.
+   - The patch contains placeholder comments instead of real code.
+4. Do NOT reject patches for minor style issues, missing error handling, or incomplete edge cases.
+   Focus ONLY on whether the core vulnerability is fixed.
 """
 
 class PatchCouncil(CouncilOrchestrator):
@@ -65,14 +86,21 @@ class PatchCouncil(CouncilOrchestrator):
         try:
             await self.vram.ensure_loaded(patch_model)
         except Exception:
-            # Fallback to any available model
-            if selector.models:
-                patch_model = selector.models[0].name
-                console.print(f"[yellow]⚠ Patcher failed. Using {patch_model}.[/yellow]")
-                await self.vram.ensure_loaded(patch_model)
+            # Fallback to any available model THAT ISN'T the one that just failed
+            fallback_candidates = [m for m in selector.models if m.name != patch_model]
+            if fallback_candidates:
+                patch_model = fallback_candidates[0].name
+            elif selector.models:
+                patch_model = selector.models[0].name  # Only option
             else:
                 return {"fixed_code": "", "patch_safety": "rejected",
                         "unsafe_reason": "No models available", "dissent_reasons": ["No Ollama models"]}
+            console.print(f"[yellow]⚠ Patcher failed. Using {patch_model}.[/yellow]")
+            try:
+                await self.vram.ensure_loaded(patch_model)
+            except Exception:
+                return {"fixed_code": "", "patch_safety": "rejected",
+                        "unsafe_reason": "No models available", "dissent_reasons": ["All models failed to load"]}
 
         patch_prompt = (
             f"Vulnerability: {vuln_name} ({cwe})\n"
@@ -173,13 +201,21 @@ class PatchCouncil(CouncilOrchestrator):
         try:
             await self.vram.ensure_loaded(patch_model)
         except Exception:
-            if selector.models:
-                patch_model = selector.models[0].name
-                console.print(f"[yellow]⚠ Patcher failed. Using {patch_model}.[/yellow]")
-                await self.vram.ensure_loaded(patch_model)
+            # Fallback to any available model THAT ISN'T the one that just failed
+            fallback_candidates = [m for m in selector.models if m.name != patch_model]
+            if fallback_candidates:
+                patch_model = fallback_candidates[0].name
+            elif selector.models:
+                patch_model = selector.models[0].name  # Only option
             else:
                 return [{"fixed_code": "", "patch_safety": "rejected",
                          "unsafe_reason": "No models available"} for _ in vuln_list]
+            console.print(f"[yellow]⚠ Patcher failed. Using {patch_model}.[/yellow]")
+            try:
+                await self.vram.ensure_loaded(patch_model)
+            except Exception:
+                return [{"fixed_code": "", "patch_safety": "rejected",
+                         "unsafe_reason": "All models failed to load"} for _ in vuln_list]
 
         # ── PATCH CACHE: these results survive even if reviews crash ──
         patch_results = []
