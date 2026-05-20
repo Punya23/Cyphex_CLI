@@ -160,10 +160,13 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         # native rebuild for the current platform (fixes sqlite3, etc.)
         stale_nm = os.path.join(sandbox_dir, "node_modules")
         if os.path.exists(stale_nm):
-            shutil.rmtree(stale_nm)
+            _robust_rmtree(stale_nm)
         stale_lock = os.path.join(sandbox_dir, "package-lock.json")
         if os.path.exists(stale_lock):
-            os.remove(stale_lock)
+            try:
+                os.remove(stale_lock)
+            except Exception:
+                pass
 
         npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
         install_result = await _run_cmd(

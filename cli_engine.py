@@ -364,12 +364,24 @@ class CyphexEngine:
         docker_ok = shutil.which("docker") is not None
         if docker_ok:
             try:
-                r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+                r = subprocess.run(["docker", "info"], capture_output=True, timeout=2)
+                if r.returncode != 0:
+                    if sys.platform == "darwin":
+                        print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Docker Desktop offline — auto-starting...{C.RST}")
+                        subprocess.run(["open", "-a", "Docker"], capture_output=True)
+                        time.sleep(3)
+                    elif sys.platform == "win32":
+                        docker_exe = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
+                        if os.path.exists(docker_exe):
+                            print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Docker Desktop offline — auto-starting...{C.RST}")
+                            subprocess.Popen([docker_exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            time.sleep(5)
+                r = subprocess.run(["docker", "info"], capture_output=True, timeout=2)
                 docker_ok = r.returncode == 0
-                docker_hint = None if docker_ok else "Start Docker Desktop"
+                docker_hint = None if docker_ok else "Docker daemon waking up (may take a minute)"
             except Exception:
                 docker_ok = False
-                docker_hint = "Start Docker Desktop"
+                docker_hint = "Docker daemon waking up (may take a minute)"
         else:
             docker_hint = "docker.com/products/docker-desktop"
         tools.append(("Docker", docker_ok, docker_hint))
@@ -378,12 +390,30 @@ class CyphexEngine:
         ollama_ok = False
         ollama_models = []
         try:
+            r = httpx.get("http://localhost:11434/api/tags", timeout=1.0)
+            if r.status_code == 200:
+                ollama_ok = True
+        except Exception:
+            pass
+
+        if not ollama_ok and shutil.which("ollama"):
+            print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Ollama server offline — auto-starting...{C.RST}")
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-a", "Ollama"], capture_output=True)
+            elif sys.platform == "win32":
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+            else:
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(3)  # Give server a moment to bind to port
+            
+        try:
             r = httpx.get("http://localhost:11434/api/tags", timeout=3.0)
             if r.status_code == 200:
                 ollama_ok = True
                 ollama_models = [m.get("name", "") for m in r.json().get("models", [])]
         except Exception:
             pass
+            
         if not ollama_ok:
             tools.append(("Ollama", False, "ollama.com (AI council + patching)"))
         else:
@@ -608,6 +638,14 @@ class CyphexEngine:
     # Step 3: Deploy sandbox
     async def _deploy(self, source_dir):
         import zipfile, tempfile
+        from cyphex.docker_sandbox import docker_available
+
+        if not docker_available():
+            print(f"  {C.Y}[WARN] Docker not found or not running.{C.RST}")
+            print(f"  {C.SLATE}  → Sandboxed dynamic execution testing is disabled.{C.RST}")
+            print(f"  {C.SLATE}  → Falling back to safe AI-driven static verification.{C.RST}")
+            return "offline_mode"
+
 
         # ── Priority 1: Docker Compose (full stack with DB) ──
         compose_file = os.path.join(source_dir, "docker-compose.yml")
@@ -1852,6 +1890,9 @@ class CyphexEngine:
             return
 
         # ── Phase 2: Batch generate + validate (agent-centric batching) ──
+        # The batch council now caches Stage 1 patches internally.
+        # Even if the review stage crashes, we get patches with "review_needed" status
+        # instead of losing everything and regenerating from scratch.
         batch_results = None
         if patch_council and len(patchable) > 0:
             try:
@@ -1862,7 +1903,8 @@ class CyphexEngine:
                 ]
                 batch_results = await patch_council.generate_and_validate_batch(vuln_inputs)
             except Exception as e:
-                console.print(f"[yellow]⚠ Batch council error: {str(e)[:80]}. Falling back to per-vuln mode.[/yellow]")
+                console.print(f"[yellow]⚠ Batch council error: {str(e)[:80]}.[/yellow]")
+                console.print(f"[cyan]  → Per-vuln fallback will only generate patches that weren't cached.[/cyan]")
                 batch_results = None
 
         # ── Phase 3: Present each patch for user approval ──
@@ -1931,7 +1973,11 @@ class CyphexEngine:
                 title="Vulnerability Analysis", border_style="cyan", padding=(1, 2)
             ))
 
-            fixed = patch_pkg.get("fixed_code", "").strip()
+            fixed = patch_pkg.get("fixed_code", "")
+            if isinstance(fixed, list):
+                fixed = "\n".join(str(x) for x in fixed)
+            fixed = str(fixed).strip()
+            
             if not fixed:
                 console.print(f"[yellow][SKIP][/yellow] Model did not return fixed code\n")
                 skipped += 1
@@ -2164,18 +2210,27 @@ class CyphexEngine:
         if text.startswith("```"):
             text = re.sub(r"^```[a-zA-Z0-9_-]*\\n", "", text)
             text = re.sub(r"\\n```$", "", text)
+            
+        def _sanitize(obj):
+            if isinstance(obj, dict):
+                return {k: _sanitize(v) for k, v in obj.items()}
+            if isinstance(obj, list) and len(obj) > 0 and all(isinstance(x, str) for x in obj):
+                return "\n".join(obj)
+            return obj
+
         try:
             obj = json.loads(text)
             if isinstance(obj, dict):
-                return obj
+                return _sanitize(obj)
         except Exception:
             pass
+            
         m = re.search(r"\{[\s\S]*\}", text)
         if not m:
             return None
         try:
             obj = json.loads(m.group(0))
-            return obj if isinstance(obj, dict) else None
+            return _sanitize(obj) if isinstance(obj, dict) else None
         except Exception:
             return None
 
