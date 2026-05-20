@@ -117,7 +117,8 @@ class PatchCouncil(CouncilOrchestrator):
 
         approved_count = sum(1 for a in approvals if a.get("approved", False))
         total_reviewers = len(approvals)
-        dissent_reasons = [a["reason"] for a in approvals if not a.get("approved", False)]
+        # FIX: Use .get() instead of hard key access to prevent KeyError
+        dissent_reasons = [a.get("reason", "No reason given") for a in approvals if not a.get("approved", False)]
 
         if approved_count == total_reviewers:
             final_safety = "safe"
@@ -142,8 +143,11 @@ class PatchCouncil(CouncilOrchestrator):
 
     async def generate_and_validate_batch(self, vuln_list: list[dict]) -> list[dict]:
         """
-        Agent-Centric Batching: loads each model ONCE and processes ALL vulnerabilities
-        before swapping. Reduces model swaps from O(N*Agents) to O(Agents).
+        Agent-Centric Batching with Patch Cache:
+        - Loads each model ONCE and processes ALL vulnerabilities before swapping.
+        - Stage 1 patches are CACHED so they survive review-stage crashes.
+        - If reviews crash, cached patches are returned with 'review_needed' status
+          instead of being thrown away and regenerated from scratch.
 
         vuln_list: list of dicts with keys: vuln_name, cwe, vulnerable_code, file_path
         Returns: list of patch result dicts (same format as generate_and_validate_patch)
@@ -178,6 +182,7 @@ class PatchCouncil(CouncilOrchestrator):
                 return [{"fixed_code": "", "patch_safety": "rejected",
                          "unsafe_reason": "No models available"} for _ in vuln_list]
 
+        # ── PATCH CACHE: these results survive even if reviews crash ──
         patch_results = []
         for i, v in enumerate(vuln_list, 1):
             console.print(f"[dim]  [{i}/{len(vuln_list)}] Patching: {v['vuln_name']}[/dim]")
@@ -194,62 +199,138 @@ class PatchCouncil(CouncilOrchestrator):
                 console.print(f"[red]  Error: {e}[/red]")
                 patch_results.append({"fixed_code": "", "unsafe_reason": "Generation failed"})
 
-        # ── Stage 2 & 3: Load each reviewer ONCE, review ALL patches ──
+        # ── Stage 2 & 3: Reviews — PARALLEL if hardware allows, sequential otherwise ──
+        # This is wrapped in try/except so review crashes DON'T lose Stage 1 patches
         await self.vram.unload(patch_model)
 
         all_approvals = [[] for _ in vuln_list]  # per-vuln approval lists
+        review_completed = False
 
-        for r_idx, reviewer in enumerate(reviewer_models, 2):
-            console.print(f"\n[bold cyan]Stage {r_idx}/3: Reviewing ALL patches ({reviewer})[/bold cyan]")
-            try:
-                await self.vram.ensure_loaded(reviewer)
-            except Exception:
-                console.print(f"[yellow]⚠ Could not load {reviewer}, skipping.[/yellow]")
-                for approvals in all_approvals:
-                    approvals.append({"model": reviewer, "approved": False, "reason": "Model load failed"})
-                continue
+        # Check if we can run both reviewers in parallel
+        unique_reviewers = list(dict.fromkeys(reviewer_models))  # deduplicate, preserve order
+        can_parallel = (
+            len(unique_reviewers) >= 2
+            and self.vram.parallel_capable
+            and self.vram.can_load_together(unique_reviewers[:2])
+        )
 
-            for i, (v, patch_res) in enumerate(zip(vuln_list, patch_results)):
-                fixed_code = patch_res.get("fixed_code", "")
-                if not fixed_code:
-                    all_approvals[i].append({"model": reviewer, "approved": False, "reason": "No code to review"})
-                    continue
+        try:
+            if can_parallel:
+                # ── PARALLEL REVIEW: Both reviewers loaded at once ──
+                console.print(f"\n[bold cyan]Stage 2/2: Parallel review — {' & '.join(unique_reviewers[:2])} (both loaded)[/bold cyan]")
+                console.print(f"[dim]  ⚡ Parallel mode: {self.vram.VRAM_LIMIT:.0f}GB VRAM budget allows dual-model execution[/dim]")
 
-                review_prompt = (
-                    f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n\n"
-                    f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
-                    f"Proposed patch:\n```\n{fixed_code}\n```"
-                )
-                try:
-                    review = await self._call(reviewer, PATCH_REVIEW_SYSTEM, review_prompt, task_name=f"Batch Review")
-                    all_approvals[i].append({"model": reviewer, **review})
-                except Exception as e:
-                    all_approvals[i].append({"model": reviewer, "approved": False, "reason": f"Error: {str(e)[:40]}"})
+                # Load both reviewers simultaneously
+                await self.vram.ensure_loaded_together(unique_reviewers[:2])
 
-            await self.vram.unload(reviewer)
+                # For each vulnerability, run BOTH reviews concurrently
+                for i, (v, patch_res) in enumerate(zip(vuln_list, patch_results)):
+                    fixed_code = patch_res.get("fixed_code", "")
+                    if not fixed_code:
+                        for reviewer in unique_reviewers[:2]:
+                            all_approvals[i].append({"model": reviewer, "approved": False, "reason": "No code to review"})
+                        continue
+
+                    review_prompt = (
+                        f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n\n"
+                        f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                        f"Proposed patch:\n```\n{fixed_code}\n```"
+                    )
+
+                    # Fire both reviews simultaneously with asyncio.gather
+                    async def _review_one(reviewer_model, prompt):
+                        try:
+                            review = await self._call(
+                                reviewer_model, PATCH_REVIEW_SYSTEM, prompt,
+                                task_name=f"Parallel Review ({reviewer_model})"
+                            )
+                            return {"model": reviewer_model, **review}
+                        except Exception as e:
+                            return {"model": reviewer_model, "approved": False, "reason": f"Error: {str(e)[:40]}"}
+
+                    import asyncio
+                    results = await asyncio.gather(
+                        _review_one(unique_reviewers[0], review_prompt),
+                        _review_one(unique_reviewers[1], review_prompt),
+                    )
+                    for r in results:
+                        all_approvals[i].append(r)
+
+                # Unload both reviewers
+                for reviewer in unique_reviewers[:2]:
+                    await self.vram.unload(reviewer)
+
+            else:
+                # ── SEQUENTIAL REVIEW: One reviewer at a time (original flow) ──
+                for r_idx, reviewer in enumerate(unique_reviewers, 2):
+                    console.print(f"\n[bold cyan]Stage {r_idx}/3: Reviewing ALL patches ({reviewer})[/bold cyan]")
+                    try:
+                        await self.vram.ensure_loaded(reviewer)
+                    except Exception:
+                        console.print(f"[yellow]⚠ Could not load {reviewer}, skipping.[/yellow]")
+                        for approvals in all_approvals:
+                            approvals.append({"model": reviewer, "approved": False, "reason": "Model load failed"})
+                        continue
+
+                    for i, (v, patch_res) in enumerate(zip(vuln_list, patch_results)):
+                        fixed_code = patch_res.get("fixed_code", "")
+                        if not fixed_code:
+                            all_approvals[i].append({"model": reviewer, "approved": False, "reason": "No code to review"})
+                            continue
+
+                        review_prompt = (
+                            f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n\n"
+                            f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                            f"Proposed patch:\n```\n{fixed_code}\n```"
+                        )
+                        try:
+                            review = await self._call(reviewer, PATCH_REVIEW_SYSTEM, review_prompt, task_name=f"Batch Review")
+                            all_approvals[i].append({"model": reviewer, **review})
+                        except Exception as e:
+                            all_approvals[i].append({"model": reviewer, "approved": False, "reason": f"Error: {str(e)[:40]}"})
+
+                    await self.vram.unload(reviewer)
+
+            review_completed = True
+
+        except Exception as review_error:
+            console.print(f"[yellow]⚠ Review stage error: {str(review_error)[:80]}[/yellow]")
+            console.print(f"[cyan]  → Using cached patches from Stage 1 (no regeneration needed)[/cyan]")
 
         # ── Assemble final results ──
         final_results = []
-        for i, (patch_res, approvals) in enumerate(zip(patch_results, all_approvals)):
+        for i, patch_res in enumerate(patch_results):
+            approvals = all_approvals[i] if i < len(all_approvals) else []
+
+            # Safe key access — use .get() to prevent KeyError on missing 'reason'
             approved_count = sum(1 for a in approvals if a.get("approved", False))
             total_reviewers = len(approvals)
-            dissent_reasons = [a["reason"] for a in approvals if not a.get("approved", False)]
+            dissent_reasons = [a.get("reason", "No reason given") for a in approvals if not a.get("approved", False)]
 
-            if approved_count == total_reviewers:
+            fixed_code = patch_res.get("fixed_code", "")
+
+            if not fixed_code:
+                final_safety = "rejected"
+            elif not review_completed and total_reviewers == 0:
+                final_safety = "review_needed"
+            elif approved_count == total_reviewers and total_reviewers > 0:
                 final_safety = "safe"
             elif approved_count >= 1:
+                final_safety = "review_needed"
+            elif total_reviewers == 0:
                 final_safety = "review_needed"
             else:
                 final_safety = "rejected"
 
             final_results.append({
-                "fixed_code": patch_res.get("fixed_code", ""),
+                "fixed_code": fixed_code,
                 "unsafe_reason": patch_res.get("unsafe_reason", ""),
                 "patch_safety": final_safety,
                 "approvals": approvals,
                 "dissent_reasons": dissent_reasons,
-                "vote_summary": f"{approved_count}/{total_reviewers} validators approved"
+                "vote_summary": f"{approved_count}/{total_reviewers} validators approved" if total_reviewers > 0 else "Unreviewed (cached from Stage 1)"
             })
 
-        console.print(f"\n[bold green]═══ Batch complete: {len(final_results)} patches processed ═══[/bold green]")
+        mode_label = "parallel" if can_parallel else "sequential"
+        console.print(f"\n[bold green]═══ Batch complete: {len(final_results)} patches ({mode_label} review) ═══[/bold green]")
         return final_results

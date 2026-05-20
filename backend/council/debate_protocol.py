@@ -164,55 +164,59 @@ class DebateProtocol(CouncilOrchestrator):
 
         console.print(f"[dim]  Council validators: {' + '.join(set(VALIDATORS))}[/dim]")
 
+        unique_validators = list(dict.fromkeys(VALIDATORS))
+        validator_batches = self.vram.get_parallel_batches(unique_validators)
+        
+        console.print(f"[dim]  Running in {len(validator_batches)} batch(es) due to VRAM limits (Limit: {self.vram.VRAM_LIMIT:.0f}GB)[/dim]")
+
         # Per-vuln vote storage: votes[vuln_idx] = list of vote dicts
         all_votes = [[] for _ in to_debate]
         start = time.time()
 
-        for validator in dict.fromkeys(VALIDATORS):  # unique validators, preserving order
+        import asyncio
+
+        for batch_idx, batch in enumerate(validator_batches, 1):
             elapsed = time.time() - start
             if elapsed > DEBATE_TIMEOUT_TOTAL:
                 console.print(f"[yellow]⏱ Debate timeout ({DEBATE_TIMEOUT_TOTAL}s). Keeping remaining findings.[/yellow]")
                 break
 
-            # Load this validator ONCE
-            try:
-                await self.vram.ensure_loaded(validator)
-            except Exception:
-                fallback = selector.models[0].name if selector.models else None
-                if fallback:
-                    validator = fallback
-                    try:
-                        await self.vram.ensure_loaded(fallback)
-                    except Exception:
-                        # Can't load any model — abstain for all vulns
-                        for votes in all_votes:
-                            votes.append({"model": validator, "round": 1, "status": "abstained",
-                                          "confirmed": None, "confidence": 0.0, "reason": "Model load failed"})
-                        continue
-                else:
-                    continue
+            console.print(f"\n[bold cyan]Batch {batch_idx}/{len(validator_batches)}: Parallel debate — {' + '.join(batch)}[/bold cyan]")
+            
+            # 1. Ensure whole batch is loaded
+            await self.vram.ensure_loaded_together(batch)
 
-            # Iterate ALL vulns against this validator
+            # 2. Iterate ALL vulns against this batch of validators
             for v_idx, v in enumerate(to_debate):
                 elapsed = time.time() - start
                 if elapsed > DEBATE_TIMEOUT_TOTAL:
-                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "abstained",
-                                             "confirmed": None, "confidence": 0.0, "reason": "Timeout"})
+                    for model in batch:
+                        all_votes[v_idx].append({"model": model, "round": 1, "status": "abstained",
+                                                 "confirmed": None, "confidence": 0.0, "reason": "Timeout"})
                     continue
 
                 evidence = str(v.evidence) if v.evidence else str(getattr(v, 'payload', ''))
                 evidence_trimmed = evidence[:1500] if len(evidence) > 1500 else evidence
                 prompt = f"Vulnerability type: {v.name}\n\nEvidence (request + response):\n{evidence_trimmed}"
 
-                try:
-                    vote = await self._call(validator, VALIDATION_SYSTEM, prompt, task_name="Batch Debate")
-                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "voted", **vote})
-                except Exception as e:
-                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "abstained",
-                                             "confirmed": None, "confidence": 0.0, "reason": f"Error: {str(e)[:40]}"})
+                # Concurrent execution for all models in this batch for the current vuln
+                async def _vote_one(model_name, p):
+                    try:
+                        vote = await self._call(model_name, VALIDATION_SYSTEM, p, task_name=f"Batch Debate ({model_name})")
+                        return {"model": model_name, "round": 1, "status": "voted", **vote}
+                    except Exception as e:
+                        return {"model": model_name, "round": 1, "status": "abstained",
+                                "confirmed": None, "confidence": 0.0, "reason": f"Error: {str(e)[:40]}"}
 
-            # Unload before loading next validator
-            await self.vram.unload(validator)
+                tasks = [_vote_one(model, prompt) for model in batch]
+                results = await asyncio.gather(*tasks)
+                
+                for r in results:
+                    all_votes[v_idx].append(r)
+
+            # 3. Unload batch before loading next
+            for model in batch:
+                await self.vram.unload(model)
 
         # ── Tally votes per vulnerability ──
         validated = list(auto_keep)
