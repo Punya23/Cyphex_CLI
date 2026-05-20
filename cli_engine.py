@@ -1790,7 +1790,7 @@ class CyphexEngine:
 
         console.print(Panel(
             f"[bold]Found {len(vulns)} Critical/High vulnerabilities to review.[/bold]\n"
-            f"[dim]Council Mode: {'ENABLED' if COUNCIL_AVAILABLE else 'DISABLED (fallback)'}[/dim]",
+            f"[dim]Council Mode: {'ENABLED (Batch)' if COUNCIL_AVAILABLE else 'DISABLED (fallback)'}[/dim]",
             title="PATCH WORKFLOW", border_style="magenta"
         ))
 
@@ -1800,101 +1800,121 @@ class CyphexEngine:
         patched_files = []
         skipped = 0
 
-        for i, v in enumerate(vulns, 1):
+        # CWE lookup helper
+        cwe_map = {
+            "sql injection": "CWE-89", "xss": "CWE-79",
+            "command injection": "CWE-78", "cmdi": "CWE-78",
+            "ssrf": "CWE-918", "idor": "CWE-284",
+            "jwt": "CWE-287", "sensitive data": "CWE-200",
+            "hardcoded": "CWE-798", "cors": "CWE-942",
+            "lfi": "CWE-22", "path traversal": "CWE-22",
+        }
+
+        # ── Phase 1: Collect all patchable vulns ──
+        patchable = []  # list of (vuln, rel_path, line_num, lines, snippet, vuln_type)
+        for v in vulns:
             if ":" not in (v.endpoint or ""):
                 continue
-
             parts = v.endpoint.split(":")
             rel_path = parts[0].strip()
             try:
                 line_num = int(parts[1].split()[0])
             except Exception:
                 continue
-
             filepath = os.path.join(self.source_dir, rel_path)
             if not os.path.exists(filepath):
                 continue
-
             try:
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
             except Exception:
                 continue
-
-            sev_color = C.R if v.severity == "Critical" else C.Y
-            vuln_type = v.name.replace("[STATIC] ", "").replace("[DYNAMIC] ", "")
-            console.print(f"\n[bold]{'-' * 70}[/bold]")
-            console.print(f"[bold][{i}/{len(vulns)}] {vuln_type} ({v.severity})[/bold]")
-            console.print(f"File: [cyan]{rel_path}:{line_num}[/cyan]")
-
             start_l = max(0, line_num - 3)
             end_l = min(len(lines), line_num + 2)
             snippet = "".join(lines[start_l:end_l])
+            vuln_type = v.name.replace("[STATIC] ", "").replace("[DYNAMIC] ", "")
+
+            cwe = "CWE-unknown"
+            for key, val in cwe_map.items():
+                if key in vuln_type.lower():
+                    cwe = val
+                    break
+
+            patchable.append({
+                "vuln": v, "rel_path": rel_path, "line_num": line_num,
+                "lines": lines, "snippet": snippet, "vuln_type": vuln_type,
+                "cwe": cwe, "start_l": start_l, "end_l": end_l,
+                "filepath": os.path.join(self.source_dir, rel_path),
+            })
+
+        if not patchable:
+            console.print(f"[dim]No static vulns with file locations to patch.[/dim]")
+            return
+
+        # ── Phase 2: Batch generate + validate (agent-centric batching) ──
+        batch_results = None
+        if patch_council and len(patchable) > 0:
+            try:
+                vuln_inputs = [
+                    {"vuln_name": p["vuln_type"], "cwe": p["cwe"],
+                     "vulnerable_code": p["snippet"], "file_path": p["rel_path"]}
+                    for p in patchable
+                ]
+                batch_results = await patch_council.generate_and_validate_batch(vuln_inputs)
+            except Exception as e:
+                console.print(f"[yellow]⚠ Batch council error: {str(e)[:80]}. Falling back to per-vuln mode.[/yellow]")
+                batch_results = None
+
+        # ── Phase 3: Present each patch for user approval ──
+        for i, p in enumerate(patchable):
+            v = p["vuln"]
+            console.print(f"\n[bold]{'-' * 70}[/bold]")
+            console.print(f"[bold][{i+1}/{len(patchable)}] {p['vuln_type']} ({v.severity})[/bold]")
+            console.print(f"File: [cyan]{p['rel_path']}:{p['line_num']}[/cyan]")
 
             console.print(f"\n[bold]Vulnerable Code:[/bold]")
-            for j in range(start_l, end_l):
+            for j in range(p["start_l"], p["end_l"]):
                 ln = j + 1
-                marker = "->" if ln == line_num else "  "
-                console.print(f"  {marker} {ln:4} | {lines[j].rstrip()[:120]}")
+                marker = "->" if ln == p["line_num"] else "  "
+                console.print(f"  {marker} {ln:4} | {p['lines'][j].rstrip()[:120]}")
 
-            # --- COUNCIL PATCH GENERATION ---
+            # Get patch from batch results or fallback
             patch_pkg = None
-            if patch_council:
-                try:
-                    # Determine CWE from vulnerability type
-                    cwe_map = {
-                        "sql injection": "CWE-89", "xss": "CWE-79",
-                        "command injection": "CWE-78", "cmdi": "CWE-78",
-                        "ssrf": "CWE-918", "idor": "CWE-284",
-                        "jwt": "CWE-287", "sensitive data": "CWE-200",
-                        "hardcoded": "CWE-798", "cors": "CWE-942",
-                        "lfi": "CWE-22", "path traversal": "CWE-22",
+            if batch_results and i < len(batch_results):
+                council_result = batch_results[i]
+                if council_result and council_result.get("fixed_code"):
+                    patch_pkg = {
+                        "unsafe_reason": council_result.get("unsafe_reason", ""),
+                        "fixed_code": council_result.get("fixed_code", ""),
+                        "justifications": council_result.get("vote_summary", ""),
+                        "patch_safety": council_result.get("patch_safety", ""),
                     }
-                    cwe = "CWE-unknown"
-                    for key, val in cwe_map.items():
-                        if key in vuln_type.lower():
-                            cwe = val
-                            break
+                    # Show council approval details
+                    approvals = council_result.get("approvals", [])
+                    dissent = council_result.get("dissent_reasons", [])
+                    vote_table = Table(title="Council Patch Validation", box=ROUNDED)
+                    vote_table.add_column("Model", width=22)
+                    vote_table.add_column("Verdict", justify="center", width=10)
+                    vote_table.add_column("Reason", max_width=45)
+                    for a in approvals:
+                        verdict_color = "green" if a.get("approved") else "red"
+                        verdict_text = "APPROVED" if a.get("approved") else "REJECTED"
+                        vote_table.add_row(
+                            a.get("model", "unknown"),
+                            f"[{verdict_color}]{verdict_text}[/{verdict_color}]",
+                            a.get("reason", "")
+                        )
+                    console.print(vote_table)
 
-                    council_result = await patch_council.generate_and_validate_patch(
-                        vuln_name=vuln_type, cwe=cwe,
-                        vulnerable_code=snippet, file_path=rel_path
-                    )
-                    if council_result and council_result.get("fixed_code"):
-                        patch_pkg = {
-                            "unsafe_reason": council_result.get("unsafe_reason", ""),
-                            "fixed_code": council_result.get("fixed_code", ""),
-                            "justifications": council_result.get("vote_summary", ""),
-                            "patch_safety": council_result.get("patch_safety", ""),
-                        }
-                        # Show council approval details
-                        approvals = council_result.get("approvals", [])
-                        dissent = council_result.get("dissent_reasons", [])
-                        vote_table = Table(title="Council Patch Validation", box=ROUNDED)
-                        vote_table.add_column("Model", width=22)
-                        vote_table.add_column("Verdict", justify="center", width=10)
-                        vote_table.add_column("Reason", max_width=45)
-                        for a in approvals:
-                            verdict_color = "green" if a.get("approved") else "red"
-                            verdict_text = "APPROVED" if a.get("approved") else "REJECTED"
-                            vote_table.add_row(
-                                a.get("model", "unknown"),
-                                f"[{verdict_color}]{verdict_text}[/{verdict_color}]",
-                                a.get("reason", "")
-                            )
-                        console.print(vote_table)
+                    if dissent:
+                        console.print(Panel(
+                            "\n".join(f"[red]•[/red] {r}" for r in dissent),
+                            title="Dissenting Reasons", border_style="red"
+                        ))
 
-                        if dissent:
-                            console.print(Panel(
-                                "\n".join(f"[red]•[/red] {r}" for r in dissent),
-                                title="Dissenting Reasons", border_style="red"
-                            ))
-                except Exception as e:
-                    console.print(f"[yellow]⚠ Council error: {str(e)[:80]}. Falling back to single-model.[/yellow]")
-
-            # Fallback to old single-model if council failed
+            # Fallback to old single-model if batch failed for this vuln
             if not patch_pkg:
-                patch_pkg = await self._get_llm_fix_package(v, snippet, rel_path)
+                patch_pkg = await self._get_llm_fix_package(v, p["snippet"], p["rel_path"])
 
             if not patch_pkg:
                 console.print(f"[yellow][SKIP][/yellow] Could not generate patch\n")
@@ -1917,10 +1937,10 @@ class CyphexEngine:
                 skipped += 1
                 continue
 
-            safety_notes = self._assess_patch_safety(v, snippet, fixed)
+            safety_notes = self._assess_patch_safety(v, p["snippet"], fixed)
 
             diff_text = Text()
-            for ol in snippet.split("\n"):
+            for ol in p["snippet"].split("\n"):
                 if ol.strip():
                     diff_text.append(f"- {ol[:120]}\n", style="red")
             for nl in fixed.split("\n"):
@@ -1956,13 +1976,15 @@ class CyphexEngine:
                 console.print(f"[dim][SKIPPED][/dim]\n")
                 continue
 
-            for j in range(start_l, end_l):
+            lines = p["lines"]
+            for j in range(p["start_l"], p["end_l"]):
                 lines[j] = ""
-            lines[start_l] = fixed + "\n"
-            with open(filepath, "w", encoding="utf-8") as f:
+            lines[p["start_l"]] = fixed + "\n"
+            with open(p["filepath"], "w", encoding="utf-8") as f:
                 f.writelines(lines)
-            patched_files.append(rel_path)
-            console.print(f"[green][APPLIED][/green] Patch applied to {rel_path}\n")
+            patched_files.append(p["rel_path"])
+            console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']}\n")
+
 
         console.print(f"\n[bold]{'-' * 50}[/bold]")
         console.print(f"[green]Applied:[/green] {len(patched_files)}  [yellow]Skipped:[/yellow] {skipped}")

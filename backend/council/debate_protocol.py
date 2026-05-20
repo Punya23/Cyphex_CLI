@@ -132,11 +132,9 @@ class DebateProtocol(CouncilOrchestrator):
 
     async def debate_batch(self, vulns: list, max_vulns: int = MAX_DEBATE_VULNS) -> list:
         """
-        Debate a batch of vulnerabilities with intelligence:
-        - Checks if models are large enough for reliable debate
-        - If models are too small, SKIPS debate (keeps all findings)
-        - Has a total time cap
-        - Prioritizes Critical > High > Medium > Low
+        Agent-Centric Batch Debate: loads each validator model ONCE and
+        debates ALL vulnerabilities against it before swapping.
+        Reduces model swaps from O(N * Validators) to O(Validators).
         """
         if not vulns:
             return []
@@ -159,25 +157,82 @@ class DebateProtocol(CouncilOrchestrator):
         if auto_keep:
             console.print(f"[dim]  Debating top {len(to_debate)} findings, auto-keeping {len(auto_keep)} lower-priority...[/dim]")
 
-        validated = list(auto_keep)
+        # ── Agent-Centric Batching: load each validator once ──
+        selector = await get_selector(quiet=True)
+        VALIDATORS = selector.get_validators(count=3)
+        self.vram.update_costs(selector.get_vram_costs())
+
+        console.print(f"[dim]  Council validators: {' + '.join(set(VALIDATORS))}[/dim]")
+
+        # Per-vuln vote storage: votes[vuln_idx] = list of vote dicts
+        all_votes = [[] for _ in to_debate]
         start = time.time()
 
-        for v in to_debate:
+        for validator in dict.fromkeys(VALIDATORS):  # unique validators, preserving order
             elapsed = time.time() - start
             if elapsed > DEBATE_TIMEOUT_TOTAL:
                 console.print(f"[yellow]⏱ Debate timeout ({DEBATE_TIMEOUT_TOTAL}s). Keeping remaining findings.[/yellow]")
+                break
+
+            # Load this validator ONCE
+            try:
+                await self.vram.ensure_loaded(validator)
+            except Exception:
+                fallback = selector.models[0].name if selector.models else None
+                if fallback:
+                    validator = fallback
+                    try:
+                        await self.vram.ensure_loaded(fallback)
+                    except Exception:
+                        # Can't load any model — abstain for all vulns
+                        for votes in all_votes:
+                            votes.append({"model": validator, "round": 1, "status": "abstained",
+                                          "confirmed": None, "confidence": 0.0, "reason": "Model load failed"})
+                        continue
+                else:
+                    continue
+
+            # Iterate ALL vulns against this validator
+            for v_idx, v in enumerate(to_debate):
+                elapsed = time.time() - start
+                if elapsed > DEBATE_TIMEOUT_TOTAL:
+                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "abstained",
+                                             "confirmed": None, "confidence": 0.0, "reason": "Timeout"})
+                    continue
+
+                evidence = str(v.evidence) if v.evidence else str(getattr(v, 'payload', ''))
+                evidence_trimmed = evidence[:1500] if len(evidence) > 1500 else evidence
+                prompt = f"Vulnerability type: {v.name}\n\nEvidence (request + response):\n{evidence_trimmed}"
+
+                try:
+                    vote = await self._call(validator, VALIDATION_SYSTEM, prompt, task_name="Batch Debate")
+                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "voted", **vote})
+                except Exception as e:
+                    all_votes[v_idx].append({"model": validator, "round": 1, "status": "abstained",
+                                             "confirmed": None, "confidence": 0.0, "reason": f"Error: {str(e)[:40]}"})
+
+            # Unload before loading next validator
+            await self.vram.unload(validator)
+
+        # ── Tally votes per vulnerability ──
+        validated = list(auto_keep)
+        for v_idx, v in enumerate(to_debate):
+            votes = all_votes[v_idx]
+            actual_votes = [vote for vote in votes if vote.get("status") == "voted"]
+            num_actual = len(actual_votes)
+
+            if num_actual == 0:
+                console.print(f"  [yellow]→ {v.name}: All abstained — KEEPING[/yellow]")
                 validated.append(v)
                 continue
 
-            try:
-                is_valid, conf, _ = await self.debate_finding(
-                    v.name,
-                    str(v.evidence) if v.evidence else str(getattr(v, 'payload', ''))
-                )
-                if is_valid:
-                    validated.append(v)
-            except Exception as e:
-                console.print(f"[yellow]⚠ Debate error for {v.name}: {str(e)[:50]}. Keeping finding.[/yellow]")
+            confirmed_count = sum(1 for vote in actual_votes if vote.get("confirmed", False))
+
+            if confirmed_count >= 1:
                 validated.append(v)
+                console.print(f"  [green]→ {v.name}: {confirmed_count}/{num_actual} confirmed — KEEPING[/green]")
+            else:
+                console.print(f"  [red]→ {v.name}: 0/{num_actual} confirmed — REJECTED[/red]")
 
         return validated
+

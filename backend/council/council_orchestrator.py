@@ -97,8 +97,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
 3. Never use phrases like "might be", "could potentially", "appears to be",
    "seems vulnerable". Every finding statement must be backed by evidence.
 4. If you are uncertain, set confirmed=false or approved=false. Never guess true.
-5. You MUST provide your detailed, step-by-step reasoning in a "thinking" key inside the final JSON object BEFORE the decision keys. This is mandatory for transparency and strong reasoning.
-6. Return ONLY valid JSON. No preamble, no markdown.
+5. You MUST provide your reasoning in a "thinking" key inside the final JSON object BEFORE the decision keys. Keep it to 1-2 SHORT sentences only. Do NOT write long explanations.
+6. Return ONLY valid JSON. No preamble, no markdown, no extra text.
 """
 
     def __init__(self):
@@ -134,7 +134,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                                 "options": {
                                     "temperature": 0.1,
                                     "top_p": 0.9,
-                                    "num_predict": 512,   # Cap response length — prevents rambling
+                                    "num_predict": 1024,  # Enough headroom to complete JSON without truncation
                                     "num_ctx": 2048,      # Smaller context = faster inference
                                 }
                             }
@@ -148,11 +148,9 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 try:
                     parsed = json.loads(clean)
                 except json.JSONDecodeError:
-                    # Fallback to regex extraction
-                    match = re.search(r'(\{.*\}|\[.*\])', clean, re.DOTALL)
-                    if match:
-                        parsed = json.loads(match.group(1))
-                    else:
+                    # Fallback: bracket-balanced extraction (handles nested braces in strings)
+                    parsed = self._extract_json_robust(clean)
+                    if parsed is None:
                         raise json.JSONDecodeError("No JSON structure found", clean, 0)
                 
                 # Extract and display thinking from the JSON
@@ -180,3 +178,36 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 raise CouncilCallError(f"{model} API error: {str(e)}")
 
         raise CouncilCallError(f"{model} failed after 2 attempts")
+
+    @staticmethod
+    def _extract_json_robust(text: str):
+        """
+        Find the outermost balanced {...} using bracket counting.
+        Handles nested braces inside JSON string values correctly.
+        Returns parsed dict or None.
+        """
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if ch == '\\' and in_string:
+                i += 2
+                continue
+            if ch == '"':
+                in_string = not in_string
+            elif not in_string:
+                if ch == '{':
+                    depth += 1
+                elif ch == '}':
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:i + 1])
+                        except json.JSONDecodeError:
+                            return None
+            i += 1
+        return None
