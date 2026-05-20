@@ -1821,13 +1821,26 @@ class CyphexEngine:
 
     # Step 8: Patch workflow
     async def _patch_workflow(self):
-        vulns = [v for v in self.context.confirmed_vulns if v.severity in ("Critical", "High")]
+        vulns = list(self.context.confirmed_vulns)
         if not vulns:
-            print(f"  {C.G}No critical/high vulns to patch.{C.RST}")
+            print(f"  {C.G}No vulnerabilities to patch.{C.RST}")
             return
 
+        # Calculate BEFORE score
+        import math
+        crit_b = sum(1 for v in vulns if v.severity == "Critical")
+        high_b = sum(1 for v in vulns if v.severity == "High")
+        med_b  = sum(1 for v in vulns if v.severity == "Medium")
+        low_b  = sum(1 for v in vulns if v.severity in ("Low", "Info"))
+        penalty_b = 0
+        if crit_b: penalty_b += 20 + 10 * math.log2(1 + crit_b)
+        if high_b: penalty_b += 10 + 8 * math.log2(1 + high_b)
+        if med_b:  penalty_b += 3 + 4 * math.log2(1 + med_b)
+        if low_b:  penalty_b += 1 + 2 * math.log2(1 + low_b)
+        score_before = max(0, min(100, round(100 - penalty_b)))
+
         console.print(Panel(
-            f"[bold]Found {len(vulns)} Critical/High vulnerabilities to review.[/bold]\n"
+            f"[bold]Found {len(vulns)} vulnerabilities to review.[/bold]\n"
             f"[dim]Council Mode: {'ENABLED (Batch)' if COUNCIL_AVAILABLE else 'DISABLED (fallback)'}[/dim]",
             title="PATCH WORKFLOW", border_style="magenta"
         ))
@@ -1850,22 +1863,39 @@ class CyphexEngine:
 
         # ── Phase 1: Collect all patchable vulns ──
         patchable = []  # list of (vuln, rel_path, line_num, lines, snippet, vuln_type)
+        dynamic_only = []  # vulns with no source file to patch (runtime/DAST findings)
         for v in vulns:
-            if ":" not in (v.endpoint or ""):
+            endpoint = v.endpoint or ""
+            # Dynamic vulns have HTTP URLs, not file:line references
+            if endpoint.startswith("http://") or endpoint.startswith("https://"):
+                dynamic_only.append(v)
                 continue
-            parts = v.endpoint.split(":")
+            if ":" not in endpoint:
+                dynamic_only.append(v)
+                continue
+            parts = endpoint.split(":")
             rel_path = parts[0].strip()
             try:
                 line_num = int(parts[1].split()[0])
             except Exception:
+                dynamic_only.append(v)
                 continue
             filepath = os.path.join(self.source_dir, rel_path)
             if not os.path.exists(filepath):
-                continue
+                # Try absolute path (semgrep findings have full paths)
+                if os.path.exists(rel_path):
+                    filepath = rel_path
+                    # Convert to relative for display
+                    if self.source_dir and rel_path.startswith(self.source_dir):
+                        rel_path = os.path.relpath(rel_path, self.source_dir)
+                else:
+                    dynamic_only.append(v)
+                    continue
             try:
                 with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                     lines = f.readlines()
             except Exception:
+                dynamic_only.append(v)
                 continue
             start_l = max(0, line_num - 3)
             end_l = min(len(lines), line_num + 2)
@@ -1882,11 +1912,14 @@ class CyphexEngine:
                 "vuln": v, "rel_path": rel_path, "line_num": line_num,
                 "lines": lines, "snippet": snippet, "vuln_type": vuln_type,
                 "cwe": cwe, "start_l": start_l, "end_l": end_l,
-                "filepath": os.path.join(self.source_dir, rel_path),
+                "filepath": filepath,
             })
 
+        if dynamic_only:
+            console.print(f"[dim]  {len(dynamic_only)} dynamic/runtime findings (no source file to auto-patch)[/dim]")
+
         if not patchable:
-            console.print(f"[dim]No static vulns with file locations to patch.[/dim]")
+            console.print(f"[dim]No vulns with file locations to patch.[/dim]")
             return
 
         # ── Phase 2: Batch generate + validate (agent-centric batching) ──
@@ -1954,10 +1987,8 @@ class CyphexEngine:
                             title="Dissenting Reasons", border_style="red"
                         ))
 
-            # Fallback to old single-model if batch failed for this vuln
-            if not patch_pkg:
-                patch_pkg = await self._get_llm_fix_package(v, p["snippet"], p["rel_path"])
-
+            # If batch council didn't produce a patch, skip it entirely
+            # (No re-generation fallback — saves significant scan time)
             if not patch_pkg:
                 console.print(f"[yellow][SKIP][/yellow] Could not generate patch\n")
                 skipped += 1
@@ -2034,6 +2065,42 @@ class CyphexEngine:
 
         console.print(f"\n[bold]{'-' * 50}[/bold]")
         console.print(f"[green]Applied:[/green] {len(patched_files)}  [yellow]Skipped:[/yellow] {skipped}")
+
+        # ── After-Patching Score ──
+        remaining_vulns = len(vulns) - len(patched_files)
+        # Recalculate severity counts after patching
+        patched_set = set(patched_files)
+        remaining = [v for v in vulns
+                     if not any(v.endpoint and p_entry in v.endpoint for p_entry in patched_set)]
+        crit_a = sum(1 for v in remaining if v.severity == "Critical")
+        high_a = sum(1 for v in remaining if v.severity == "High")
+        med_a  = sum(1 for v in remaining if v.severity == "Medium")
+        low_a  = sum(1 for v in remaining if v.severity in ("Low", "Info"))
+        penalty_a = 0
+        if crit_a: penalty_a += 20 + 10 * math.log2(1 + crit_a)
+        if high_a: penalty_a += 10 + 8 * math.log2(1 + high_a)
+        if med_a:  penalty_a += 3 + 4 * math.log2(1 + med_a)
+        if low_a:  penalty_a += 1 + 2 * math.log2(1 + low_a)
+        score_after = max(0, min(100, round(100 - penalty_a)))
+
+        delta = score_after - score_before
+        delta_color = "green" if delta > 0 else "yellow" if delta == 0 else "red"
+        delta_str = f"+{delta}" if delta > 0 else str(delta)
+
+        bar_b = int(score_before / 100 * 25)
+        bar_a = int(score_after / 100 * 25)
+        sc_b_color = "red" if score_before < 40 else "yellow" if score_before < 70 else "green"
+        sc_a_color = "red" if score_after < 40 else "yellow" if score_after < 70 else "green"
+
+        console.print(Panel(
+            f"  [bold]Before Patching:[/bold]  [{sc_b_color}]{'█' * bar_b}{'░' * (25 - bar_b)}  {score_before}/100[/{sc_b_color}]\n"
+            f"  [bold]After Patching:[/bold]   [{sc_a_color}]{'█' * bar_a}{'░' * (25 - bar_a)}  {score_after}/100[/{sc_a_color}]\n\n"
+            f"  [bold]Improvement:[/bold]  [{delta_color}]{delta_str} points[/{delta_color}]  │  "
+            f"Patched: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]  │  "
+            f"Crit: {crit_a}  High: {high_a}  Med: {med_a}  Low: {low_a}",
+            title="[bold cyan]◈ SECURITY SCORE: BEFORE vs AFTER ◈[/bold cyan]",
+            border_style="cyan", padding=(1, 2)
+        ))
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")
