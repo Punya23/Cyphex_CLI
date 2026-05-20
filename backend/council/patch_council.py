@@ -54,7 +54,7 @@ class PatchCouncil(CouncilOrchestrator):
         self.vram.update_costs(selector.get_vram_costs())
 
         patch_model = selector.get("patcher")
-        reviewer_models = selector.get_validators(count=2)
+        reviewer_models = selector.get_reviewers(count=2)
 
         console.print(f"[dim]  Patcher:   {patch_model}[/dim]")
         console.print(f"[dim]  Reviewers: {', '.join(reviewer_models)}[/dim]")
@@ -157,14 +157,14 @@ class PatchCouncil(CouncilOrchestrator):
 
         console.print(f"\n[bold magenta]═══ Batch Patch Mode: {len(vuln_list)} vulnerabilities ═══[/bold magenta]")
 
-        # Discover models
+        # Discover models — uses intelligent resource-aware brain
         selector = await get_selector(quiet=True)
         self.vram.update_costs(selector.get_vram_costs())
         patch_model = selector.get("patcher")
-        reviewer_models = selector.get_validators(count=2)
+        reviewer_models = selector.get_reviewers(count=2)  # Resource-aware: returns 1 or 2
 
         console.print(f"[dim]  Patcher:   {patch_model}[/dim]")
-        console.print(f"[dim]  Reviewers: {', '.join(reviewer_models)}[/dim]")
+        console.print(f"[dim]  Reviewers: {', '.join(reviewer_models)} ({selector.strategy})[/dim]")
 
         # ── Stage 1: Load patcher ONCE, generate ALL patches ──
         console.print(f"\n[bold cyan]Stage 1/3: Generating {len(vuln_list)} patches ({patch_model})[/bold cyan]")
@@ -206,12 +206,11 @@ class PatchCouncil(CouncilOrchestrator):
         all_approvals = [[] for _ in vuln_list]  # per-vuln approval lists
         review_completed = False
 
-        # Check if we can run both reviewers in parallel
+        # Use the selector's strategy decision — no redundant VRAM checks
         unique_reviewers = list(dict.fromkeys(reviewer_models))  # deduplicate, preserve order
         can_parallel = (
             len(unique_reviewers) >= 2
-            and self.vram.parallel_capable
-            and self.vram.can_load_together(unique_reviewers[:2])
+            and selector.parallel_review_enabled
         )
 
         try:
