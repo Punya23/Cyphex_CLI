@@ -12,10 +12,10 @@ You are CYPHEX Patch Agent, a secure code analysis assistant.
 RULES:
 1. Return ONLY valid JSON: {"unsafe_reason": string, "fixed_code": string, "patch_safety": "safe"|"review_needed"}
 2. fixed_code must be a drop-in replacement for the vulnerable snippet. Change ONLY what is needed to fix the vulnerability.
-3. Do not add imports, do not restructure, do not rename variables unrelated to the fix.
-4. unsafe_reason: one sentence explaining why the original code is dangerous in plain English.
-5. Never reference CVE numbers.
-6. patch_safety = "safe" only if the fix is unambiguous and requires no external context.
+3. Do not add imports unless strictly required, do not restructure, do not rename variables.
+4. IMPORTANT: Provide a COMPLETE, FUNCTIONAL fix. Do NOT use pseudo-code, comments, or placeholders like "// logic here" or "/* validation */". If you are adding authentication or validation, implement actual working code.
+5. unsafe_reason: one sentence explaining why the original code is dangerous.
+6. patch_safety = "safe" only if the fix is unambiguous.
 """
 
 PATCH_REVIEW_SYSTEM = """
@@ -24,11 +24,10 @@ You will receive: the vulnerability type, the original vulnerable code, and a pr
 RULES:
 1. Return ONLY valid JSON: {"approved": true/false, "reason": "one sentence max 30 words"}
 2. approved=true ONLY when ALL of these are true:
-   - The patch actually eliminates the vulnerability (parameterised query, escaped output, etc.)
-   - The patch does not introduce new security issues
-   - The patch does not change logic unrelated to the vulnerability
-   - The patch is syntactically valid for the language
-3. approved=false if the patch is incomplete, changes too much, or introduces new issues.
+   - The patch eliminates the vulnerability.
+   - The patch does not introduce new issues.
+   - The patch is complete and does NOT contain placeholders like "// add logic here".
+3. If the patch uses parameterized queries, securely escapes output, or properly implements an auth check, approve it.
 """
 
 class PatchCouncil(CouncilOrchestrator):
@@ -118,7 +117,7 @@ class PatchCouncil(CouncilOrchestrator):
         approved_count = sum(1 for a in approvals if a.get("approved", False))
         total_reviewers = len(approvals)
         # FIX: Use .get() instead of hard key access to prevent KeyError
-        dissent_reasons = [a.get("reason", "No reason given") for a in approvals if not a.get("approved", False)]
+        dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not a.get("approved", False)]
 
         if approved_count == total_reviewers:
             final_safety = "safe"
@@ -304,7 +303,7 @@ class PatchCouncil(CouncilOrchestrator):
             # Safe key access — use .get() to prevent KeyError on missing 'reason'
             approved_count = sum(1 for a in approvals if a.get("approved", False))
             total_reviewers = len(approvals)
-            dissent_reasons = [a.get("reason", "No reason given") for a in approvals if not a.get("approved", False)]
+            dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not a.get("approved", False)]
 
             fixed_code = patch_res.get("fixed_code", "")
 

@@ -241,10 +241,17 @@ class CyphexEngine:
             await self._patch_workflow()
 
         # Cleanup
+        if hasattr(self, "_docker_compose_dir") and self._docker_compose_dir:
+            try:
+                subprocess.run(["docker", "compose", "down", "-v"], cwd=self._docker_compose_dir, capture_output=True, timeout=30)
+                print(f"\n  {C.G}[OK]{C.RST} Docker stack stopped.")
+            except Exception:
+                pass
+                
         if self._static_proc:
             self._static_proc.terminate()
             print(f"\n  {C.G}[OK]{C.RST} Static server stopped.")
-        elif self.sandbox_info:
+        elif self.sandbox_info and self.sandbox_info.get("type") != "docker-compose":
             stop_sandbox(self.sandbox_info.get("sandbox_id", ""))
             print(f"\n  {C.G}[OK]{C.RST} Sandbox stopped.")
 
@@ -421,11 +428,14 @@ class CyphexEngine:
             tools.append(("Ollama", True, model_str))
 
         # Semgrep
-        if is_windows:
-            semgrep_ok = False
+        from cyphex.scanner import semgrep_available
+        semgrep_ok = semgrep_available()
+        
+        if is_windows and semgrep_ok:
+            tools.append(("Semgrep", True, "via WSL"))
+        elif is_windows and not semgrep_ok:
             tools.append(("Semgrep", False, "Requires WSL on Windows (optional)"))
         else:
-            semgrep_ok = shutil.which("semgrep") is not None
             tools.append(("Semgrep", semgrep_ok, "pip install semgrep" if not semgrep_ok else None))
 
         # Nuclei
@@ -717,7 +727,9 @@ class CyphexEngine:
 
                     print(f"  {C.Y}[WARN]{C.RST} Docker stack started but app not responding on port {port}")
                 else:
-                    print(f"  {C.Y}[WARN]{C.RST} docker-compose failed: {proc.stderr[:150]}")
+                    err_lines = [line for line in proc.stderr.splitlines() if "error" in line.lower() or "failed" in line.lower() or "yaml:" in line.lower()]
+                    err_msg = err_lines[-1] if err_lines else proc.stderr[-150:].replace("\n", " ")
+                    print(f"  {C.Y}[WARN]{C.RST} docker-compose failed: {err_msg[:150]}")
             except subprocess.TimeoutExpired:
                 print(f"  {C.Y}[WARN]{C.RST} Docker build timed out (300s)")
             except Exception as e:
@@ -1995,8 +2007,14 @@ class CyphexEngine:
                 continue
 
             analysis = patch_pkg.get('unsafe_reason', 'No rationale provided.')
+            if isinstance(analysis, list): analysis = " ".join(str(x) for x in analysis)
+            
             justifications = patch_pkg.get('justifications', 'N/A')
-            llm_patch_safety = patch_pkg.get("patch_safety", "").strip()
+            if isinstance(justifications, list): justifications = " ".join(str(x) for x in justifications)
+            
+            raw_safety = patch_pkg.get("patch_safety", "")
+            if isinstance(raw_safety, list): raw_safety = " ".join(str(x) for x in raw_safety)
+            llm_patch_safety = str(raw_safety).strip()
 
             console.print(Panel(
                 f"[bold red]Root Cause:[/bold red] {analysis}\n\n"
@@ -2004,11 +2022,10 @@ class CyphexEngine:
                 title="Vulnerability Analysis", border_style="cyan", padding=(1, 2)
             ))
 
-            fixed = patch_pkg.get("fixed_code", "")
-            if isinstance(fixed, list):
-                fixed = "\n".join(str(x) for x in fixed)
-            fixed = str(fixed).strip()
-            
+            fixed_raw = patch_pkg.get("fixed_code", "")
+            if isinstance(fixed_raw, list):
+                fixed_raw = "\n".join(str(x) for x in fixed_raw)
+            fixed = str(fixed_raw).strip()
             if not fixed:
                 console.print(f"[yellow][SKIP][/yellow] Model did not return fixed code\n")
                 skipped += 1

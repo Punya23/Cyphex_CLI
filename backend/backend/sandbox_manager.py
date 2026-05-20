@@ -277,7 +277,7 @@ def stop_sandbox(sandbox_id: str) -> dict:
             if os.name != 'nt':
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             else:
-                proc.terminate()
+                subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
             proc.wait(timeout=5)
         except Exception:
             proc.kill()
