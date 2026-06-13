@@ -138,16 +138,41 @@ class CodeIndexer:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [path for _, path in scored[:3]]
 
+    # Patterns that indicate a secure usage already exists in the codebase
+    _SECURE_HINTS: dict[str, list[str]] = {
+        "CWE-89":  ["placeholder", "parameterized", "prepare"],
+        "CWE-79":  ["sanitize", "escape", "dompurify", "textcontent"],
+        "CWE-918": ["allowlist", "allowlist", "blocklist"],
+        "CWE-287": ["verifytoken", "verify", "authenticate"],
+        "CWE-306": ["authorize", "isadmin", "role"],
+        "CWE-284": ["authorize", "permission", "ownership"],
+        "CWE-22":  ["normalize", "realpath", "abspath"],
+        "CWE-78":  ["execfile", "spawnfile", "execfilepath"],
+        "CWE-798": ["process.env", "os.environ", "dotenv"],
+    }
+
     def find_secure_pattern(self, cwe: str) -> Optional[str]:
+        """Return a short code snippet (up to 8 lines) from the codebase that
+        demonstrates a secure usage for the given CWE, or None if not found."""
         cwe = (cwe or "").upper()
+        hints = self._SECURE_HINTS.get(cwe, [])
+        if not hints:
+            return None
         for f in self._files:
-            text_terms = f.terms
-            if cwe == "CWE-89" and (text_terms.get("placeholder", 0) or text_terms.get("parameterized", 0)):
-                return f.rel_path
-            if cwe in {"CWE-287", "CWE-306", "CWE-284"} and f.has_auth:
-                return f.rel_path
-            if cwe == "CWE-79" and (text_terms.get("sanitize", 0) or text_terms.get("escape", 0)):
-                return f.rel_path
-            if cwe == "CWE-918" and text_terms.get("allowlist", 0):
-                return f.rel_path
+            if not any(f.terms.get(h, 0) for h in hints):
+                continue
+            # Re-read the file and find the first line matching any hint term
+            fp = os.path.join(self.source_dir, f.rel_path)
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
+                    lines = fh.readlines()
+            except OSError:
+                continue
+            for i, line in enumerate(lines):
+                ll = line.lower()
+                if any(h in ll for h in hints):
+                    # Return up to 8 lines centered around the match
+                    start = max(0, i - 1)
+                    end = min(len(lines), i + 7)
+                    return "".join(lines[start:end]).strip()
         return None
