@@ -2346,6 +2346,17 @@ class CyphexEngine:
             f"[yellow]Skipped:[/yellow] {skipped}"
         )
 
+        self._patch_run_stats = {
+            "applied": len(patched_files),
+            "verified": len(verified_vuln_ids),
+            "unverified": unverified_applied,
+            "rolled_back": verify_failed,
+            "skipped": skipped,
+            "rag_enabled": bool(RAG_AVAILABLE),
+            "templates_enabled": bool(PATCH_PIPELINE_AVAILABLE),
+            "verifier_enabled": bool(PATCH_PIPELINE_AVAILABLE),
+        }
+
         # ── After-Patching Score ──
         remaining_vulns = len(vulns) - len(verified_vuln_ids)
         # Phase 2 (R4): honest remaining set — only PASS-verified findings are
@@ -2588,14 +2599,66 @@ class CyphexEngine:
 
         return notes
 
+    def _autonomy_status(self) -> tuple[str, str]:
+        """Phase 7 autonomy ladder + degradation honesty summary."""
+        stats = getattr(self, "_patch_run_stats", None) or {}
+        verified = int(stats.get("verified", 0))
+        unverified = int(stats.get("unverified", 0))
+        rolled_back = int(stats.get("rolled_back", 0))
+        rag_enabled = bool(stats.get("rag_enabled", False))
+        verifier_enabled = bool(stats.get("verifier_enabled", False))
+
+        if verified > 0 and unverified == 0 and rolled_back == 0 and verifier_enabled:
+            level = "L4 fully-verified"
+            reason = "All applied patches were objectively verified."
+        elif verified > 0 and verifier_enabled:
+            level = "L3 guarded-autonomy"
+            reason = "Some fixes verified; unverified ones require human review."
+        elif verifier_enabled:
+            level = "L2 assisted"
+            reason = "Patching ran with verification gate, but no fix reached PASS yet."
+        else:
+            level = "L1 degraded"
+            reason = "Verification pipeline unavailable; CYPHEX avoided claiming fixed status."
+
+        if not rag_enabled:
+            reason += " RAG context disabled (fallback prompt path)."
+
+        return level, reason
+
     def _push_to_github(self):
         try:
-            for cmd in [["git","add","-A"],["git","commit","-m","fix: CYPHEX auto-patched security vulnerabilities"],["git","push"]]:
+            branch = f"cyphex/patch-{self.scan_id}"
+            cmds = [
+                ["git", "add", "-A"],
+                ["git", "commit", "-m", "fix: CYPHEX auto-patched security vulnerabilities"],
+                ["git", "checkout", "-b", branch],
+                ["git", "push", "-u", "origin", branch],
+            ]
+            for cmd in cmds:
                 r = subprocess.run(cmd, cwd=self.source_dir, capture_output=True, text=True)
                 if r.returncode != 0:
-                    print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:100]}")
+                    if cmd[:2] == ["git", "checkout"] and "already exists" in (r.stderr or ""):
+                        retry = subprocess.run(["git", "checkout", branch], cwd=self.source_dir, capture_output=True, text=True)
+                        if retry.returncode != 0:
+                            print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:120]}")
+                            return
+                        continue
+                    if cmd[:2] == ["git", "commit"] and "nothing to commit" in (r.stdout + r.stderr).lower():
+                        continue
+                    print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:120]}")
                     return
-            print(f"  {C.G}[OK]{C.RST} Patches pushed to GitHub!")
+
+            remote_url = ""
+            rr = subprocess.run(["git", "remote", "get-url", "origin"], cwd=self.source_dir, capture_output=True, text=True)
+            if rr.returncode == 0:
+                remote_url = rr.stdout.strip().replace(".git", "")
+
+            print(f"  {C.G}[OK]{C.RST} Branch pushed: {branch}")
+            if remote_url.startswith("https://github.com/"):
+                print(f"  {C.CYAN}Open PR:{C.RST} {remote_url}/compare/{branch}?expand=1")
+            else:
+                print(f"  {C.Y}[INFO]{C.RST} Open a Pull Request from branch {branch} in your Git host.")
         except Exception as e:
             print(f"  {C.R}[ERR]{C.RST} Push failed: {e}")
 
@@ -2666,6 +2729,10 @@ class CyphexEngine:
         print(f"  {C.GHOST}Scan ID     {C.CYAN2}{self.scan_id}{C.RST}")
         print(f"  {C.GHOST}Agents      {C.SLATE}13 deployed (Crawler, XSS, SQLi, Auth, LFI, CMDi, CORS, IDOR, SSRF, SDE, JWT, SupplyChain, API){C.RST}")
         print(f"  {C.GHOST}Tools       {C.SLATE}Semgrep + Nuclei + Built-in Scanner + Immune System{C.RST}")
+
+        level, reason = self._autonomy_status()
+        print(f"  {C.GHOST}Autonomy    {C.CYAN}{level}{C.RST}")
+        print(f"  {C.GHOST}Honesty     {C.SLATE}{reason}{C.RST}")
 
         print(f"\n{border}")
         print(f"  {C.PURP2}cyphex{C.RST} {C.GHOST}— Multi-Agent Security Pipeline v2.0{C.RST}")
