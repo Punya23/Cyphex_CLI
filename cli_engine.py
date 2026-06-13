@@ -138,6 +138,11 @@ class CyphexEngine:
         self.judge_mode = False
         self.non_interactive = False
         self.start_ts = 0.0
+        try:
+            from cyphex.hardware import detect_mode
+            self._hw_tier = detect_mode()
+        except Exception:
+            self._hw_tier = "mid"
 
     async def run(self, repo_url=None, local_path=None, source_path=None,
                   target_url=None, branch="main",
@@ -2037,27 +2042,57 @@ class CyphexEngine:
         # The batch council now caches Stage 1 patches internally.
         # Even if the review stage crashes, we get patches with "review_needed" status
         # instead of losing everything and regenerating from scratch.
+        # ── Patch Memory: inject previously-verified patches for known locations ──
+        # If we've fixed an identical function+CWE before, reuse the verified fix
+        # without burning a full council round.
+        cached_results: list[dict | None] = [None] * len(patchable)
+        if patch_memory:
+            for idx, p in enumerate(patchable):
+                fn_text = p.get("context_snippet") or p["snippet"]
+                cached_fix = patch_memory.recall_exact(fn_text, p["cwe"])
+                if cached_fix:
+                    cached_results[idx] = {
+                        "fixed_code": cached_fix,
+                        "unsafe_reason": "[recalled from patch memory]",
+                        "patch_safety": "safe",
+                        "vote_summary": "Previously verified — skipping council round.",
+                        "approvals": [],
+                        "dissent_reasons": [],
+                    }
+                    console.print(f"[dim]  [MEMORY] Recalled verified patch for {p['rel_path']}:{p['line_num']} (CWE {p['cwe']})[/dim]")
+
         batch_results = None
         if patch_council and len(patchable) > 0:
             try:
-                vuln_inputs = [
-                    {
-                        "vuln_name": p["vuln_type"],
-                        "cwe": p["cwe"],
-                        "vulnerable_code": p["snippet"],
-                        "file_path": p["rel_path"],
-                        "context_snippet": p.get("context_snippet", ""),
-                        "extraction_quality": p.get("extraction_quality", "window"),
-                        "imports": p.get("imports", ""),
-                        "secure_example": p.get("secure_example", ""),
-                        "kb_strategy": p.get("kb_strategy", ""),
-                        "kb_anti_patterns": p.get("kb_anti_patterns", ""),
-                        "related_files": p.get("related_files", []),
-                        "exploit_payload": getattr(p["vuln"], "payload", "") or "",
-                    }
-                    for p in patchable
-                ]
-                batch_results = await patch_council.generate_and_validate_batch(vuln_inputs)
+                # Only send to council what isn't already cached
+                council_indices = [i for i, r in enumerate(cached_results) if r is None]
+                if council_indices:
+                    vuln_inputs = [
+                        {
+                            "vuln_name": patchable[i]["vuln_type"],
+                            "cwe": patchable[i]["cwe"],
+                            "vulnerable_code": patchable[i]["snippet"],
+                            "file_path": patchable[i]["rel_path"],
+                            "context_snippet": patchable[i].get("context_snippet", ""),
+                            "extraction_quality": patchable[i].get("extraction_quality", "window"),
+                            "imports": patchable[i].get("imports", ""),
+                            "secure_example": patchable[i].get("secure_example", ""),
+                            "kb_strategy": patchable[i].get("kb_strategy", ""),
+                            "kb_anti_patterns": patchable[i].get("kb_anti_patterns", ""),
+                            "related_files": patchable[i].get("related_files", []),
+                            "exploit_payload": getattr(patchable[i]["vuln"], "payload", "") or "",
+                        }
+                        for i in council_indices
+                    ]
+                    council_batch = await patch_council.generate_and_validate_batch(vuln_inputs)
+                    # Merge council results back at the right indices
+                    batch_results = list(cached_results)  # start from cached
+                    for slot, ci in enumerate(council_indices):
+                        if slot < len(council_batch):
+                            batch_results[ci] = council_batch[slot]
+                else:
+                    # All patches were cache-hits
+                    batch_results = list(cached_results)
             except Exception as e:
                 console.print(f"[yellow]⚠ Batch council error: {str(e)[:80]}.[/yellow]")
                 console.print(f"[cyan]  → Per-vuln fallback will only generate patches that weren't cached.[/cyan]")
@@ -2278,6 +2313,40 @@ class CyphexEngine:
 
             if verify_result is None:
                 verify_result = SimpleNamespace(verdict=UNVERIFIABLE, evidence={"verifier_unavailable": True})
+
+            # ── Reflexion loop: if UNVERIFIABLE, attempt one targeted retry ──
+            if (
+                PATCH_PIPELINE_AVAILABLE
+                and patch_council
+                and getattr(verify_result, "verdict", "") == UNVERIFIABLE
+                and getattr(verify_result, "evidence", {}).get("verifier_unavailable") is None
+            ):
+                try:
+                    from backend.reasoning.reflexion import patch_with_reflexion, build_objective_feedback
+                    feedback_msg = build_objective_feedback(getattr(verify_result, "evidence", {}))
+                    async def _generate_retry(fb: str, round_no: int) -> dict:
+                        rp = dict(p)
+                        if fb:
+                            rp["context_snippet"] = (p.get("context_snippet") or p["snippet"]) + f"\n\n# Reflexion feedback (round {round_no}):\n# {fb}"
+                        return await patch_council.generate_and_validate_patch(
+                            rp["vuln_type"], rp["cwe"], rp["snippet"], rp["rel_path"]
+                        )
+                    async def _verify_retry(candidate: dict) -> dict:
+                        cfix = (candidate.get("fixed_code") or "").strip()
+                        if not cfix:
+                            return {"verdict": UNVERIFIABLE, "evidence": {"no_code": True}}
+                        vr = verify_static(v, loc, self.source_dir, original_text, cfix)
+                        return {"verdict": vr.verdict, "evidence": getattr(vr, "evidence", {})}
+
+                    tier = getattr(self, "_hw_tier", "mid")
+                    refl = await patch_with_reflexion(_generate_retry, _verify_retry, tier=tier, max_rounds=1)
+                    if refl.status == "verified" and refl.best_candidate:
+                        better = (refl.best_candidate.get("fixed_code") or "").strip()
+                        if better and not self._is_placeholder_code(better):
+                            fixed = better
+                            console.print(f"[cyan]  ↺ Reflexion retry succeeded — using improved patch[/cyan]")
+                except Exception:
+                    pass
 
             if manifest:
                 try:
