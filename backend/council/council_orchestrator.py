@@ -11,6 +11,32 @@ from backend.council.council_errors import CouncilCallError, ModelNotFoundError
 OLLAMA_BASE = "http://localhost:11434"
 console = Console()
 
+# Tier → context window size. Cached after first detection to avoid repeated
+# GPU probing. Small/low-end hardware stays at 4096 (also the cyphex-patch
+# Modelfile pin); mid gets 6144; high/ultra get 8192 for the non-pinned
+# reasoning/review models.
+_TIER_CTX = {
+    "minimal": 4096,
+    "low":     4096,
+    "cloud":   4096,
+    "mid":     6144,
+    "high":    8192,
+    "ultra":   8192,
+}
+_CTX_CACHE: Optional[int] = None
+
+
+def ctx_for_tier() -> int:
+    """Return the num_ctx to use, based on detected hardware tier (cached)."""
+    global _CTX_CACHE
+    if _CTX_CACHE is None:
+        try:
+            from cyphex.hardware import detect_mode
+            _CTX_CACHE = _TIER_CTX.get(detect_mode(), 4096)
+        except Exception:
+            _CTX_CACHE = 4096
+    return _CTX_CACHE
+
 
 def _detect_vram_limit() -> float:
     """
@@ -167,7 +193,7 @@ class VRAMManager:
                     "prompt": prompt,
                     "stream": stream,
                     "keep_alive": "10m",
-                    "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": 4096}
+                    "options": {"temperature": 0.1, "top_p": 0.9, "num_ctx": ctx_for_tier()}
                 }
             )
             return r.json()["response"]
@@ -224,8 +250,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
                                 "options": {
                                     "temperature": 0.1,
                                     "top_p": 0.9,
-                                    "num_predict": 1024,  # Enough headroom to complete JSON without truncation
-                                    "num_ctx": 2048,      # Smaller context = faster inference
+                                    "num_predict": 2048,  # Enough headroom to complete JSON without truncation
+                                    "num_ctx": ctx_for_tier(),  # Tier-aware: 4096 (low) → 8192 (high/ultra)
                                 }
                             }
                         )

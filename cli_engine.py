@@ -2053,6 +2053,17 @@ class CyphexEngine:
             if safety_text:
                 console.print(Panel(safety_text.strip(), title="Patch Safety Notes", border_style="red"))
 
+            # Phase 0.2: never apply a patch the council rejected. The batch
+            # aggregation sets patch_safety="rejected" only when reviewers ran
+            # and produced ZERO approvals (see PatchCouncil._assemble). Blocking
+            # here stops a user typing "y" from applying a unanimously-rejected patch.
+            if llm_patch_safety == "rejected":
+                console.print(
+                    f"[red][BLOCKED][/red] Council rejected this patch (0 approvals) — not applying.\n"
+                )
+                skipped += 1
+                continue
+
             if self.non_interactive:
                 choice = "y"
                 console.print(f"[dim]non-interactive mode: auto applying patch[/dim]")

@@ -17,15 +17,23 @@ RULES:
 5. unsafe_reason: one sentence explaining why the original code is dangerous.
 6. patch_safety = "safe" only if the fix is unambiguous.
 
+ANTI-REGRESSION RULES (violating these gets the patch rejected):
+- Never remove existing try/catch blocks or error handling.
+- Never add new import/require statements in the MIDDLE of a function. If an import is
+  strictly required, assume it already exists at the top of the file.
+- Never "fix" a vulnerability by deleting or commenting-out a route, handler, or feature.
+  A commented-out line is NOT a valid fix and will be rejected.
+- Preserve the function signature, return type, and surrounding control flow.
+
 VULNERABILITY-SPECIFIC FIX PATTERNS (use these):
 - SQL Injection: Replace template literals with parameterized queries using ? placeholders and [value] arrays.
 - XSS: Remove dangerouslySetInnerHTML entirely. Render content as text children: <h3>{a.title}</h3> instead of dangerouslySetInnerHTML={{__html: a.title}}.
 - Hardcoded Secrets: Replace literal values with ${ENV_VAR} references. Example: MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-- Sensitive Data Exposure (debug routes): Remove or comment out the route registration. Example: // app.use('/api/debug', require('./routes/debug'));
+- Sensitive Data Exposure (debug routes): Guard the route behind an authentication/role check (e.g. require an admin role before the handler runs). Do NOT comment out or delete the route registration.
 - SSRF: Add URL validation blocking private IPs (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16) and metadata endpoints.
 - IDOR: Use parameterized queries with ownership check: WHERE id = ? AND user_id = ?
 - Container as Root: Add USER node before CMD.
-- Debug UI routes/nav: Remove or guard with admin role check.
+- Debug UI routes/nav: Guard with an admin role check. Do NOT comment out or delete the route.
 
 CRITICAL: Your fix must ELIMINATE the vulnerability, not just add a superficial check. The fix will be reviewed by other AI models — incomplete patches will be rejected.
 """
@@ -39,7 +47,7 @@ RULES:
    - SQL Injection: Approve if template literals are replaced with parameterized queries (? placeholders).
    - XSS: Approve if dangerouslySetInnerHTML is removed OR input is escaped/sanitized.
    - Hardcoded Secrets: Approve if literal secrets are replaced with environment variable references (${VAR}).
-   - Sensitive Data Exposure: Approve if the debug route is removed, commented out, or auth-gated.
+   - Sensitive Data Exposure: Approve if the debug route is auth-gated (admin/role check). Do NOT approve a patch that merely comments out or deletes the route — that is a suppression, not a fix.
    - SSRF: Approve if URL validation/allowlisting is added.
    - IDOR: Approve if ownership checks or parameterized queries are added.
    - Container as Root: Approve if USER directive is added before CMD.
