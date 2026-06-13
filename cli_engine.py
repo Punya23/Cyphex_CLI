@@ -773,10 +773,9 @@ class CyphexEngine:
         elif os.path.exists(os.path.join(source_dir, "Dockerfile")) and shutil.which("docker"):
             print(f"  {C.G}[DOCKER]{C.RST} Found Dockerfile — building container...")
             try:
-                from cyphex.docker_sandbox import DockerSandbox
-                sandbox = DockerSandbox(source_dir)
-                result = await asyncio.to_thread(sandbox.build_and_run)
-                if result and result.get("url"):
+                from cyphex.docker_sandbox import deploy_docker_sandbox
+                result = await deploy_docker_sandbox(source_dir, sandbox_id=self.scan_id)
+                if result and result.get("url") and not result.get("error"):
                     self.sandbox_info = result
                     url = result["url"]
                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{C.RST}")
@@ -785,6 +784,8 @@ class CyphexEngine:
                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
                     print(f"  {sb}")
                     return url
+                elif result and result.get("error"):
+                    print(f"  {C.Y}[WARN]{C.RST} Dockerfile deploy failed: {result['error'][:100]}")
             except Exception as e:
                 print(f"  {C.Y}[WARN]{C.RST} Dockerfile deploy failed: {str(e)[:100]}")
 
@@ -864,10 +865,17 @@ class CyphexEngine:
         url = self.sandbox_info.get("url", "")
         port = self.sandbox_info.get('port', '')
         
-        companion_api = await self._detect_companion_api()
-        if companion_api:
-            print(f"  {C.Y}[INFO]{C.RST} Companion API detected at {companion_api}. Directing scan to backend.")
-            url = companion_api
+        # Only probe for a companion API when the sandbox is a static-file server
+        # (no real app logic). If we already have a real sandbox URL on a
+        # dynamic port, trust it — don't let an unrelated service on 5000 hijack
+        # the scan target.
+        sandbox_port = self.sandbox_info.get("port") if isinstance(self.sandbox_info, dict) else None
+        is_dynamic_sandbox = sandbox_port and int(sandbox_port) not in (3000, 3001, 3002, 3003, 8000, 8080, 5000)
+        if not is_dynamic_sandbox:
+            companion_api = await self._detect_companion_api()
+            if companion_api and companion_api != url:
+                print(f"  {C.Y}[INFO]{C.RST} Companion API detected at {companion_api}. Directing scan to backend.")
+                url = companion_api
 
         print(f"  {C.NEON}✓{C.RST} {C.SLATE}Sandbox deployed successfully!{C.RST}")
         print(f"  {C.GHOST}PID: {self.sandbox_info.get('pid')}, Port: {port}{C.RST}")
@@ -1744,12 +1752,17 @@ class CyphexEngine:
                 cwe = getattr(v, "cwe", "CWE-???") if getattr(v, "cwe", None) else "CWE-???"
                 if cwe == "CWE-???":
                     if "SQL" in vuln_type: cwe = "CWE-89"
-                    elif "XSS" in vuln_type: cwe = "CWE-79"
+                    elif "XSS" in vuln_type or "innerHTML" in vuln_type: cwe = "CWE-79"
                     elif "Command" in vuln_type or "CMDi" in vuln_type: cwe = "CWE-78"
+                    elif "Path" in vuln_type or "Traversal" in vuln_type or "LFI" in vuln_type: cwe = "CWE-22"
                     elif "IDOR" in vuln_type: cwe = "CWE-284"
                     elif "SSRF" in vuln_type: cwe = "CWE-918"
                     elif "JWT" in vuln_type: cwe = "CWE-287"
+                    elif "Hardcoded" in vuln_type or "Secret" in vuln_type: cwe = "CWE-798"
+                    elif "Missing Auth" in vuln_type or "Auth" in vuln_type: cwe = "CWE-306"
+                    elif "Root" in vuln_type or "Privilege" in vuln_type: cwe = "CWE-250"
                     elif "Data Exposure" in vuln_type: cwe = "CWE-200"
+                    elif "CORS" in vuln_type: cwe = "CWE-942"
 
                 sev_display = sev_icons.get(v.severity, f"[dim]{v.severity}[/dim]")
                 table.add_row(str(i), sev_display, vuln_type, cwe, endpoint)
