@@ -68,6 +68,12 @@ try:
 except ImportError:
     PATCH_PIPELINE_AVAILABLE = False
 
+try:
+    from backend.rag import CodeIndexer, detect_language, extract_function, extract_imports, load_security_kb
+    RAG_AVAILABLE = True
+except ImportError:
+    RAG_AVAILABLE = False
+
 class C:
     """Premium cyber-themed color palette — turquoise/purple/black."""
     # ── Core palette ──
@@ -1976,6 +1982,36 @@ class CyphexEngine:
             console.print(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
         patchable = list(_deduped.values())
 
+        if RAG_AVAILABLE and self.source_dir:
+            try:
+                kb = load_security_kb()
+                indexer = CodeIndexer(self.source_dir)
+                for p in patchable:
+                    content = "".join(p["lines"])
+                    lang = detect_language(p["filepath"])
+                    context_snippet, extraction_quality = extract_function(content, p["line_num"], lang)
+                    imports = extract_imports(content, lang)
+                    loc = resolve_location(p["vuln"], self.source_dir) if PATCH_PIPELINE_AVAILABLE else None
+                    if not loc:
+                        loc = SimpleNamespace(rel=p["rel_path"], line=p["line_num"], url=None)
+
+                    strategy = kb.primary_strategy(p["cwe"])
+                    anti = kb.anti_patterns(p["cwe"])
+                    related_files = indexer.find_for_vuln(p["vuln"], loc)
+                    secure_example = indexer.find_secure_pattern(p["cwe"])
+
+                    p["context_snippet"] = context_snippet
+                    p["extraction_quality"] = extraction_quality
+                    p["imports"] = imports
+                    p["related_files"] = related_files
+                    p["secure_example"] = secure_example or ""
+                    p["kb_strategy"] = strategy.pattern if strategy else ""
+                    p["kb_anti_patterns"] = "; ".join(anti[:4]) if anti else ""
+
+                console.print("[dim]  RAG context enabled: imports + function window + CWE strategy + related files.[/dim]")
+            except Exception as e:
+                console.print(f"[yellow][RAG] disabled due to indexing error: {str(e)[:80]}[/yellow]")
+
         if not patchable:
             console.print(f"[dim]No vulns with file locations to patch.[/dim]")
             return
@@ -1988,8 +2024,20 @@ class CyphexEngine:
         if patch_council and len(patchable) > 0:
             try:
                 vuln_inputs = [
-                    {"vuln_name": p["vuln_type"], "cwe": p["cwe"],
-                     "vulnerable_code": p["snippet"], "file_path": p["rel_path"]}
+                    {
+                        "vuln_name": p["vuln_type"],
+                        "cwe": p["cwe"],
+                        "vulnerable_code": p["snippet"],
+                        "file_path": p["rel_path"],
+                        "context_snippet": p.get("context_snippet", ""),
+                        "extraction_quality": p.get("extraction_quality", "window"),
+                        "imports": p.get("imports", ""),
+                        "secure_example": p.get("secure_example", ""),
+                        "kb_strategy": p.get("kb_strategy", ""),
+                        "kb_anti_patterns": p.get("kb_anti_patterns", ""),
+                        "related_files": p.get("related_files", []),
+                        "exploit_payload": getattr(p["vuln"], "payload", "") or "",
+                    }
                     for p in patchable
                 ]
                 batch_results = await patch_council.generate_and_validate_batch(vuln_inputs)

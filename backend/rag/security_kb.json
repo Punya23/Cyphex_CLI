@@ -1,0 +1,133 @@
+{
+  "kb_version": "1.0.0",
+  "source": "CYPHEX curated secure-coding patterns",
+  "cwe": {
+    "CWE-89": {
+      "name": "SQL Injection",
+      "fix_strategies": [
+        {
+          "name": "Parameterized query",
+          "pattern": "Replace string concatenation/template SQL with placeholders and bound values",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": [
+        "String concatenation in SQL",
+        "Template literals for query assembly"
+      ]
+    },
+    "CWE-79": {
+      "name": "Cross-Site Scripting",
+      "fix_strategies": [
+        {
+          "name": "Encode output",
+          "pattern": "Render untrusted data as text or sanitize with a trusted HTML sanitizer",
+          "applies_to": ["javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": [
+        "dangerouslySetInnerHTML with untrusted input",
+        "Direct innerHTML assignment"
+      ]
+    },
+    "CWE-78": {
+      "name": "OS Command Injection",
+      "fix_strategies": [
+        {
+          "name": "Avoid shell",
+          "pattern": "Use allowlists and argument arrays; never pass user input into shell command strings",
+          "applies_to": ["python", "javascript"]
+        }
+      ],
+      "anti_patterns": ["shell=True with untrusted input", "exec/eval of user input"]
+    },
+    "CWE-22": {
+      "name": "Path Traversal",
+      "fix_strategies": [
+        {
+          "name": "Safe path resolution",
+          "pattern": "Normalize path and ensure resolved target remains inside an allowed base directory",
+          "applies_to": ["python", "javascript"]
+        }
+      ],
+      "anti_patterns": ["raw user path join", "../ segments unchecked"]
+    },
+    "CWE-798": {
+      "name": "Hardcoded Credentials",
+      "fix_strategies": [
+        {
+          "name": "Environment-backed secrets",
+          "pattern": "Read credentials from environment or secret manager",
+          "applies_to": ["python", "javascript", "docker"]
+        }
+      ],
+      "anti_patterns": ["embedded passwords", "embedded API keys"]
+    },
+    "CWE-918": {
+      "name": "SSRF",
+      "fix_strategies": [
+        {
+          "name": "URL allowlist and private IP block",
+          "pattern": "Validate scheme/host and deny localhost, metadata, and private ranges",
+          "applies_to": ["python", "javascript"]
+        }
+      ],
+      "anti_patterns": ["blind URL fetch from user input"]
+    },
+    "CWE-287": {
+      "name": "Improper Authentication",
+      "fix_strategies": [
+        {
+          "name": "Enforce auth middleware",
+          "pattern": "Require authenticated principal before sensitive actions",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": ["missing auth on privileged endpoint"]
+    },
+    "CWE-306": {
+      "name": "Missing Authentication for Critical Function",
+      "fix_strategies": [
+        {
+          "name": "Protect critical routes",
+          "pattern": "Add middleware/guard checking session/token and role",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": ["debug/admin endpoint without auth"]
+    },
+    "CWE-942": {
+      "name": "Permissive Cross-Domain Policy",
+      "fix_strategies": [
+        {
+          "name": "Restrict CORS",
+          "pattern": "Allow only trusted origins and required methods/headers",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": ["Access-Control-Allow-Origin: * with credentials"]
+    },
+    "CWE-614": {
+      "name": "Sensitive Cookie in HTTPS Session Without Secure Attribute",
+      "fix_strategies": [
+        {
+          "name": "Secure cookie flags",
+          "pattern": "Set Secure, HttpOnly, SameSite appropriately",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": ["session cookie without Secure flag"]
+    },
+    "CWE-693": {
+      "name": "Protection Mechanism Failure",
+      "fix_strategies": [
+        {
+          "name": "Fail-closed controls",
+          "pattern": "Ensure security checks fail closed and cannot be bypassed",
+          "applies_to": ["python", "javascript", "typescript"]
+        }
+      ],
+      "anti_patterns": ["best-effort security checks", "silent bypass on validation errors"]
+    }
+  }
+}

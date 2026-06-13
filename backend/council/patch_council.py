@@ -59,6 +59,85 @@ RULES:
    Focus ONLY on whether the core vulnerability is fixed.
 """
 
+
+def _trim_block(text: str, max_chars: int = 4000) -> str:
+    if not text:
+        return ""
+    s = str(text).strip()
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + "\n... [truncated]"
+
+
+def _build_patch_prompt(vuln: dict) -> str:
+    vuln_name = vuln.get("vuln_name", "Unknown")
+    cwe = vuln.get("cwe", "CWE-unknown")
+    file_path = vuln.get("file_path", "unknown")
+    vulnerable_code = vuln.get("vulnerable_code", "")
+    context_snippet = vuln.get("context_snippet", "")
+    extraction_quality = vuln.get("extraction_quality", "window")
+    imports = vuln.get("imports", "")
+    secure_example = vuln.get("secure_example", "")
+    kb_strategy = vuln.get("kb_strategy", "")
+    kb_anti_patterns = vuln.get("kb_anti_patterns", "")
+    related_files = vuln.get("related_files", []) or []
+    exploit_payload = vuln.get("exploit_payload", "")
+
+    sections = [
+        f"Vulnerability: {vuln_name} ({cwe})",
+        f"File: {file_path}",
+        "",
+        "Vulnerable code:",
+        f"```\n{_trim_block(vulnerable_code, 3000)}\n```",
+    ]
+
+    if kb_strategy:
+        sections.extend([
+            "",
+            "CWE fix strategy (canonical):",
+            f"- {kb_strategy}",
+        ])
+    if kb_anti_patterns:
+        sections.extend([
+            "",
+            "Avoid these anti-patterns:",
+            f"- {_trim_block(kb_anti_patterns, 500)}",
+        ])
+    if imports:
+        sections.extend([
+            "",
+            "File imports/context:",
+            f"```\n{_trim_block(imports, 1000)}\n```",
+        ])
+    if context_snippet:
+        label = "enclosing function" if extraction_quality == "function" else "approximate local window"
+        sections.extend([
+            "",
+            f"Code context ({label}):",
+            f"```\n{_trim_block(context_snippet, 2500)}\n```",
+        ])
+    if secure_example:
+        sections.extend([
+            "",
+            f"In-repo secure reference file: {secure_example}",
+        ])
+    if related_files:
+        sections.extend([
+            "",
+            f"Related files: {', '.join(related_files[:3])}",
+        ])
+    if exploit_payload:
+        sections.extend([
+            "",
+            f"Exploit payload observed: {exploit_payload}",
+        ])
+
+    sections.extend([
+        "",
+        "Generate the fixed version of the vulnerable code. Return only the replacement snippet in fixed_code.",
+    ])
+    return "\n".join(sections)
+
 class PatchCouncil(CouncilOrchestrator):
     async def generate_and_validate_patch(
         self,
@@ -110,12 +189,12 @@ class PatchCouncil(CouncilOrchestrator):
                 return {"fixed_code": "", "patch_safety": "rejected",
                         "unsafe_reason": "No models available", "dissent_reasons": ["All models failed to load"]}
 
-        patch_prompt = (
-            f"Vulnerability: {vuln_name} ({cwe})\n"
-            f"File: {file_path}\n\n"
-            f"Vulnerable code:\n```\n{vulnerable_code}\n```\n\n"
-            f"Generate the fixed version of this code."
-        )
+        patch_prompt = _build_patch_prompt({
+            "vuln_name": vuln_name,
+            "cwe": cwe,
+            "file_path": file_path,
+            "vulnerable_code": vulnerable_code,
+        })
 
         console.print(f"[dim]Stage 1: {patch_model} Generating Patch...[/dim]")
         try:
@@ -229,12 +308,7 @@ class PatchCouncil(CouncilOrchestrator):
         patch_results = []
         for i, v in enumerate(vuln_list, 1):
             console.print(f"[dim]  [{i}/{len(vuln_list)}] Patching: {v['vuln_name']}[/dim]")
-            prompt = (
-                f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
-                f"File: {v['file_path']}\n\n"
-                f"Vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
-                f"Generate the fixed version of this code."
-            )
+            prompt = _build_patch_prompt(v)
             try:
                 result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, prompt, task_name="Batch Patch")
                 patch_results.append(result)
