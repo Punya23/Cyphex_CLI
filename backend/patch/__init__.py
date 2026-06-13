@@ -18,6 +18,7 @@ from backend.patch.verifier import (
     PASS, FAIL, UNVERIFIABLE,
 )
 from backend.patch.manifest import PatchManifest, PatchRecord, sha256
+from backend.patch import templates
 
 __all__ = [
     "Location", "resolve",
@@ -26,4 +27,5 @@ __all__ = [
     "check_suppression", "check_blast_radius",
     "PASS", "FAIL", "UNVERIFIABLE",
     "PatchManifest", "PatchRecord", "sha256",
+    "templates",
 ]

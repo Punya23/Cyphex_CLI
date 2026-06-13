@@ -2476,83 +2476,33 @@ class CyphexEngine:
 
 
     def _rule_based_patch(self, vuln, snippet) -> Optional[dict[str, str]]:
-        """Built-in patches for common vulnerability types. Works 100% offline."""
-        name_lower = (vuln.name or "").lower()
-        snippet_lower = snippet.lower()
+        """Deterministic template transforms for common CWEs. No template => None."""
+        if not PATCH_PIPELINE_AVAILABLE:
+            return None
 
-        if "xss" in name_lower:
-            if "dangerouslysetinnerhtml" in snippet_lower:
-                fixed = re.sub(
-                    r'dangerouslySetInnerHTML=\{\{\s*__html:\s*(.+?)\s*\}\}',
-                    r'dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(\1) }}',
-                    snippet
-                )
-                if fixed == snippet:
-                    fixed = snippet.replace("dangerouslySetInnerHTML", "/* PATCHED: sanitize input */ dangerouslySetInnerHTML")
-                return {
-                    "unsafe_reason": "dangerouslySetInnerHTML renders raw HTML without sanitization, allowing attackers to inject <script> tags or event handlers (onerror, onload) to steal cookies, redirect users, or deface the page.",
-                    "fixed_code": fixed,
-                    "patch_safety": "Install DOMPurify: npm install dompurify. Import at the top: import DOMPurify from 'dompurify';",
-                }
-            if "innerhtml" in snippet_lower:
-                fixed = snippet.replace(".innerHTML =", ".textContent =")
-                return {
-                    "unsafe_reason": "Setting innerHTML with user-controlled data allows script injection.",
-                    "fixed_code": fixed,
-                    "patch_safety": "textContent safely escapes all HTML. If HTML rendering is needed, use DOMPurify.sanitize().",
-                }
+        cwe = (getattr(vuln, "cwe", "") or "").upper().strip()
+        if not cwe:
+            name_lower = (getattr(vuln, "name", "") or "").lower()
+            if "sql" in name_lower:
+                cwe = "CWE-89"
+            elif "xss" in name_lower:
+                cwe = "CWE-79"
+            elif "command" in name_lower or "cmdi" in name_lower:
+                cwe = "CWE-78"
+            elif "path traversal" in name_lower or "lfi" in name_lower:
+                cwe = "CWE-22"
+            elif "hardcoded" in name_lower or "secret" in name_lower:
+                cwe = "CWE-798"
+            elif "cors" in name_lower:
+                cwe = "CWE-942"
 
-        if "sql" in name_lower:
-            if "f\"" in snippet or "f'" in snippet or "${" in snippet or "` +" in snippet:
-                return {
-                    "unsafe_reason": "String interpolation/concatenation in SQL allows attackers to inject arbitrary SQL commands (e.g., ' OR 1=1-- to bypass auth, UNION SELECT to dump data).",
-                    "fixed_code": "// Use parameterized queries:\n// db.query('SELECT * FROM users WHERE username = ? AND password = ?', [username, password])\n// Or with named params: db.get('SELECT * FROM users WHERE id = $id', { $id: userId })",
-                    "patch_safety": "Replace ALL string-interpolated SQL with parameterized queries (? placeholders). Never build SQL from user input.",
-                }
-
-        if "jwt" in name_lower:
-            return {
-                "unsafe_reason": "Hardcoded or weak JWT secret (e.g., 'secret123') allows attackers to forge tokens, escalate to admin, and access any user's data.",
-                "fixed_code": "// Use a strong, environment-variable secret:\nconst token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h', algorithm: 'HS256' });\n// Generate a strong secret: node -e \"console.log(require('crypto').randomBytes(64).toString('hex'))\"",
-                "patch_safety": "Set JWT_SECRET to a random 256-bit value in .env. Never commit secrets to git. Add .env to .gitignore.",
-            }
-
-        if "command" in name_lower or "cmdi" in name_lower:
-            return {
-                "unsafe_reason": "User input passed directly to exec/spawn/system allows shell command injection (e.g., '; rm -rf /' or '| cat /etc/passwd').",
-                "fixed_code": "// Use argument arrays (never shell interpolation):\nconst { execFile } = require('child_process');\nexecFile('ping', ['-c', '1', sanitizedHost], (err, stdout) => {\n  res.json({ output: stdout });\n});\n// Validate input: const sanitizedHost = host.replace(/[^a-zA-Z0-9.-]/g, '');",
-                "patch_safety": "Use execFile() with argument arrays instead of exec(). Validate input with allowlist regex. Never use shell: true.",
-            }
-
-        if "ssrf" in name_lower:
-            return {
-                "unsafe_reason": "User-controlled URL in fetch/axios/http.get allows attackers to make the server request internal services (e.g., http://169.254.169.254 for AWS credentials).",
-                "fixed_code": "// Validate URL against allowlist:\nconst { URL } = require('url');\nconst parsed = new URL(userUrl);\nconst blocked = ['127.0.0.1', 'localhost', '169.254.169.254', '0.0.0.0'];\nif (blocked.includes(parsed.hostname) || parsed.hostname.startsWith('10.') || parsed.hostname.startsWith('192.168.')) {\n  return res.status(403).json({ error: 'Internal addresses blocked' });\n}",
-                "patch_safety": "Block private IPs (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16). Use URL allowlists when possible.",
-            }
-
-        if "idor" in name_lower:
-            return {
-                "unsafe_reason": "Direct object reference from URL parameter without ownership validation allows attackers to access other users' data by incrementing IDs.",
-                "fixed_code": "// Verify ownership before returning data:\napp.get('/api/employees/:id', authMiddleware, (req, res) => {\n  const employee = db.get('SELECT * FROM employees WHERE id = ?', [req.params.id]);\n  if (!employee || (req.user.role !== 'admin' && employee.user_id !== req.user.id)) {\n    return res.status(403).json({ error: 'Access denied' });\n  }\n  res.json(employee);\n});",
-                "patch_safety": "Always validate that the authenticated user owns the requested resource. Use middleware for authz checks.",
-            }
-
-        if "sensitive data" in name_lower or "data exposure" in name_lower:
-            return {
-                "unsafe_reason": "Debug/config endpoint exposes environment variables (DB credentials, API keys, secrets) without authentication.",
-                "fixed_code": "// Remove debug endpoint entirely, or protect it:\n// app.get('/api/debug', adminAuthMiddleware, (req, res) => { ... });\n// NEVER expose process.env to any HTTP response.",
-                "patch_safety": "Delete debug endpoints before production. If needed for ops, require admin auth and log all access.",
-            }
-
-        if "hardcoded" in name_lower or "secret" in name_lower:
-            return {
-                "unsafe_reason": "Hardcoded credentials in source code are visible to anyone with repo access.",
-                "fixed_code": "// Move to environment variables:\nconst password = process.env.DB_PASSWORD;\n// Add to .env file (never commit):\n// DB_PASSWORD=your_secure_password_here",
-                "patch_safety": "Use dotenv package. Add .env to .gitignore. Rotate any exposed credentials immediately.",
-            }
-
-        return None
+        endpoint = getattr(vuln, "endpoint", "") or ""
+        file_hint = endpoint.split(":", 1)[0] if ":" in endpoint else ""
+        try:
+            from backend.patch import templates as patch_templates
+            return patch_templates.apply(cwe, file_hint, snippet)
+        except Exception:
+            return None
 
     def _extract_json_object(self, text: str) -> Optional[dict[str, Any]]:
         text = text.strip()
