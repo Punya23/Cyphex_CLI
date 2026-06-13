@@ -2548,9 +2548,9 @@ class CyphexEngine:
             f"  [bold]Before Patching:[/bold]  [{sc_b_color}]{'█' * bar_b}{'░' * (25 - bar_b)}  {score_before}/100[/{sc_b_color}]\n"
             f"  [bold]After Patching:[/bold]   [{sc_a_color}]{'█' * bar_a}{'░' * (25 - bar_a)}  {score_after}/100[/{sc_a_color}]\n\n"
             f"  [bold]Improvement:[/bold]  [{delta_color}]{delta_str} points[/{delta_color}]  │  "
-            f"Patched: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]  │  "
+            f"Applied: [cyan]{len(patched_files)}[/cyan]  Verified: [green]{len(verified_vuln_ids)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]  │  "
             f"Crit: {crit_a}  High: {high_a}  Med: {med_a}  Low: {low_a}\n\n"
-            f"  [dim italic]* Note: Dynamic runtime findings cannot be auto-marked as patched. Run a re-scan to clear them![/dim italic]",
+            f"  [dim italic]* Score only improves for PASS-verified fixes — applied-but-unverified changes do not move the score. Run a re-scan to clear dynamic findings![/dim italic]",
             title="[bold cyan]◈ SECURITY SCORE: BEFORE vs AFTER ◈[/bold cyan]",
             border_style="cyan", padding=(1, 2)
         ))

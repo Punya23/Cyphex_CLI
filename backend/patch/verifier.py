@@ -74,10 +74,27 @@ def check_suppression(original: str, patched: str) -> tuple[bool, dict]:
 
 
 def changed_line_count(original: str, patched: str) -> int:
+    """
+    Honest count of how many lines a patch actually touches.
+
+    Uses SequenceMatcher opcodes so a pure rewrite of N lines counts as N — NOT
+    2N. The previous ndiff-based implementation summed '+' and '-' lines, which
+    double-counted every rewrite and caused legitimate multi-line fixes (e.g. an
+    SSRF/CMDi allowlist wrapper) to be falsely rejected as "blast radius too
+    large".
+    """
     o = original.splitlines()
     p = patched.splitlines()
-    diff = difflib.ndiff(o, p)
-    return sum(1 for ln in diff if ln[:1] in ("+", "-"))
+    sm = difflib.SequenceMatcher(a=o, b=p)
+    changed = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "replace":
+            changed += max(i2 - i1, j2 - j1)
+        elif tag == "delete":
+            changed += i2 - i1
+        elif tag == "insert":
+            changed += j2 - j1
+    return changed
 
 
 def check_blast_radius(original: str, patched: str, cap: int = DEFAULT_BLAST_CAP) -> tuple[bool, dict]:

@@ -42,6 +42,20 @@ def test_check_blast_radius_over_cap_fails():
     assert evidence["changed_lines"] > 10
 
 
+def test_blast_radius_rewrite_not_double_counted():
+    """A pure N-line rewrite must count as N changed lines, not 2N.
+
+    Guards against the regression where ndiff summed '+' and '-' lines, doubling
+    every rewrite and falsely rejecting legitimate multi-line fixes.
+    """
+    original = "\n".join([f"old{i}" for i in range(1, 21)]) + "\n"   # 20 lines
+    patched = "\n".join([f"new{i}" for i in range(1, 21)]) + "\n"    # 20 lines, all changed
+    ok, evidence = check_blast_radius(original, patched, cap=25)
+    assert ok                              # 20 <= 25, would FAIL under old 2N counting (40)
+    assert evidence["changed_lines"] == 20
+
+
+
 def test_verify_static_pass_when_finding_removed(monkeypatch):
     vuln = _V()
     loc = SimpleNamespace(kind="file", file="/tmp/app.py", line=10)
