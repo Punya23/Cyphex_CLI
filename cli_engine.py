@@ -13,6 +13,7 @@ import hashlib
 import re
 import glob
 import random
+from types import SimpleNamespace
 from datetime import datetime, timezone
 from typing import Any, Optional
 import httpx
@@ -26,7 +27,14 @@ from rich.box import ROUNDED, DOUBLE
 console = Console()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 
-from sandbox_manager import deploy_sandbox, stop_sandbox, _find_free_port, _get_node_env
+from sandbox_manager import (
+    deploy_sandbox,
+    stop_sandbox,
+    restart_sandbox,
+    sync_file_to_sandbox,
+    _find_free_port,
+    _get_node_env,
+)
 from immune.behavioral_genome import BehavioralGenome
 from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
@@ -43,9 +51,19 @@ try:
 except ImportError:
     COUNCIL_AVAILABLE = False
 
-# Patch pipeline (Phase 1+): resolver + range-accurate applier
+# Patch pipeline (Phase 2): resolver + applier + verifier + manifest
 try:
-    from backend.patch import resolve as resolve_location, PatchApplier
+    from backend.patch import (
+        resolve as resolve_location,
+        PatchApplier,
+        verify_static,
+        verify_dynamic,
+        PASS,
+        UNVERIFIABLE,
+        PatchManifest,
+        PatchRecord,
+        sha256,
+    )
     PATCH_PIPELINE_AVAILABLE = True
 except ImportError:
     PATCH_PIPELINE_AVAILABLE = False
@@ -1868,9 +1886,13 @@ class CyphexEngine:
         patch_council = PatchCouncil() if COUNCIL_AVAILABLE else None
 
         patched_files = []
-        patched_keys: set[str] = set()        # f"{rel}:{line}:{vuln_type}" (manifest-aligned)
-        patched_vuln_ids: set[int] = set()    # id(vuln) for accurate remaining calc
+        patched_keys: set[str] = set()          # applied patches (regardless of verification)
+        verified_vuln_ids: set[int] = set()     # only PASS-verified findings
+        unverified_applied = 0
+        verify_failed = 0
         skipped = 0
+
+        manifest = PatchManifest(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
 
         # CWE lookup helper
         cwe_map = {
@@ -2115,6 +2137,8 @@ class CyphexEngine:
             # Replace exactly the vulnerable span [start_l, end_l) with the fixed
             # block. The old code blanked the range then dumped everything on
             # line 1 (bug R2), corrupting multi-line fixes.
+            original_text = "".join(p["lines"])
+            applier = None
             if PATCH_PIPELINE_AVAILABLE:
                 applier = PatchApplier(p["filepath"])
                 res = applier.apply_range(p["start_l"], p["end_l"], fixed)
@@ -2130,25 +2154,135 @@ class CyphexEngine:
                 with open(p["filepath"], "w", encoding="utf-8") as f:
                     f.writelines(lines)
 
+            try:
+                with open(p["filepath"], "r", encoding="utf-8", errors="ignore") as f:
+                    patched_text = f.read()
+            except Exception:
+                patched_text = original_text
+
+            # ── Phase 2: Verify the patch (static first, dynamic when applicable) ──
+            verify_result = None
+            if PATCH_PIPELINE_AVAILABLE:
+                loc = resolve_location(v, self.source_dir)
+                if not loc:
+                    loc = SimpleNamespace(
+                        kind="file",
+                        file=p["filepath"],
+                        rel=p["rel_path"],
+                        line=p["line_num"],
+                        url=None,
+                        method="GET",
+                    )
+
+                if getattr(loc, "kind", "file") == "url":
+                    base_url = (self.sandbox_info or {}).get("url") if isinstance(self.sandbox_info, dict) else None
+
+                    if isinstance(self.sandbox_info, dict) and self.sandbox_info.get("type") == "docker-compose" and getattr(self, "_docker_compose_dir", None):
+                        try:
+                            subprocess.run(
+                                ["docker", "compose", "restart"],
+                                cwd=self._docker_compose_dir,
+                                capture_output=True,
+                                timeout=60,
+                            )
+                            await asyncio.sleep(3)
+                        except Exception:
+                            pass
+                    elif isinstance(self.sandbox_info, dict) and self.sandbox_info.get("sandbox_id"):
+                        sid = self.sandbox_info.get("sandbox_id")
+                        if sid and sync_file_to_sandbox(sid, p["rel_path"], patched_text):
+                            restart_meta = await restart_sandbox(sid)
+                            if isinstance(restart_meta, dict) and restart_meta.get("url"):
+                                base_url = restart_meta.get("url")
+
+                    verify_result = await verify_dynamic(
+                        v,
+                        loc,
+                        base_url,
+                        original_text=original_text,
+                        patched_text=patched_text,
+                    )
+                else:
+                    verify_result = verify_static(
+                        v,
+                        loc,
+                        self.source_dir,
+                        original_text,
+                        patched_text,
+                    )
+
+            if verify_result is None:
+                verify_result = SimpleNamespace(verdict=UNVERIFIABLE, evidence={"verifier_unavailable": True})
+
+            if manifest:
+                try:
+                    cwe_key = (getattr(v, "cwe", "") or p["cwe"] or "CWE-unknown")
+                    manifest.record(PatchRecord(
+                        key=PatchManifest.make_key(p["rel_path"], p["line_num"], cwe_key),
+                        vuln_type=p["vuln_type"],
+                        cwe=cwe_key,
+                        rel_path=p["rel_path"],
+                        line=p["line_num"],
+                        verdict=verify_result.verdict,
+                        verified=(verify_result.verdict == PASS),
+                        original_hash=sha256(original_text),
+                        patched_hash=sha256(patched_text),
+                        exploit_payload=getattr(v, "payload", "") or "",
+                        evidence=getattr(verify_result, "evidence", {}) or {},
+                    ))
+                except Exception:
+                    pass
+
+            if verify_result.verdict == "FAIL":
+                if PATCH_PIPELINE_AVAILABLE and applier is not None:
+                    applier.rollback()
+                else:
+                    with open(p["filepath"], "w", encoding="utf-8") as f:
+                        f.write(original_text)
+                verify_failed += 1
+                console.print(
+                    f"[red][ROLLED BACK][/red] Verification failed for {p['rel_path']}:{p['line_num']} — patch reverted.\n"
+                )
+                continue
+
             patched_files.append(p["rel_path"])
-            # Phase 1.4: per-finding tracking (kills R5) — record the exact vuln
-            # object so two findings in the same file are tracked independently.
             patched_keys.add(f"{p['rel_path']}:{p['line_num']}:{p['vuln_type']}")
-            patched_vuln_ids.add(id(p["vuln"]))
-            console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']}:{p['line_num']}\n")
+
+            if verify_result.verdict == PASS:
+                verified_vuln_ids.add(id(p["vuln"]))
+                console.print(
+                    f"[green][VERIFIED][/green] Patch applied and verified for {p['rel_path']}:{p['line_num']}\n"
+                )
+            else:
+                unverified_applied += 1
+                console.print(
+                    f"[yellow][APPLIED-UNVERIFIED][/yellow] Patch applied but not verifiable yet for {p['rel_path']}:{p['line_num']}\n"
+                )
 
 
 
         console.print(f"\n[bold]{'-' * 50}[/bold]")
-        console.print(f"[green]Applied:[/green] {len(patched_files)}  [yellow]Skipped:[/yellow] {skipped}")
+        if manifest:
+            manifest.save()
+
+        console.print(
+            f"[green]Applied:[/green] {len(patched_files)}  "
+            f"[green]Verified:[/green] {len(verified_vuln_ids)}  "
+            f"[yellow]Applied-Unverified:[/yellow] {unverified_applied}  "
+            f"[red]Rolled Back:[/red] {verify_failed}  "
+            f"[yellow]Skipped:[/yellow] {skipped}"
+        )
 
         # ── After-Patching Score ──
-        remaining_vulns = len(vulns) - len(patched_vuln_ids)
+        remaining_vulns = len(vulns) - len(verified_vuln_ids)
+        # Phase 2 (R4): honest remaining set — only PASS-verified findings are
+        # removed from the vulnerability pool. Applied-unverified changes do not
+        # improve score until objective verification succeeds.
         # Phase 1.4: per-finding remaining set — a fixed vuln is removed by its
         # own identity, so two vulns in one file are scored independently
         # (the old code matched by file path and dropped every vuln in a
         # patched file at once).
-        remaining = [v for v in vulns if id(v) not in patched_vuln_ids]
+        remaining = [v for v in vulns if id(v) not in verified_vuln_ids]
         crit_a = sum(1 for v in remaining if v.severity == "Critical")
         high_a = sum(1 for v in remaining if v.severity == "High")
         med_a  = sum(1 for v in remaining if v.severity == "Medium")

@@ -4,11 +4,26 @@ CYPHEX patch pipeline.
 Modules:
   resolver  — turn a Vuln.endpoint into a concrete Location (file:line or url)
   applier   — range-accurate, reversible application of a fixed code block
+  verifier  — the verification gate (static re-scan + dynamic replay + guards)
+  manifest  — durable .cyphex/patches.json + honest, verified-only scoring
 
-Phase 2+ will add: verifier, templates, manifest, regression.
+Phase 3+ will add: templates, regression.
 """
 
 from backend.patch.resolver import Location, resolve
 from backend.patch.applier import PatchApplier, ApplyResult
+from backend.patch.verifier import (
+    VerifyResult, verify_static, verify_dynamic,
+    check_suppression, check_blast_radius,
+    PASS, FAIL, UNVERIFIABLE,
+)
+from backend.patch.manifest import PatchManifest, PatchRecord, sha256
 
-__all__ = ["Location", "resolve", "PatchApplier", "ApplyResult"]
+__all__ = [
+    "Location", "resolve",
+    "PatchApplier", "ApplyResult",
+    "VerifyResult", "verify_static", "verify_dynamic",
+    "check_suppression", "check_blast_radius",
+    "PASS", "FAIL", "UNVERIFIABLE",
+    "PatchManifest", "PatchRecord", "sha256",
+]

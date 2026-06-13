@@ -640,3 +640,64 @@ def run_static_analysis(source_dir: str) -> list[StaticFinding]:
         # If Semgrep returned nothing (maybe config issue), fall through
 
     return run_builtin_scan(source_dir)
+
+
+def scan_single_file(file_path: str, source_dir: Optional[str] = None) -> list[StaticFinding]:
+    """
+    Scan exactly one file (used by the patch verifier for scoped re-scans).
+
+    Uses Semgrep on the single file when available, otherwise the built-in
+    regex rules. `file_path` may be absolute or relative; findings carry their
+    `file_path` relative to `source_dir` when provided so they compare equal to
+    the original scan's findings.
+    """
+    if not os.path.exists(file_path):
+        return []
+
+    findings: list[StaticFinding] = []
+    if semgrep_available():
+        findings = run_semgrep(file_path)
+
+    if not findings:
+        lang = _get_language_for_file(file_path)
+        if lang:
+            try:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                    lines = f.readlines()
+            except (OSError, IOError):
+                return []
+            rules = LANGUAGE_PATTERNS[lang]["rules"]
+            for line_num, line in enumerate(lines, start=1):
+                for rule in rules:
+                    if re.search(rule["pattern"], line, re.IGNORECASE):
+                        findings.append(StaticFinding(
+                            rule_id=rule["id"],
+                            name=rule["name"],
+                            severity=rule["severity"],
+                            cwe=rule["cwe"],
+                            file_path=file_path,
+                            line_number=line_num,
+                            code_snippet=line.strip()[:120],
+                            message=f"{rule['name']} detected in {lang}",
+                            fix_hint=rule.get("fix_hint", ""),
+                            source="builtin",
+                        ))
+
+    # Normalize file_path relative to source_dir for stable comparisons.
+    if source_dir:
+        for f in findings:
+            try:
+                if os.path.isabs(f.file_path):
+                    f.file_path = os.path.relpath(f.file_path, source_dir)
+            except ValueError:
+                pass
+
+    # Dedup (same rule + line)
+    seen = set()
+    unique = []
+    for f in findings:
+        k = (f.rule_id, f.line_number)
+        if k not in seen:
+            seen.add(k)
+            unique.append(f)
+    return unique

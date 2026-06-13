@@ -286,6 +286,118 @@ def stop_sandbox(sandbox_id: str) -> dict:
     return {"sandbox_id": sandbox_id, "status": "stopped"}
 
 
+def _build_start_cmd(app_file: str) -> str:
+    """Reconstruct the start command for a sandbox (mirrors deploy_sandbox)."""
+    npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
+    if app_file == "__NPM_RUN_START_DEV__":
+        return f"{npm_cmd} run start:dev"
+    if app_file == "__NPM_RUN_DEV__":
+        return f"{npm_cmd} run dev"
+    if app_file == "__NPM_RUN_START__":
+        return f"{npm_cmd} run start"
+    if app_file.endswith(".js"):
+        return f"node {app_file}"
+    if app_file.endswith(".py"):
+        return f"{sys.executable} {app_file}"
+    return f"node {app_file}"
+
+
+def _kill_proc_tree(proc) -> None:
+    """Cross-platform process-tree kill (a node/npm parent spawns children)."""
+    if not proc or proc.poll() is not None:
+        return
+    try:
+        if os.name != "nt":
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        else:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def sync_file_to_sandbox(sandbox_id: str, rel_path: str, content: str) -> bool:
+    """
+    Write `content` to `rel_path` inside the sandbox's deployed copy so a restart
+    picks up a patched file. Returns False if the sandbox is unknown or the path
+    escapes the sandbox directory (path-traversal guard).
+    """
+    info = active_sandboxes.get(sandbox_id)
+    if not info:
+        return False
+    sandbox_dir = info.get("path")
+    if not sandbox_dir:
+        return False
+    target = os.path.abspath(os.path.join(sandbox_dir, rel_path))
+    if not target.startswith(os.path.abspath(sandbox_dir) + os.sep):
+        return False
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(content)
+        return True
+    except OSError:
+        return False
+
+
+async def restart_sandbox(sandbox_id: str, wait_seconds: float = 5.0) -> dict:
+    """
+    Restart a NATIVE (node/python) sandbox process in place so the running app
+    reflects any patched files synced into its directory. Used by the patch
+    verifier's dynamic branch. Docker/compose stacks are restarted by the caller
+    (cli_engine tracks _docker_compose_dir). Returns updated meta or {"error"}.
+    """
+    info = active_sandboxes.get(sandbox_id)
+    if not info:
+        return {"error": "Sandbox not found"}
+
+    _kill_proc_tree(info.get("process"))
+
+    sandbox_dir = info.get("path")
+    app_file = info.get("app_file")
+    port = info.get("port")
+    if not (sandbox_dir and app_file and port):
+        return {"error": "Insufficient sandbox metadata to restart", "sandbox_id": sandbox_id}
+
+    env = _NODE_ENV.copy()
+    env["PORT"] = str(port)
+    cmd = _build_start_cmd(app_file)
+
+    proc = subprocess.Popen(
+        cmd, shell=True,
+        cwd=sandbox_dir,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        preexec_fn=os.setsid if os.name != "nt" else None,
+    )
+
+    await asyncio.sleep(wait_seconds)
+
+    if proc.poll() is not None:
+        out = proc.stdout.read().decode(errors="replace")[:300]
+        err = proc.stderr.read().decode(errors="replace")[:300]
+        info["status"] = "stopped"
+        return {"error": f"Restart exited immediately: {err or out}", "sandbox_id": sandbox_id}
+
+    url = f"http://localhost:{port}"
+    is_up = await _check_server_up(url)
+
+    info["process"] = proc
+    info["pid"] = proc.pid
+    info["status"] = "running" if is_up else "starting"
+    return {
+        "sandbox_id": sandbox_id,
+        "port": port,
+        "url": url,
+        "status": info["status"],
+        "app_file": app_file,
+    }
+
+
 def list_sandboxes() -> list:
     """List all sandboxes with current status."""
     result = []
