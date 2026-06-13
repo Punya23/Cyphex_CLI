@@ -276,7 +276,7 @@ class CyphexEngine:
 
         # Step 8: Patch workflow
         if auto_patch and self.context.confirmed_vulns:
-            self._step("8/8", "PATCH & VERIFY")
+            self._step("8/8", "AI PATCH + VERIFY  (RAG · Council · Reflexion · Memory)")
             await self._patch_workflow()
 
         # Cleanup
@@ -375,7 +375,7 @@ class CyphexEngine:
         print(f"{border}\n")
 
     def _splash_banner(self):
-        """Premium cyber-themed splash screen."""
+        """Premium cyber-themed splash screen with active capability panel."""
         banner = f"""
 {C.CYAN}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
 {C.CYAN}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
@@ -387,9 +387,36 @@ class CyphexEngine:
         divider = C.gradient("━" * 60, 0, 255, 255, 138, 43, 226)
         print(banner)
         print(f"  {divider}")
-        print(f"  {C.SLATE}Multi-Agent Security Pipeline{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}v2.0{C.RST}  {C.GHOST}│{C.RST}  {C.PURP2}AI-Powered{C.RST}")
+        print(f"  {C.SLATE}Multi-Agent Security Pipeline{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}v2.0{C.RST}  {C.GHOST}│{C.RST}  {C.PURP2}AI-Powered  │  OFFLINE-FIRST{C.RST}")
         print(f"  {divider}")
-        print(f"  {C.GHOST}Scan ID: {C.CYAN2}{self.scan_id}{C.RST}")
+        print(f"  {C.GHOST}Scan ID: {C.CYAN2}{self.scan_id}{C.RST}   {C.GHOST}Hardware tier: {C.PURP2}{self._hw_tier.upper()}{C.RST}")
+        print()
+
+        # ── Active capability flags ──
+        rag_ok  = RAG_AVAILABLE
+        pipe_ok = PATCH_PIPELINE_AVAILABLE
+        council = COUNCIL_AVAILABLE
+
+        def _flag(on: bool) -> str:
+            return f"{C.NEON}✓{C.RST}" if on else f"{C.GHOST}○{C.RST}"
+
+        def _label(on: bool, text_on: str, text_off: str) -> str:
+            return (f"{C.NEON}{text_on}{C.RST}" if on else f"{C.GHOST}{text_off}{C.RST}")
+
+        print(f"  {C.GHOST}┌─ Active Pipeline Capabilities ──────────────────────────────┐{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  SAST  {C.CYAN}Semgrep{C.RST} + built-in 20-lang scanner + Nuclei      {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  DAST  multi-agent exploit replay (SQLi/XSS/CMDi/LFI/SSRF)  {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  {C.CYAN}Immune System{C.RST}  adversarial co-evolution genome              {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(council)}  {_label(council,'AI Council','AI Council (offline)')}  batch patch + dual-specialist review          {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(rag_ok)}  {_label(rag_ok,'Vectorless RAG','RAG disabled')}  function-extract + CWE-KB + repo examples   {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Verification Gate','Verify disabled')}  re-scan + exploit-replay + rollback      {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Manifest','Manifest disabled')}  .cyphex/patches.json durability tracking {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Memory','Memory disabled')}  semantic-hash recall + pattern library     {C.GHOST}│{C.RST}")
+        _refl_rounds = {"minimal": 1, "low": 1, "mid": 2, "high": 3, "ultra": 3, "cloud": 3}.get(self._hw_tier, 2)
+        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Reflexion Loop','Reflexion disabled')}  evidence-fed retry ({self._hw_tier}: up to {_refl_rounds} round(s))  {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Regression Tests','Regression disabled')}  emitted per verified fix                {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  {C.CYAN}Autonomy Ladder{C.RST}  L1–L4 degradation honesty                {C.GHOST}│{C.RST}")
+        print(f"  {C.GHOST}└──────────────────────────────────────────────────────────────┘{C.RST}")
         print()
 
         # Show tool availability summary
@@ -1918,6 +1945,8 @@ class CyphexEngine:
         unverified_applied = 0
         verify_failed = 0
         skipped = 0
+        reflexion_succeeded_count = 0
+        regression_tests_emitted = 0
 
         manifest = PatchManifest(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
         patch_memory = PatchMemory(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
@@ -2030,7 +2059,18 @@ class CyphexEngine:
                     p["kb_strategy"] = strategy.pattern if strategy else ""
                     p["kb_anti_patterns"] = "; ".join(anti[:4]) if anti else ""
 
-                console.print("[dim]  RAG context enabled: imports + function window + CWE strategy + related files.[/dim]")
+                console.print(f"[dim]  RAG context enabled: imports + function window + CWE strategy + related files.[/dim]")
+                # Per-vuln quality summary
+                fn_count  = sum(1 for p in patchable if p.get("extraction_quality") == "function")
+                win_count = sum(1 for p in patchable if p.get("extraction_quality") == "window")
+                kb_count  = sum(1 for p in patchable if p.get("kb_strategy"))
+                sec_count = sum(1 for p in patchable if p.get("secure_example"))
+                console.print(
+                    f"  [cyan]RAG:[/cyan] {fn_count} function-level extractions, "
+                    f"{win_count} window fallbacks, "
+                    f"{kb_count} CWE-KB strategies, "
+                    f"{sec_count} in-repo secure examples"
+                )
             except Exception as e:
                 console.print(f"[yellow][RAG] disabled due to indexing error: {str(e)[:80]}[/yellow]")
 
@@ -2046,6 +2086,7 @@ class CyphexEngine:
         # If we've fixed an identical function+CWE before, reuse the verified fix
         # without burning a full council round.
         cached_results: list[dict | None] = [None] * len(patchable)
+        memory_hits = 0
         if patch_memory:
             for idx, p in enumerate(patchable):
                 fn_text = p.get("context_snippet") or p["snippet"]
@@ -2059,7 +2100,10 @@ class CyphexEngine:
                         "approvals": [],
                         "dissent_reasons": [],
                     }
-                    console.print(f"[dim]  [MEMORY] Recalled verified patch for {p['rel_path']}:{p['line_num']} (CWE {p['cwe']})[/dim]")
+                    memory_hits += 1
+                    console.print(f"  [cyan]▸ MEMORY HIT[/cyan] [dim]{p['rel_path']}:{p['line_num']} ({p['cwe']}) — reusing verified patch[/dim]")
+            if memory_hits:
+                console.print(f"  [cyan]Patch memory:[/cyan] {memory_hits}/{len(patchable)} patches recalled — skipping council for those")
 
         batch_results = None
         if patch_council and len(patchable) > 0:
@@ -2323,7 +2367,15 @@ class CyphexEngine:
             ):
                 try:
                     from backend.reasoning.reflexion import patch_with_reflexion, build_objective_feedback
-                    feedback_msg = build_objective_feedback(getattr(verify_result, "evidence", {}))
+                    evidence = getattr(verify_result, "evidence", {})
+                    feedback_msg = build_objective_feedback(evidence)
+                    evidence_summary = ", ".join(
+                        f"{k}={v}" for k, v in list(evidence.items())[:3] if v
+                    ) or "no specific evidence"
+                    console.print(
+                        f"  [yellow]↺ Reflexion triggered[/yellow] [dim]{p['rel_path']}:{p['line_num']}"
+                        f" — evidence: {evidence_summary}[/dim]"
+                    )
                     async def _generate_retry(fb: str, round_no: int) -> dict:
                         rp = dict(p)
                         if fb:
@@ -2344,7 +2396,10 @@ class CyphexEngine:
                         better = (refl.best_candidate.get("fixed_code") or "").strip()
                         if better and not self._is_placeholder_code(better):
                             fixed = better
-                            console.print(f"[cyan]  ↺ Reflexion retry succeeded — using improved patch[/cyan]")
+                            reflexion_succeeded_count += 1
+                            console.print(f"  [cyan]↺ Reflexion retry succeeded[/cyan] — using improved patch")
+                    else:
+                        console.print(f"  [dim]↺ Reflexion retry did not improve outcome[/dim]")
                 except Exception:
                     pass
 
@@ -2399,6 +2454,7 @@ class CyphexEngine:
                         endpoint = getattr(v, "endpoint", "") or ""
                         if endpoint.startswith("http://") or endpoint.startswith("https://"):
                             emit_dynamic_regression_test(self.source_dir, v, endpoint, getattr(v, "payload", "") or "")
+                            regression_tests_emitted += 1
                         else:
                             emit_static_regression_note(self.source_dir, p["rel_path"], cwe_key, p["line_num"])
                     except Exception:
@@ -2434,6 +2490,10 @@ class CyphexEngine:
             "unverified": unverified_applied,
             "rolled_back": verify_failed,
             "skipped": skipped,
+            "memory_hits": memory_hits,
+            "reflexion_succeeded": reflexion_succeeded_count,
+            "regression_tests": regression_tests_emitted,
+            "manifest_path": str(manifest._path) if (manifest and hasattr(manifest, "_path")) else "",
             "rag_enabled": bool(RAG_AVAILABLE),
             "templates_enabled": bool(PATCH_PIPELINE_AVAILABLE),
             "verifier_enabled": bool(PATCH_PIPELINE_AVAILABLE),
@@ -2806,11 +2866,40 @@ class CyphexEngine:
             print(f"  {C.NEON}● No vulnerabilities found{C.RST}")
         print()
 
+        # Patch pipeline summary
+        stats = getattr(self, "_patch_run_stats", None) or {}
+        if stats:
+            verified   = int(stats.get("verified", 0))
+            unverified = int(stats.get("unverified", 0))
+            rolled     = int(stats.get("rolled_back", 0))
+            mem_hits   = int(stats.get("memory_hits", 0))
+            refl_ok    = int(stats.get("reflexion_succeeded", 0))
+            regr_tests = int(stats.get("regression_tests", 0))
+            manifest_path = stats.get("manifest_path", "")
+
+            print(f"  {C.GHOST}┌─ Patch Pipeline Results ────────────────────────────────────┐{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.NEON}✓ Verified (PASS){C.RST}       {C.NEON}{verified}{C.RST}   {C.GHOST}patches confirmed vuln-free{C.RST}     {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Unverifiable{C.RST}          {C.Y}{unverified}{C.RST}   {C.GHOST}applied; needs human review{C.RST}     {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.R}✗ Rolled Back (FAIL){C.RST}    {C.R}{rolled}{C.RST}   {C.GHOST}reverted — made vuln worse{C.RST}      {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.CYAN}▸ Memory recalls{C.RST}        {C.CYAN}{mem_hits}{C.RST}   {C.GHOST}skipped council generation{C.RST}      {C.GHOST}│{C.RST}")
+            if refl_ok:
+                print(f"  {C.GHOST}│{C.RST}  {C.CYAN}↺ Reflexion wins{C.RST}        {C.CYAN}{refl_ok}{C.RST}   {C.GHOST}improved via evidence retry{C.RST}     {C.GHOST}│{C.RST}")
+            if regr_tests:
+                print(f"  {C.GHOST}│{C.RST}  {C.PURP2}⧐ Regression tests{C.RST}     {C.PURP2}{regr_tests}{C.RST}   {C.GHOST}auto-emitted per verified fix{C.RST}   {C.GHOST}│{C.RST}")
+            if manifest_path:
+                print(f"  {C.GHOST}│{C.RST}  {C.GHOST}Manifest →{C.RST} {C.SLATE}{manifest_path}{C.RST}")
+            print(f"  {C.GHOST}└──────────────────────────────────────────────────────────────┘{C.RST}")
+            print()
+
         # Metadata
         print(f"  {C.GHOST}Duration    {C.SLATE}{elapsed:.1f}s{C.RST}")
         print(f"  {C.GHOST}Scan ID     {C.CYAN2}{self.scan_id}{C.RST}")
+        print(f"  {C.GHOST}HW Tier     {C.PURP2}{getattr(self, '_hw_tier', 'unknown').upper()}{C.RST}")
         print(f"  {C.GHOST}Agents      {C.SLATE}13 deployed (Crawler, XSS, SQLi, Auth, LFI, CMDi, CORS, IDOR, SSRF, SDE, JWT, SupplyChain, API){C.RST}")
         print(f"  {C.GHOST}Tools       {C.SLATE}Semgrep + Nuclei + Built-in Scanner + Immune System{C.RST}")
+        rag_lbl   = f"{C.NEON}enabled{C.RST}"  if RAG_AVAILABLE            else f"{C.GHOST}disabled{C.RST}"
+        pipe_lbl  = f"{C.NEON}enabled{C.RST}"  if PATCH_PIPELINE_AVAILABLE else f"{C.GHOST}disabled{C.RST}"
+        print(f"  {C.GHOST}Vectorless RAG       {rag_lbl}   {C.GHOST}Patch Pipeline  {pipe_lbl}{C.RST}")
 
         level, reason = self._autonomy_status()
         print(f"  {C.GHOST}Autonomy    {C.CYAN}{level}{C.RST}")

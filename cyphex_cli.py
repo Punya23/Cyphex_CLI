@@ -145,7 +145,7 @@ def main():
             print(f"{C.R}Error: Provide --repo or --path{C.RST}")
             return
         os.system("cls" if os.name == "nt" else "clear")
-        print(BANNER)
+        # Engine prints its own full banner — don't double-print here
         CyphexEngine = _load_engine()
         engine = CyphexEngine()
         asyncio.run(engine.run(
