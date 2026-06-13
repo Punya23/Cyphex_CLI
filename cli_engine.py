@@ -398,25 +398,26 @@ class CyphexEngine:
         council = COUNCIL_AVAILABLE
 
         def _flag(on: bool) -> str:
-            return f"{C.NEON}✓{C.RST}" if on else f"{C.GHOST}○{C.RST}"
+            return f"{C.NEON}✓{C.RST}" if on else f"{C.R}○{C.RST}"
 
-        def _label(on: bool, text_on: str, text_off: str) -> str:
-            return (f"{C.NEON}{text_on}{C.RST}" if on else f"{C.GHOST}{text_off}{C.RST}")
+        def _label(on: bool, text_on: str, text_off: str, col_on: str = C.NEON) -> str:
+            return (f"{col_on}{C.BOLD}{text_on}{C.RST}" if on else f"{C.R}{text_off}{C.RST}")
 
-        print(f"  {C.GHOST}┌─ Active Pipeline Capabilities ──────────────────────────────┐{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  SAST  {C.CYAN}Semgrep{C.RST} + built-in 20-lang scanner + Nuclei      {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  DAST  multi-agent exploit replay (SQLi/XSS/CMDi/LFI/SSRF)  {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  {C.CYAN}Immune System{C.RST}  adversarial co-evolution genome              {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(council)}  {_label(council,'AI Council','AI Council (offline)')}  batch patch + dual-specialist review          {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(rag_ok)}  {_label(rag_ok,'Vectorless RAG','RAG disabled')}  function-extract + CWE-KB + repo examples   {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Verification Gate','Verify disabled')}  re-scan + exploit-replay + rollback      {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Manifest','Manifest disabled')}  .cyphex/patches.json durability tracking {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Memory','Memory disabled')}  semantic-hash recall + pattern library     {C.GHOST}│{C.RST}")
+        B = C.GHOST  # box border shorthand
+        print(f"  {B}┌─ Active Pipeline Capabilities ──────────────────────────────┐{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(True)}  {C.CYAN}{C.BOLD}SAST{C.RST}          {C.SLATE}Semgrep + built-in 20-lang scanner + Nuclei{C.RST}   {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(True)}  {C.CYAN}{C.BOLD}DAST{C.RST}          {C.SLATE}multi-agent exploit replay (SQLi/XSS/CMDi/LFI/SSRF){C.RST} {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(True)}  {C.PURP2}{C.BOLD}Immune System{C.RST} {C.SLATE}adversarial co-evolution genome{C.RST}              {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(council)}  {_label(council,'AI Council','AI Council — offline',C.PURP2)}  {C.SLATE}batch patch + dual-specialist review{C.RST}       {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(rag_ok)}  {_label(rag_ok,'Vectorless RAG','RAG disabled',C.CYAN2)}  {C.SLATE}function-extract + CWE-KB + repo examples{C.RST}  {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Verification Gate','Verify — off',C.NEON)}  {C.SLATE}re-scan + exploit-replay + rollback{C.RST}       {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Manifest','Manifest — off',C.NEON)}   {C.SLATE}.cyphex/patches.json durability tracking{C.RST}  {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Memory','Memory — off',C.CYAN2)}    {C.SLATE}semantic-hash recall + pattern library{C.RST}    {B}│{C.RST}")
         _refl_rounds = {"minimal": 1, "low": 1, "mid": 2, "high": 3, "ultra": 3, "cloud": 3}.get(self._hw_tier, 2)
-        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Reflexion Loop','Reflexion disabled')}  evidence-fed retry ({self._hw_tier}: up to {_refl_rounds} round(s))  {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Regression Tests','Regression disabled')}  emitted per verified fix                {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}│{C.RST}  {_flag(True)}  {C.CYAN}Autonomy Ladder{C.RST}  L1–L4 degradation honesty                {C.GHOST}│{C.RST}")
-        print(f"  {C.GHOST}└──────────────────────────────────────────────────────────────┘{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Reflexion Loop','Reflexion — off',C.CYAN2)}  {C.SLATE}evidence-fed retry ({self._hw_tier}: up to {_refl_rounds} round(s)){C.RST}  {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Regression Tests','Regression — off',C.PURP2)} {C.SLATE}auto-emitted per verified fix{C.RST}          {B}│{C.RST}")
+        print(f"  {B}│{C.RST}  {_flag(True)}  {C.Y}{C.BOLD}Autonomy Ladder{C.RST}  {C.SLATE}L1–L4 degradation honesty{C.RST}                {B}│{C.RST}")
+        print(f"  {B}└──────────────────────────────────────────────────────────────┘{C.RST}")
         print()
 
         # Show tool availability summary
@@ -512,16 +513,16 @@ class CyphexEngine:
         active = sum(1 for _, ok, _ in tools if ok)
         total = len(tools)
 
-        print(f"  {C.GHOST}┌─ Tool Readiness ({active}/{total} active) ─────────────────────┐{C.RST}")
+        print(f"  {C.GHOST}┌─ Tool Readiness {C.NEON}({active}/{total} active){C.GHOST} ─────────────────────┐{C.RST}")
         for name, ok, hint in tools:
             if ok:
-                icon = f"{C.G}✓{C.RST}"
-                detail = f"{C.SLATE}{hint}{C.RST}" if hint else ""
-                print(f"  {C.GHOST}│{C.RST}  {icon} {name:12s} {detail}")
+                icon = f"{C.NEON}✓{C.RST}"
+                detail = f"{C.CYAN2}{hint}{C.RST}" if hint else ""
+                print(f"  {C.GHOST}│{C.RST}  {icon} {C.NEON}{name:12s}{C.RST} {detail}")
             else:
-                icon = f"{C.Y}○{C.RST}"
-                hint_str = f"{C.DIM}({hint}){C.RST}" if hint else ""
-                print(f"  {C.GHOST}│{C.RST}  {icon} {name:12s} {hint_str}")
+                icon = f"{C.R}✗{C.RST}"
+                hint_str = f"{C.Y}→ {hint}{C.RST}" if hint else ""
+                print(f"  {C.GHOST}│{C.RST}  {icon} {C.R}{name:12s}{C.RST} {hint_str}")
         print(f"  {C.GHOST}└──────────────────────────────────────────────────┘{C.RST}")
 
         # Show Ollama model assignments if available
@@ -2892,32 +2893,35 @@ class CyphexEngine:
             manifest_path = stats.get("manifest_path", "")
 
             print(f"  {C.GHOST}┌─ Patch Pipeline Results ────────────────────────────────────┐{C.RST}")
-            print(f"  {C.GHOST}│{C.RST}  {C.NEON}✓ Verified (PASS){C.RST}       {C.NEON}{verified}{C.RST}   {C.GHOST}patches confirmed vuln-free{C.RST}     {C.GHOST}│{C.RST}")
-            print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Unverifiable{C.RST}          {C.Y}{unverified}{C.RST}   {C.GHOST}applied; needs human review{C.RST}     {C.GHOST}│{C.RST}")
-            print(f"  {C.GHOST}│{C.RST}  {C.R}✗ Rolled Back (FAIL){C.RST}    {C.R}{rolled}{C.RST}   {C.GHOST}reverted — made vuln worse{C.RST}      {C.GHOST}│{C.RST}")
-            print(f"  {C.GHOST}│{C.RST}  {C.CYAN}▸ Memory recalls{C.RST}        {C.CYAN}{mem_hits}{C.RST}   {C.GHOST}skipped council generation{C.RST}      {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.NEON}✓ Verified (PASS){C.RST}       {C.NEON}{C.BOLD}{verified}{C.RST}   {C.SLATE}patches confirmed vuln-free{C.RST}     {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Unverifiable{C.RST}          {C.Y}{C.BOLD}{unverified}{C.RST}   {C.SLATE}applied; needs human review{C.RST}     {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.R}✗ Rolled Back (FAIL){C.RST}    {C.R}{C.BOLD}{rolled}{C.RST}   {C.SLATE}reverted — made vuln worse{C.RST}      {C.GHOST}│{C.RST}")
+            print(f"  {C.GHOST}│{C.RST}  {C.CYAN2}▸ Memory recalls{C.RST}        {C.CYAN2}{C.BOLD}{mem_hits}{C.RST}   {C.SLATE}skipped council generation{C.RST}      {C.GHOST}│{C.RST}")
             if refl_ok:
-                print(f"  {C.GHOST}│{C.RST}  {C.CYAN}↺ Reflexion wins{C.RST}        {C.CYAN}{refl_ok}{C.RST}   {C.GHOST}improved via evidence retry{C.RST}     {C.GHOST}│{C.RST}")
+                print(f"  {C.GHOST}│{C.RST}  {C.CYAN}↺ Reflexion wins{C.RST}        {C.CYAN}{C.BOLD}{refl_ok}{C.RST}   {C.SLATE}improved via evidence retry{C.RST}     {C.GHOST}│{C.RST}")
             if regr_tests:
-                print(f"  {C.GHOST}│{C.RST}  {C.PURP2}⧐ Regression tests{C.RST}     {C.PURP2}{regr_tests}{C.RST}   {C.GHOST}auto-emitted per verified fix{C.RST}   {C.GHOST}│{C.RST}")
+                print(f"  {C.GHOST}│{C.RST}  {C.PURP2}⧐ Regression tests{C.RST}     {C.PURP2}{C.BOLD}{regr_tests}{C.RST}   {C.SLATE}auto-emitted per verified fix{C.RST}   {C.GHOST}│{C.RST}")
             if manifest_path:
-                print(f"  {C.GHOST}│{C.RST}  {C.GHOST}Manifest →{C.RST} {C.SLATE}{manifest_path}{C.RST}")
+                print(f"  {C.GHOST}│{C.RST}  {C.SLATE}Manifest →{C.RST} {C.CYAN2}{manifest_path}{C.RST}")
             print(f"  {C.GHOST}└──────────────────────────────────────────────────────────────┘{C.RST}")
             print()
 
         # Metadata
-        print(f"  {C.GHOST}Duration    {C.SLATE}{elapsed:.1f}s{C.RST}")
-        print(f"  {C.GHOST}Scan ID     {C.CYAN2}{self.scan_id}{C.RST}")
-        print(f"  {C.GHOST}HW Tier     {C.PURP2}{getattr(self, '_hw_tier', 'unknown').upper()}{C.RST}")
-        print(f"  {C.GHOST}Agents      {C.SLATE}13 deployed (Crawler, XSS, SQLi, Auth, LFI, CMDi, CORS, IDOR, SSRF, SDE, JWT, SupplyChain, API){C.RST}")
-        print(f"  {C.GHOST}Tools       {C.SLATE}Semgrep + Nuclei + Built-in Scanner + Immune System{C.RST}")
-        rag_lbl   = f"{C.NEON}enabled{C.RST}"  if RAG_AVAILABLE            else f"{C.GHOST}disabled{C.RST}"
-        pipe_lbl  = f"{C.NEON}enabled{C.RST}"  if PATCH_PIPELINE_AVAILABLE else f"{C.GHOST}disabled{C.RST}"
-        print(f"  {C.GHOST}Vectorless RAG       {rag_lbl}   {C.GHOST}Patch Pipeline  {pipe_lbl}{C.RST}")
+        print(f"  {C.SLATE}Duration  {C.RST}  {C.W}{elapsed:.1f}s{C.RST}")
+        print(f"  {C.SLATE}Scan ID   {C.RST}  {C.CYAN2}{C.BOLD}{self.scan_id}{C.RST}")
+        print(f"  {C.SLATE}HW Tier   {C.RST}  {C.PURP2}{C.BOLD}{getattr(self, '_hw_tier', 'unknown').upper()}{C.RST}")
+        print(f"  {C.SLATE}Agents    {C.RST}  {C.CYAN}13 deployed{C.RST}  {C.SLATE}Crawler XSS SQLi Auth LFI CMDi CORS IDOR SSRF SDE JWT SupplyChain API{C.RST}")
+        print(f"  {C.SLATE}Tools     {C.RST}  {C.CYAN}Semgrep{C.RST} {C.GHOST}+{C.RST} {C.CYAN}Nuclei{C.RST} {C.GHOST}+{C.RST} {C.CYAN}Built-in Scanner{C.RST} {C.GHOST}+{C.RST} {C.PURP2}Immune System{C.RST}")
+        rag_lbl   = f"{C.NEON}{C.BOLD}enabled{C.RST}"  if RAG_AVAILABLE            else f"{C.R}disabled{C.RST}"
+        pipe_lbl  = f"{C.NEON}{C.BOLD}enabled{C.RST}"  if PATCH_PIPELINE_AVAILABLE else f"{C.R}disabled{C.RST}"
+        print(f"  {C.SLATE}Vectorless RAG   {C.RST}{rag_lbl}   {C.SLATE}Patch Pipeline  {C.RST}{pipe_lbl}")
 
         level, reason = self._autonomy_status()
-        print(f"  {C.GHOST}Autonomy    {C.CYAN}{level}{C.RST}")
-        print(f"  {C.GHOST}Honesty     {C.SLATE}{reason}{C.RST}")
+        # Autonomy level colour: L4=green, L3=cyan, L2=yellow, L1=red
+        _al = level.split()[0]  # "L4", "L3", etc.
+        al_col = {"L4": C.NEON, "L3": C.CYAN, "L2": C.Y, "L1": C.R}.get(_al, C.SLATE)
+        print(f"  {C.SLATE}Autonomy  {C.RST}  {al_col}{C.BOLD}{level}{C.RST}")
+        print(f"  {C.SLATE}Honesty   {C.RST}  {C.SLATE}{reason}{C.RST}")
 
         print(f"\n{border}")
         print(f"  {C.PURP2}cyphex{C.RST} {C.GHOST}— Multi-Agent Security Pipeline v2.0{C.RST}")
