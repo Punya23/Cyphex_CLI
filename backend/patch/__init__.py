@@ -19,6 +19,8 @@ from backend.patch.verifier import (
 )
 from backend.patch.manifest import PatchManifest, PatchRecord, sha256
 from backend.patch import templates
+from backend.patch.patch_memory import PatchMemory, semantic_hash
+from backend.patch.regression import emit_dynamic_regression_test, emit_static_regression_note
 
 __all__ = [
     "Location", "resolve",
@@ -28,4 +30,6 @@ __all__ = [
     "PASS", "FAIL", "UNVERIFIABLE",
     "PatchManifest", "PatchRecord", "sha256",
     "templates",
+    "PatchMemory", "semantic_hash",
+    "emit_dynamic_regression_test", "emit_static_regression_note",
 ]

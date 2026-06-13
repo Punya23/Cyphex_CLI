@@ -63,6 +63,9 @@ try:
         PatchManifest,
         PatchRecord,
         sha256,
+        PatchMemory,
+        emit_dynamic_regression_test,
+        emit_static_regression_note,
     )
     PATCH_PIPELINE_AVAILABLE = True
 except ImportError:
@@ -1899,6 +1902,7 @@ class CyphexEngine:
         skipped = 0
 
         manifest = PatchManifest(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
+        patch_memory = PatchMemory(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
 
         # CWE lookup helper
         cwe_map = {
@@ -2298,6 +2302,25 @@ class CyphexEngine:
 
             if verify_result.verdict == PASS:
                 verified_vuln_ids.add(id(p["vuln"]))
+                if patch_memory:
+                    try:
+                        cwe_key = (getattr(v, "cwe", "") or p["cwe"] or "CWE-unknown")
+                        patch_memory.store_verified(
+                            function_text=p.get("context_snippet") or p["snippet"],
+                            cwe=cwe_key,
+                            fixed_code=fixed,
+                            evidence=getattr(verify_result, "evidence", {}) or {},
+                        )
+                        if p.get("kb_strategy"):
+                            patch_memory.add_pattern(cwe_key, "generic", p.get("kb_strategy"))
+
+                        endpoint = getattr(v, "endpoint", "") or ""
+                        if endpoint.startswith("http://") or endpoint.startswith("https://"):
+                            emit_dynamic_regression_test(self.source_dir, v, endpoint, getattr(v, "payload", "") or "")
+                        else:
+                            emit_static_regression_note(self.source_dir, p["rel_path"], cwe_key, p["line_num"])
+                    except Exception:
+                        pass
                 console.print(
                     f"[green][VERIFIED][/green] Patch applied and verified for {p['rel_path']}:{p['line_num']}\n"
                 )
@@ -2312,6 +2335,8 @@ class CyphexEngine:
         console.print(f"\n[bold]{'-' * 50}[/bold]")
         if manifest:
             manifest.save()
+        if patch_memory:
+            patch_memory.save()
 
         console.print(
             f"[green]Applied:[/green] {len(patched_files)}  "
