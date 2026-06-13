@@ -2347,13 +2347,19 @@ class CyphexEngine:
                         patched_text=patched_text,
                     )
                 else:
-                    verify_result = verify_static(
-                        v,
-                        loc,
-                        self.source_dir,
-                        original_text,
-                        patched_text,
-                    )
+                    # Run re-scan in a worker thread — frees the event loop
+                    # and lets the user see which OS thread is doing the work.
+                    import threading as _threading
+                    _scan_id_short = self.scan_id
+
+                    def _rescan_in_thread():
+                        tid = _threading.current_thread().ident
+                        console.print(
+                            f"  [dim]⟳  re-scan  thread-{tid}  {p['rel_path']}:{p['line_num']}  [{_scan_id_short}][/dim]"
+                        )
+                        return verify_static(v, loc, self.source_dir, original_text, patched_text)
+
+                    verify_result = await asyncio.to_thread(_rescan_in_thread)
 
             if verify_result is None:
                 verify_result = SimpleNamespace(verdict=UNVERIFIABLE, evidence={"verifier_unavailable": True})
@@ -2387,7 +2393,15 @@ class CyphexEngine:
                         cfix = (candidate.get("fixed_code") or "").strip()
                         if not cfix:
                             return {"verdict": UNVERIFIABLE, "evidence": {"no_code": True}}
-                        vr = verify_static(v, loc, self.source_dir, original_text, cfix)
+
+                        def _retry_rescan():
+                            tid = _threading.current_thread().ident
+                            console.print(
+                                f"  [dim]⟳  reflexion re-scan  thread-{tid}  {p['rel_path']}[/dim]"
+                            )
+                            return verify_static(v, loc, self.source_dir, original_text, cfix)
+
+                        vr = await asyncio.to_thread(_retry_rescan)
                         return {"verdict": vr.verdict, "evidence": getattr(vr, "evidence", {})}
 
                     tier = getattr(self, "_hw_tier", "mid")
