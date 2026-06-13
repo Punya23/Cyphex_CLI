@@ -43,6 +43,13 @@ try:
 except ImportError:
     COUNCIL_AVAILABLE = False
 
+# Patch pipeline (Phase 1+): resolver + range-accurate applier
+try:
+    from backend.patch import resolve as resolve_location, PatchApplier
+    PATCH_PIPELINE_AVAILABLE = True
+except ImportError:
+    PATCH_PIPELINE_AVAILABLE = False
+
 class C:
     """Premium cyber-themed color palette — turquoise/purple/black."""
     # ── Core palette ──
@@ -1861,6 +1868,8 @@ class CyphexEngine:
         patch_council = PatchCouncil() if COUNCIL_AVAILABLE else None
 
         patched_files = []
+        patched_keys: set[str] = set()        # f"{rel}:{line}:{vuln_type}" (manifest-aligned)
+        patched_vuln_ids: set[int] = set()    # id(vuln) for accurate remaining calc
         skipped = 0
 
         # CWE lookup helper
@@ -1929,6 +1938,21 @@ class CyphexEngine:
 
         if dynamic_only:
             console.print(f"[dim]  {len(dynamic_only)} dynamic/runtime findings (no source file to auto-patch)[/dim]")
+
+        # ── Phase 1.3: Deduplicate findings at the same (file, line) ──
+        # Two findings pointing at the same source line would otherwise produce
+        # two patches; the second clobbers the first's edit. Keep the highest
+        # severity per location.
+        _sev_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Info": 0}
+        _deduped: dict[tuple, dict] = {}
+        for p in patchable:
+            loc_key = (p["rel_path"], p["line_num"])
+            existing = _deduped.get(loc_key)
+            if existing is None or _sev_rank.get(p["vuln"].severity, 0) > _sev_rank.get(existing["vuln"].severity, 0):
+                _deduped[loc_key] = p
+        if len(_deduped) < len(patchable):
+            console.print(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
+        patchable = list(_deduped.values())
 
         if not patchable:
             console.print(f"[dim]No vulns with file locations to patch.[/dim]")
@@ -2031,6 +2055,12 @@ class CyphexEngine:
                 skipped += 1
                 continue
 
+            # Phase 1.5 (R6): reject comment-as-code from the council too.
+            if self._is_placeholder_code(fixed):
+                console.print(f"[yellow][SKIP][/yellow] Patch is comment-only / placeholder, not real code\n")
+                skipped += 1
+                continue
+
             safety_notes = self._assess_patch_safety(v, p["snippet"], fixed)
 
             diff_text = Text()
@@ -2081,25 +2111,44 @@ class CyphexEngine:
                 console.print(f"[dim][SKIPPED][/dim]\n")
                 continue
 
-            lines = p["lines"]
-            for j in range(p["start_l"], p["end_l"]):
-                lines[j] = ""
-            lines[p["start_l"]] = fixed + "\n"
-            with open(p["filepath"], "w", encoding="utf-8") as f:
-                f.writelines(lines)
+            # ── Phase 1.2: range-accurate, reversible apply ──
+            # Replace exactly the vulnerable span [start_l, end_l) with the fixed
+            # block. The old code blanked the range then dumped everything on
+            # line 1 (bug R2), corrupting multi-line fixes.
+            if PATCH_PIPELINE_AVAILABLE:
+                applier = PatchApplier(p["filepath"])
+                res = applier.apply_range(p["start_l"], p["end_l"], fixed)
+                if not res.ok:
+                    console.print(f"[red][FAILED][/red] {res.error} — file left unchanged.\n")
+                    skipped += 1
+                    continue
+            else:
+                # Fallback (should not happen): correct slice replacement.
+                lines = p["lines"]
+                block = [ln + "\n" for ln in fixed.replace("\r\n", "\n").rstrip("\n").split("\n")] if fixed.strip() else []
+                lines[p["start_l"]:p["end_l"]] = block
+                with open(p["filepath"], "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+
             patched_files.append(p["rel_path"])
-            console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']}\n")
+            # Phase 1.4: per-finding tracking (kills R5) — record the exact vuln
+            # object so two findings in the same file are tracked independently.
+            patched_keys.add(f"{p['rel_path']}:{p['line_num']}:{p['vuln_type']}")
+            patched_vuln_ids.add(id(p["vuln"]))
+            console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']}:{p['line_num']}\n")
+
 
 
         console.print(f"\n[bold]{'-' * 50}[/bold]")
         console.print(f"[green]Applied:[/green] {len(patched_files)}  [yellow]Skipped:[/yellow] {skipped}")
 
         # ── After-Patching Score ──
-        remaining_vulns = len(vulns) - len(patched_files)
-        # Recalculate severity counts after patching
-        patched_set = set(patched_files)
-        remaining = [v for v in vulns
-                     if not any(v.endpoint and p_entry in v.endpoint for p_entry in patched_set)]
+        remaining_vulns = len(vulns) - len(patched_vuln_ids)
+        # Phase 1.4: per-finding remaining set — a fixed vuln is removed by its
+        # own identity, so two vulns in one file are scored independently
+        # (the old code matched by file path and dropped every vuln in a
+        # patched file at once).
+        remaining = [v for v in vulns if id(v) not in patched_vuln_ids]
         crit_a = sum(1 for v in remaining if v.severity == "Critical")
         high_a = sum(1 for v in remaining if v.severity == "High")
         med_a  = sum(1 for v in remaining if v.severity == "Medium")
@@ -2216,9 +2265,33 @@ class CyphexEngine:
 
         # 2. Fallback: Rule-based patches (works 100% offline)
         result = self._rule_based_patch(vuln, code_snippet)
+        # Phase 1.5 (kills R6): never return comment-as-code / placeholder fixes.
+        # Several built-in rules emit `// Use parameterized queries:` style
+        # comments as `fixed_code`; applying those deletes real code and leaves a
+        # comment. Real deterministic transforms arrive in Phase 5; until then a
+        # placeholder result is treated as "no patch" (manual review).
+        if result and self._is_placeholder_code(result.get("fixed_code", "")):
+            return None
         if result:
             print(f"  {C.G}[OK]{C.RST} Generated patch using built-in security rules (no LLM needed)")
         return result
+
+    @staticmethod
+    def _is_placeholder_code(fixed: str) -> bool:
+        """
+        True if `fixed` is effectively a comment/placeholder rather than real
+        code. Used to block R6 (comment-as-code) patches from being written.
+        """
+        if not fixed or not fixed.strip():
+            return True
+        comment_prefixes = ("//", "#", "/*", "*", "<!--")
+        code_lines = [ln.strip() for ln in fixed.splitlines() if ln.strip()]
+        if not code_lines:
+            return True
+        # Placeholder if every non-blank line is a comment (the R6 pattern:
+        # the built-in rules emit "// Use parameterized queries:" as fixed_code).
+        return all(ln.startswith(comment_prefixes) for ln in code_lines)
+
 
     def _rule_based_patch(self, vuln, snippet) -> Optional[dict[str, str]]:
         """Built-in patches for common vulnerability types. Works 100% offline."""
