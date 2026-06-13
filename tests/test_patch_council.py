@@ -38,7 +38,7 @@ class TestPatchCouncil:
         """Parameterised query patch approved by both validators -> safety=safe"""
         call_count = 0
 
-        async def mock_call(model, system, prompt, task_name=""):
+        async def mock_call(model, system, prompt, task_name="", temperature=0.1):
             nonlocal call_count
             call_count += 1
             if model == "cyphex-patch":
@@ -68,7 +68,7 @@ class TestPatchCouncil:
         """Incomplete patch rejected by one validator -> safety=review_needed"""
         call_count = 0
 
-        async def mock_call(model, system, prompt, task_name=""):
+        async def mock_call(model, system, prompt, task_name="", temperature=0.1):
             nonlocal call_count
             call_count += 1
             if model == "cyphex-patch":
@@ -97,7 +97,7 @@ class TestPatchCouncil:
     @pytest.mark.asyncio
     async def test_both_validators_reject(self, council):
         """Bad patch rejected by both -> safety=rejected, fixed_code still returned"""
-        async def mock_call(model, system, prompt, task_name=""):
+        async def mock_call(model, system, prompt, task_name="", temperature=0.1):
             if model == "cyphex-patch":
                 return {
                     "unsafe_reason": "eval with user input",
@@ -126,7 +126,7 @@ class TestPatchCouncil:
         import re
         CVE_PATTERN = re.compile(r'CVE-\d{4}-\d{4,}')
 
-        async def mock_call(model, system, prompt, task_name=""):
+        async def mock_call(model, system, prompt, task_name="", temperature=0.1):
             if model == "cyphex-patch":
                 return {
                     "unsafe_reason": "Hardcoded secret in source code (CWE-798)",
@@ -158,7 +158,7 @@ class TestPatchCouncil:
             unloaded_models.append(model)
             council.vram.loaded.pop(model, None)
 
-        async def mock_call(model, system, prompt, task_name=""):
+        async def mock_call(model, system, prompt, task_name="", temperature=0.1):
             if model == "cyphex-patch":
                 return {"unsafe_reason": "test", "fixed_code": "test", "patch_safety": "safe"}
             return {"approved": True, "reason": "ok"}

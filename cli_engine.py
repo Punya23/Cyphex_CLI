@@ -2116,6 +2116,7 @@ class CyphexEngine:
                         {
                             "vuln_name": patchable[i]["vuln_type"],
                             "cwe": patchable[i]["cwe"],
+                            "severity": getattr(patchable[i]["vuln"], "severity", "") or "",
                             "vulnerable_code": patchable[i]["snippet"],
                             "file_path": patchable[i]["rel_path"],
                             "context_snippet": patchable[i].get("context_snippet", ""),

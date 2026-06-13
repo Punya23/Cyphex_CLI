@@ -4,6 +4,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from backend.council.council_orchestrator import CouncilOrchestrator
 from backend.council.model_selector import get_selector
+from backend.council.reasoning_strategy import select_strategy
 
 console = Console()
 
@@ -237,6 +238,54 @@ class PatchCouncil(CouncilOrchestrator):
         except Exception:
             return {}
 
+    @staticmethod
+    def _fingerprint_patch(code: str) -> str:
+        """Normalise a candidate for majority voting (ignore whitespace noise)."""
+        return "\n".join(line.strip() for line in (code or "").splitlines() if line.strip())
+
+    async def _self_consistent_patch(self, model: str, vuln: dict, prompt: str, k: int = 3) -> dict:
+        """
+        Self-Consistency: generate K candidate patches at raised temperature and
+        keep the one the majority agree on (by normalised fingerprint). Ties break
+        toward the candidate flagged patch_safety='safe'. Falls back gracefully to
+        the first non-empty candidate. Reuses the already-loaded model — the only
+        cost is K forward passes, no extra VRAM.
+        """
+        candidates: list[dict] = []
+        for i in range(k):
+            temp = 0.15 + 0.20 * i  # 0.15, 0.35, 0.55 — diversify without going incoherent
+            try:
+                res = await self._call(model, PATCH_GENERATION_SYSTEM, prompt,
+                                       task_name=f"Patch Candidate {i + 1}/{k}", temperature=temp)
+                if res.get("fixed_code", "").strip():
+                    candidates.append(res)
+            except Exception:
+                continue
+
+        if not candidates:
+            return {"fixed_code": "", "unsafe_reason": "All candidates failed"}
+
+        # Majority vote by fingerprint
+        buckets: dict[str, list[dict]] = {}
+        for c in candidates:
+            buckets.setdefault(self._fingerprint_patch(c.get("fixed_code", "")), []).append(c)
+
+        best_fp = max(buckets, key=lambda fp: (
+            len(buckets[fp]),
+            any(c.get("patch_safety") == "safe" for c in buckets[fp]),
+        ))
+        winner = buckets[best_fp][0]
+        agree = len(buckets[best_fp])
+
+        console.print(
+            f"[dim]  🗳️  Self-Consistency: {len(candidates)} candidates → "
+            f"[/dim][cyan]{agree}/{len(candidates)} agreed[/cyan]"
+            + ("" if len(buckets) == 1 else f" [dim]({len(buckets)} distinct)[/dim]")
+        )
+        winner = dict(winner)
+        winner["self_consistency"] = {"candidates": len(candidates), "agreed": agree, "distinct": len(buckets)}
+        return winner
+
     async def generate_and_validate_patch(
         self,
         vuln_name: str,
@@ -303,8 +352,13 @@ class PatchCouncil(CouncilOrchestrator):
         patch_prompt = _build_patch_prompt(vuln_dict)
 
         console.print(f"[dim]Stage 1: {patch_model} Generating Patch...[/dim]")
+        strat = select_strategy(cwe, vuln_dict.get("severity", ""))
+        console.print(f"[dim]  Strategy: {strat.icon} {strat.name} ({strat.calls})[/dim]")
         try:
-            patch_result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, patch_prompt, task_name="Patch Generation")
+            if strat.candidates > 1:
+                patch_result = await self._self_consistent_patch(patch_model, vuln_dict, patch_prompt, k=strat.candidates)
+            else:
+                patch_result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, patch_prompt, task_name="Patch Generation")
         except Exception as e:
             console.print(f"[red]Error generating patch: {e}[/red]")
             return {"fixed_code": "", "patch_safety": "rejected", "unsafe_reason": "Error", "dissent_reasons": ["Generation failed"]}
@@ -377,6 +431,9 @@ class PatchCouncil(CouncilOrchestrator):
 
         console.print(f"\n[bold magenta]═══ Batch Patch Mode: {len(vuln_list)} vulnerabilities ═══[/bold magenta]")
 
+        from backend.council.reasoning_strategy import render_engine_banner
+        render_engine_banner(console)
+
         # Discover models — uses intelligent resource-aware brain
         selector = await get_selector(quiet=True)
         self.vram.update_costs(selector.get_vram_costs())
@@ -413,7 +470,11 @@ class PatchCouncil(CouncilOrchestrator):
         # ── PATCH CACHE: these results survive even if reviews crash ──
         patch_results = []
         for i, v in enumerate(vuln_list, 1):
-            console.print(f"  [dim][{i}/{len(vuln_list)}] Patching:[/dim] [cyan]{v['vuln_name']}[/cyan]")
+            strat = select_strategy(v.get("cwe", ""), v.get("severity", ""))
+            console.print(
+                f"  [dim][{i}/{len(vuln_list)}] Patching:[/dim] [cyan]{v['vuln_name']}[/cyan]"
+                f"  [dim]→ {strat.icon} {strat.name}[/dim]"
+            )
             # ── Oracle: decompose the problem before generating the patch ──
             oracle = await self._oracle_reason(patch_model, v)
             if oracle:
@@ -421,7 +482,10 @@ class PatchCouncil(CouncilOrchestrator):
                 v["oracle_analysis"] = oracle
             prompt = _build_patch_prompt(v)
             try:
-                result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, prompt, task_name="Patch Generation")
+                if strat.candidates > 1:
+                    result = await self._self_consistent_patch(patch_model, v, prompt, k=strat.candidates)
+                else:
+                    result = await self._call(patch_model, PATCH_GENERATION_SYSTEM, prompt, task_name="Patch Generation")
                 patch_results.append(result)
             except Exception as e:
                 console.print(f"[red]  Error: {e}[/red]")

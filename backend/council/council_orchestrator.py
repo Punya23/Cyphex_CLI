@@ -220,11 +220,14 @@ ANTI-HALLUCINATION RULES — apply on every response:
     def __init__(self):
         self.vram = VRAMManager()
 
-    async def _call(self, model: str, system: str, prompt: str, task_name: str = "Reasoning") -> dict:
+    async def _call(self, model: str, system: str, prompt: str, task_name: str = "Reasoning", temperature: float = 0.1) -> dict:
         """
         Call a model and return parsed JSON.
         Handles: model loading, JSON extraction from markdown fences, retries.
         Raises CouncilCallError if model returns non-JSON after 2 retries.
+
+        temperature: sampling temperature (default 0.1 for deterministic reasoning).
+        Self-consistency uses a higher value to diversify candidate patches.
         """
         console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
         await self.vram.ensure_loaded(model)
@@ -248,7 +251,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                                 "format": "json",
                                 "keep_alive": "10m",
                                 "options": {
-                                    "temperature": 0.1,
+                                    "temperature": temperature,
                                     "top_p": 0.9,
                                     "num_predict": 2048,  # Enough headroom to complete JSON without truncation
                                     "num_ctx": ctx_for_tier(),  # Tier-aware: 4096 (low) → 8192 (high/ultra)
