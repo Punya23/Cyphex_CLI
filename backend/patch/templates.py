@@ -1,108 +1,151 @@
-"""Deterministic template transforms for common CWE classes."""
+"""
+CYPHEX — Deterministic Template Transforms
 
-from __future__ import annotations
+100%-deterministic fixes for high-frequency CWEs.
+Zero model dependency — regex-based code transforms that are always correct.
 
-import os
+Each transform is STILL verified before acceptance (a regex can be wrong).
+If verification fails, the finding falls through to model-based reasoning.
+
+Kills R6: "Rule-based fallback emits comments-as-code"
+"""
+
 import re
-from typing import Optional
+from typing import Optional, Callable
 
 
-def _lang_from_path(file_path: str) -> str:
-    ext = os.path.splitext((file_path or "").lower())[1]
-    if ext in {".py"}:
-        return "python"
-    if ext in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
-        return "javascript"
-    return "text"
+# ═══════════════════════════════════════════════════════════════
+# Transform Functions (defined first so the registry can reference them)
+# ═══════════════════════════════════════════════════════════════
+
+def _fix_sqli_template_literal(code: str) -> str:
+    """Replace template literal SQL with parameterized queries."""
+
+    def replacer(match):
+        full = match.group(0)
+        # Extract the template literal content
+        tpl_match = re.search(r'`([^`]*)`', full)
+        if not tpl_match:
+            return full
+
+        template = tpl_match.group(1)
+
+        # Find all ${...} interpolations
+        vars_found = re.findall(r'\$\{([^}]+)\}', template)
+        if not vars_found:
+            return full
+
+        # Replace each ${var} with ?
+        parameterized = re.sub(r'\$\{[^}]+\}', '?', template)
+
+        # Build the replacement
+        vars_list = ", ".join(vars_found)
+        return full.replace(f'`{template}`', f'"{parameterized}", [{vars_list}]')
+
+    pattern = r'(?:db|connection|pool)\.query\s*\(\s*`[^`]*\$\{[^`]*`'
+    result = re.sub(pattern, replacer, code, flags=re.DOTALL)
+    return result
 
 
-def _template_sqli(snippet: str, lang: str) -> Optional[str]:
-    if lang == "python" and "execute(" in snippet and "%" in snippet:
-        return re.sub(r"execute\((.+?)%\s*(.+?)\)", r"execute(\1, \2)", snippet)
-    if "SELECT" in snippet.upper() and ("+" in snippet or "${" in snippet or "`" in snippet):
-        return (
-            "const query = 'SELECT * FROM users WHERE id = ?';\n"
-            "const result = await db.query(query, [userId]);"
-        )
-    return None
+def _fix_sqli_concatenation(code: str) -> str:
+    """Replace string concatenation SQL with parameterized queries."""
+    pattern = r'(["\'])(SELECT\s[^"\']*?)\1\s*\+\s*(\w+(?:\.\w+)*)'
+    match = re.search(pattern, code, re.I)
+    if match:
+        quote = match.group(1)
+        query_part = match.group(2)
+        var = match.group(3)
+        replacement = f'{quote}{query_part}?{quote}, [{var}]'
+        return code[:match.start()] + replacement + code[match.end():]
+    return code
 
 
-def _template_xss(snippet: str, _lang: str) -> Optional[str]:
-    if "dangerouslySetInnerHTML" in snippet:
-        out = re.sub(
-            r"dangerouslySetInnerHTML=\{\{\s*__html:\s*(.+?)\s*\}\}",
-            r"children={\1}",
-            snippet,
-        )
-        return out if out != snippet else None
-    if ".innerHTML" in snippet:
-        return snippet.replace(".innerHTML", ".textContent")
-    return None
+def _fix_hardcoded_secret(code: str) -> str:
+    """Replace hardcoded secrets with environment variable references."""
+
+    def replacer(match):
+        full = match.group(0)
+        key_match = re.match(r'(\w+)\s*[:=]\s*["\']', full)
+        if not key_match:
+            return full
+        key = key_match.group(1).upper()
+        return re.sub(r'["\'][^"\']+["\']', f'process.env.{key}', full)
+
+    pattern = r'(?:password|secret|api_?key|token|MYSQL_ROOT_PASSWORD)\s*[:=]\s*["\'][^"\']{4,}["\']'
+    return re.sub(pattern, replacer, code, flags=re.I)
 
 
-def _template_cmdi(snippet: str, _lang: str) -> Optional[str]:
-    if "exec(" in snippet and "execFile(" not in snippet:
-        return snippet.replace("exec(", "execFile(")
-    return None
+def _fix_wildcard_cors(code: str) -> str:
+    """Replace wildcard CORS with a placeholder origin list."""
+    code = re.sub(
+        r"cors\s*\(\s*\{\s*origin\s*:\s*['\"]?\*['\"]?",
+        "cors({ origin: [process.env.ALLOWED_ORIGIN || 'https://localhost:3000']",
+        code
+    )
+    code = re.sub(
+        r"['\"]Access-Control-Allow-Origin['\"]\s*,\s*['\"]?\*['\"]?",
+        "'Access-Control-Allow-Origin', process.env.ALLOWED_ORIGIN || 'https://localhost:3000'",
+        code
+    )
+    return code
 
 
-def _template_path_traversal(snippet: str, lang: str) -> Optional[str]:
-    if lang == "javascript" and "path.join" in snippet and "req." in snippet:
-        return (
-            "const name = path.basename(req.params.file || '');\n"
-            "const safePath = path.join(BASE_DIR, name);"
-        )
-    if lang == "python" and "os.path.join" in snippet and "request" in snippet:
-        return (
-            "name = os.path.basename(request.args.get('file', ''))\n"
-            "safe_path = os.path.join(BASE_DIR, name)"
-        )
-    return None
+# ═══════════════════════════════════════════════════════════════
+# Transform Registry
+# ═══════════════════════════════════════════════════════════════
+
+TRANSFORMS: dict[str, dict[str, dict]] = {
+    "CWE-89": {
+        "generic": {
+            "detect": r'(?:db\.query|connection\.query|pool\.query)\s*\(\s*`[^`]*\$\{',
+            "transform": _fix_sqli_template_literal,
+        },
+        "mysql": {
+            "detect": r'(?:db\.query|connection\.query|pool\.query)\s*\(\s*["\'][^"\']*\+',
+            "transform": _fix_sqli_concatenation,
+        },
+    },
+    "CWE-798": {
+        "generic": {
+            "detect": r'(?:password|secret|api_?key|token)\s*[:=]\s*["\'][^"\']{4,}["\']',
+            "transform": _fix_hardcoded_secret,
+        },
+    },
+    "CWE-942": {
+        "generic": {
+            "detect": r'(?:cors|Access-Control-Allow-Origin)\s*[:(]\s*["\']?\*["\']?',
+            "transform": _fix_wildcard_cors,
+        },
+    },
+}
 
 
-def _template_hardcoded_secret(snippet: str, lang: str) -> Optional[str]:
-    if lang == "javascript":
-        out = re.sub(r"(['\"])(password|secret|token|apikey|api_key)\1\s*:\s*['\"][^'\"]+['\"]", r"\1\2\1: process.env.SECRET_VALUE", snippet, flags=re.IGNORECASE)
-        if out != snippet:
-            return out
-    if lang == "python":
-        out = re.sub(r"(password|secret|token|api_key)\s*=\s*['\"][^'\"]+['\"]", r"\1 = os.getenv('SECRET_VALUE')", snippet, flags=re.IGNORECASE)
-        if out != snippet:
-            return out
-    return None
+# ═══════════════════════════════════════════════════════════════
+# Public API
+# ═══════════════════════════════════════════════════════════════
 
+def apply_template(cwe: str, code: str, framework: str = "") -> Optional[str]:
+    """
+    Try to apply a deterministic template fix for the given CWE.
 
-def _template_cors(snippet: str, _lang: str) -> Optional[str]:
-    if "Access-Control-Allow-Origin" in snippet and "*" in snippet:
-        return snippet.replace("*", "https://trusted.example.com")
-    if "cors(" in snippet and "origin: '*'" in snippet:
-        return snippet.replace("origin: '*'", "origin: ['https://trusted.example.com']")
-    return None
-
-
-def apply(cwe: str, file_path: str, snippet: str) -> Optional[dict[str, str]]:
-    lang = _lang_from_path(file_path)
-    key = (cwe or "").upper().strip()
-
-    transform = None
-    if key == "CWE-89":
-        transform = _template_sqli(snippet, lang)
-    elif key == "CWE-79":
-        transform = _template_xss(snippet, lang)
-    elif key == "CWE-78":
-        transform = _template_cmdi(snippet, lang)
-    elif key == "CWE-22":
-        transform = _template_path_traversal(snippet, lang)
-    elif key == "CWE-798":
-        transform = _template_hardcoded_secret(snippet, lang)
-    elif key == "CWE-942":
-        transform = _template_cors(snippet, lang)
-
-    if not transform or transform.strip() == snippet.strip():
+    Returns the fixed code, or None if no template applies.
+    Never returns comments-as-code — either a real transform or None.
+    """
+    transform = TRANSFORMS.get(cwe)
+    if not transform:
         return None
 
-    return {
-        "unsafe_reason": f"Deterministic template fix applied for {key}",
-        "fixed_code": transform,
-        "patch_safety": "review_needed",
-    }
+    # Try framework-specific first, then generic
+    for key in [framework, "generic"]:
+        if not key:
+            continue
+        entry = transform.get(key)
+        if entry and re.search(entry["detect"], code, re.I | re.DOTALL):
+            try:
+                result = entry["transform"](code)
+                if result and result != code:
+                    return result
+            except Exception:
+                continue
+
+    return None

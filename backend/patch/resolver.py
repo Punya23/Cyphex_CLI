@@ -1,98 +1,146 @@
 """
-resolver.py — single source of truth for "where does this vulnerability live?"
+CYPHEX — Location Resolver
 
-A `Vuln` (backend/backend/models/scan.py) stores its location in the free-text
-`endpoint` field, in one of two shapes:
+Parses Vuln.endpoint into a structured Location.
+Single source of truth for "where is this vulnerability?"
 
-  static :  "relative/path/file.js:42"   → a source file + line
-  dynamic:  "http://localhost:PORT/login" → a live URL, no source line
-
-This module parses that field ONCE so every downstream consumer (applier,
-verifier, manifest, regression) agrees on the location. The parsing mirrors the
-logic that previously lived inline in cli_engine._patch_workflow.
+Two forms:
+  Static:  "relative/path/file.js:42" → Location(kind="file", file=abs_path, line=42)
+  Dynamic: "http://localhost:PORT/login" → Location(kind="url", url=..., method="GET")
 """
 
-from __future__ import annotations
-
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
 class Location:
-    kind: str                 # "file" | "url"
-    file: Optional[str] = None   # absolute path on disk (kind == "file")
-    rel: Optional[str] = None    # repo-relative path for display + manifest
-    line: Optional[int] = None   # 1-based line number (kind == "file")
-    url: Optional[str] = None    # full URL (kind == "url")
-    method: str = "GET"          # HTTP method for dynamic findings
-
-    @property
-    def key(self) -> str:
-        """Stable per-finding identity used by the manifest and tracking sets."""
-        if self.kind == "file":
-            return f"{self.rel}:{self.line}"
-        return f"{self.method} {self.url}"
+    """Resolved vulnerability location."""
+    kind: str               # "file" | "url"
+    file: Optional[str]     # Absolute path to source file (static only)
+    rel: Optional[str]      # Repo-relative path (for display + manifest)
+    line: Optional[int]     # Line number in file (static only)
+    url: Optional[str]      # Live URL (dynamic only)
+    method: str = "GET"     # HTTP method (dynamic only)
 
 
-def _looks_like_url(endpoint: str) -> bool:
-    return endpoint.startswith("http://") or endpoint.startswith("https://")
-
-
-def resolve(vuln, source_dir: Optional[str]) -> Optional[Location]:
+def resolve(vuln, source_dir: str) -> Optional[Location]:
     """
-    Resolve a Vuln into a Location, or None if it cannot be located on disk.
+    Parse a Vuln's endpoint field into a structured Location.
 
-    - Dynamic (URL) findings return a Location(kind="url").
-    - Static findings return Location(kind="file") with an absolute `file` that
-      exists on disk. If the file cannot be found, returns None (caller treats
-      it as non-patchable / dynamic-only).
+    Args:
+        vuln: A Vuln dataclass with .endpoint, .name, .evidence fields
+        source_dir: Absolute path to the scanned source directory
+
+    Returns:
+        Location or None if the endpoint is unparseable
     """
-    endpoint = (getattr(vuln, "endpoint", "") or "").strip()
+    endpoint = (vuln.endpoint or "").strip()
     if not endpoint:
         return None
 
-    if _looks_like_url(endpoint):
-        method = _infer_method(vuln)
-        return Location(kind="url", url=endpoint, method=method)
+    # ── Dynamic finding: endpoint is a URL ──
+    if endpoint.startswith("http://") or endpoint.startswith("https://"):
+        method = _extract_method(vuln)
+        return Location(
+            kind="url",
+            file=None,
+            rel=None,
+            line=None,
+            url=endpoint,
+            method=method,
+        )
 
-    if ":" not in endpoint:
-        return None
+    # ── Static finding: endpoint is "path/to/file.ext:linenum" ──
+    if ":" in endpoint:
+        parts = endpoint.rsplit(":", 1)
+        file_part = parts[0].strip()
+        line_part = parts[1].strip().split()[0] if len(parts) > 1 else ""
 
-    parts = endpoint.split(":")
-    rel_path = parts[0].strip()
-    try:
-        line = int(parts[1].split()[0])
-    except (ValueError, IndexError):
-        return None
+        # Line must be a valid integer
+        try:
+            line_num = int(line_part)
+        except (ValueError, IndexError):
+            return None
 
-    # Resolve against the scanned source dir first, then fall back to an
-    # absolute path (semgrep emits full paths).
-    filepath = None
-    rel = rel_path
-    if source_dir:
-        candidate = os.path.join(source_dir, rel_path)
-        if os.path.exists(candidate):
-            filepath = candidate
-    if filepath is None and os.path.exists(rel_path):
-        filepath = rel_path
-        if source_dir and os.path.isabs(rel_path) and rel_path.startswith(source_dir):
-            rel = os.path.relpath(rel_path, source_dir)
+        # Resolve to absolute path
+        abs_path = _resolve_file_path(file_part, source_dir)
+        if abs_path is None:
+            return None
 
-    if filepath is None:
-        return None
+        # Compute repo-relative path
+        try:
+            rel_path = os.path.relpath(abs_path, source_dir)
+        except ValueError:
+            rel_path = file_part
 
-    return Location(kind="file", file=filepath, rel=rel, line=line)
+        return Location(
+            kind="file",
+            file=abs_path,
+            rel=rel_path,
+            line=line_num,
+            url=None,
+        )
+
+    return None
 
 
-def _infer_method(vuln) -> str:
-    """Best-effort HTTP method from the vuln's recorded evidence/payload."""
-    blob = " ".join(
-        str(getattr(vuln, attr, "") or "")
-        for attr in ("payload", "evidence", "attack_chain")
-    ).upper()
-    for m in ("DELETE", "PATCH", "PUT", "POST", "GET"):
-        if m in blob:
-            return m
+def _resolve_file_path(file_ref: str, source_dir: str) -> Optional[str]:
+    """
+    Resolve a file reference to an absolute path.
+    Handles both relative and absolute paths, and semgrep-style paths.
+    """
+    # Already absolute and exists
+    if os.path.isabs(file_ref) and os.path.isfile(file_ref):
+        return os.path.normpath(file_ref)
+
+    # Relative to source_dir
+    candidate = os.path.normpath(os.path.join(source_dir, file_ref))
+    if os.path.isfile(candidate):
+        return candidate
+
+    # Try stripping leading slashes or common prefixes
+    stripped = file_ref.lstrip("/\\")
+    candidate = os.path.normpath(os.path.join(source_dir, stripped))
+    if os.path.isfile(candidate):
+        return candidate
+
+    # Try just the filename in common subdirectories
+    basename = os.path.basename(file_ref)
+    for subdir in ["", "routes", "src", "api", "app", "lib", "server"]:
+        candidate = os.path.join(source_dir, subdir, basename)
+        if os.path.isfile(candidate):
+            return os.path.normpath(candidate)
+
+    return None
+
+
+def _extract_method(vuln) -> str:
+    """Extract HTTP method from vuln evidence or curl_command."""
+    evidence = getattr(vuln, "evidence", "") or ""
+
+    # Look for method in evidence
+    method_match = re.search(r'-X\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)', evidence, re.I)
+    if method_match:
+        return method_match.group(1).upper()
+
+    # Check if payload suggests POST
+    if getattr(vuln, "payload", ""):
+        name = (getattr(vuln, "name", "") or "").lower()
+        if any(kw in name for kw in ["sql injection", "xss", "command injection", "login"]):
+            return "POST"
+
     return "GET"
+
+
+def is_patchable(location: Optional[Location]) -> bool:
+    """A finding is patchable if it has a source file + line number."""
+    return (
+        location is not None
+        and location.kind == "file"
+        and location.file is not None
+        and location.line is not None
+        and os.path.isfile(location.file)
+    )

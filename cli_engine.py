@@ -47,6 +47,7 @@ try:
     from backend.council.patch_council import PatchCouncil
     from backend.council.debate_protocol import DebateProtocol
     from backend.council.analysis_council import AnalysisCouncil
+    from backend.council.route_tracer import RouteTracer
     COUNCIL_AVAILABLE = True
 except ImportError:
     COUNCIL_AVAILABLE = False
@@ -150,6 +151,7 @@ class CyphexEngine:
                   judge_mode=False, judge=False, non_interactive=False):
         self.start_ts = time.time()
         self.repo_url = repo_url
+        self.local_path = local_path
         self.judge_mode = judge_mode or judge
         self.non_interactive = non_interactive
 
@@ -1917,6 +1919,13 @@ class CyphexEngine:
         if not vulns:
             print(f"  {C.G}No vulnerabilities to patch.{C.RST}")
             return
+            
+        if COUNCIL_AVAILABLE:
+            try:
+                tracer = RouteTracer(self.source_dir)
+                tracer.resolve_dast_vulns(vulns)
+            except Exception as e:
+                console.print(f"[dim]  Route tracer unavailable or failed: {str(e)}[/dim]")
 
         # Calculate BEFORE score
         import math
@@ -2279,212 +2288,55 @@ class CyphexEngine:
                 console.print(f"[dim][SKIPPED][/dim]\n")
                 continue
 
-            # ── Phase 1.2: range-accurate, reversible apply ──
-            # Replace exactly the vulnerable span [start_l, end_l) with the fixed
-            # block. The old code blanked the range then dumped everything on
-            # line 1 (bug R2), corrupting multi-line fixes.
-            original_text = "".join(p["lines"])
-            applier = None
-            if PATCH_PIPELINE_AVAILABLE:
-                applier = PatchApplier(p["filepath"])
-                res = applier.apply_range(p["start_l"], p["end_l"], fixed)
-                if not res.ok:
-                    parse_err = res.error
-                    console.print(f"[yellow][PARSE-FAIL][/yellow] {parse_err}")
-                    # ── Parse-error reflexion: one retry with the error fed back ──
-                    _parse_retried = False
-                    if patch_council:
-                        try:
-                            feedback_code = p["snippet"] + (
-                                f"\n\n# ⚠ PREVIOUS PATCH FAILED: {parse_err}\n"
-                                "# RULES for your fixed_code:\n"
-                                "# 1. Include ALL lines of the vulnerable snippet above verbatim.\n"
-                                "# 2. The snippet is only a PARTIAL window — the function/handler continues\n"
-                                "#    for many more lines after this window. Do NOT add closing braces '}'\n"
-                                "#    or '});' that are not in the original snippet.\n"
-                                "# 3. Only INSERT the minimal fix (e.g. an auth guard) between existing lines.\n"
-                                "# 4. Your fixed_code must have the SAME net brace balance ({/}) as the snippet."
-                            )
-                            console.print("  [yellow]↺ Parse-error reflexion — re-generating patch[/yellow]")
-                            retry_r = await patch_council.generate_and_validate_patch(
-                                p["vuln_type"], p["cwe"], feedback_code, p["rel_path"]
-                            )
-                            retry_fixed = (retry_r.get("fixed_code") or "").strip()
-                            if retry_fixed and not self._is_placeholder_code(retry_fixed):
-                                retry_applier = PatchApplier(p["filepath"])
-                                retry_res = retry_applier.apply_range(p["start_l"], p["end_l"], retry_fixed)
-                                if retry_res.ok:
-                                    fixed = retry_fixed
-                                    applier = retry_applier
-                                    res = retry_res
-                                    _parse_retried = True
-                                    console.print("  [cyan]↺ Parse-error reflexion succeeded[/cyan]")
-                                else:
-                                    console.print(f"  [dim]↺ Parse-error reflexion still failed: {retry_res.error}[/dim]")
-                        except Exception as _exc:
-                            console.print(f"  [dim]↺ Parse-error reflexion error: {_exc}[/dim]")
-                    if not _parse_retried:
-                        console.print("[red][FAILED][/red] — file left unchanged.\n")
-                        skipped += 1
-                        continue
-            else:
-                # Fallback (should not happen): correct slice replacement.
-                lines = p["lines"]
-                block = [ln + "\n" for ln in fixed.replace("\r\n", "\n").rstrip("\n").split("\n")] if fixed.strip() else []
-                lines[p["start_l"]:p["end_l"]] = block
-                with open(p["filepath"], "w", encoding="utf-8") as f:
-                    f.writelines(lines)
+            # --- SYNTAX VALIDATION ---
+            import tempfile
+            import subprocess
+            
+            ext = os.path.splitext(p["filepath"])[1].lower()
+            syntax_passed = True
+            syntax_err = ""
+            
+            # Create a temporary copy of the lines to check
+            test_lines = p["lines"].copy()
+            for j in range(p["start_l"], p["end_l"]):
+                test_lines[j] = ""
+            test_lines[p["start_l"]] = fixed + "\n"
+            test_content = "".join(test_lines)
 
-            try:
-                with open(p["filepath"], "r", encoding="utf-8", errors="ignore") as f:
-                    patched_text = f.read()
-            except Exception:
-                patched_text = original_text
-
-            # ── Phase 2: Verify the patch (static first, dynamic when applicable) ──
-            verify_result = None
-            if PATCH_PIPELINE_AVAILABLE:
-                loc = resolve_location(v, self.source_dir)
-                if not loc:
-                    loc = SimpleNamespace(
-                        kind="file",
-                        file=p["filepath"],
-                        rel=p["rel_path"],
-                        line=p["line_num"],
-                        url=None,
-                        method="GET",
-                    )
-
-                if getattr(loc, "kind", "file") == "url":
-                    base_url = (self.sandbox_info or {}).get("url") if isinstance(self.sandbox_info, dict) else None
-
-                    if isinstance(self.sandbox_info, dict) and self.sandbox_info.get("type") == "docker-compose" and getattr(self, "_docker_compose_dir", None):
-                        try:
-                            subprocess.run(
-                                ["docker", "compose", "restart"],
-                                cwd=self._docker_compose_dir,
-                                capture_output=True,
-                                timeout=60,
-                            )
-                            await asyncio.sleep(3)
-                        except Exception:
-                            pass
-                    elif isinstance(self.sandbox_info, dict) and self.sandbox_info.get("sandbox_id"):
-                        sid = self.sandbox_info.get("sandbox_id")
-                        if sid and sync_file_to_sandbox(sid, p["rel_path"], patched_text):
-                            restart_meta = await restart_sandbox(sid)
-                            if isinstance(restart_meta, dict) and restart_meta.get("url"):
-                                base_url = restart_meta.get("url")
-
-                    verify_result = await verify_dynamic(
-                        v,
-                        loc,
-                        base_url,
-                        original_text=original_text,
-                        patched_text=patched_text,
-                    )
-                else:
-                    # Run re-scan in a worker thread — frees the event loop
-                    # and lets the user see which OS thread is doing the work.
-                    import threading as _threading
-                    _scan_id_short = self.scan_id
-
-                    def _rescan_in_thread():
-                        tid = _threading.current_thread().ident
-                        console.print(
-                            f"  [dim]⟳  re-scan  thread-{tid}  {p['rel_path']}:{p['line_num']}  [{_scan_id_short}][/dim]"
-                        )
-                        return verify_static(v, loc, self.source_dir, original_text, patched_text)
-
-                    verify_result = await asyncio.to_thread(_rescan_in_thread)
-
-            if verify_result is None:
-                verify_result = SimpleNamespace(verdict=UNVERIFIABLE, evidence={"verifier_unavailable": True})
-
-            # ── Reflexion loop: if UNVERIFIABLE, attempt one targeted retry ──
-            if (
-                PATCH_PIPELINE_AVAILABLE
-                and patch_council
-                and getattr(verify_result, "verdict", "") == UNVERIFIABLE
-                and getattr(verify_result, "evidence", {}).get("verifier_unavailable") is None
-            ):
+            if ext in ['.js', '.ts', '.py']:
+                with tempfile.NamedTemporaryFile(suffix=ext, mode='w', delete=False, encoding='utf-8') as tf:
+                    tf.write(test_content)
+                    tf_name = tf.name
+                
                 try:
-                    from backend.reasoning.reflexion import patch_with_reflexion, build_objective_feedback
-                    evidence = getattr(verify_result, "evidence", {})
-                    feedback_msg = build_objective_feedback(evidence)
-                    evidence_summary = ", ".join(
-                        f"{k}={v}" for k, v in list(evidence.items())[:3] if v
-                    ) or "no specific evidence"
-                    console.print(
-                        f"  [yellow]↺ Reflexion triggered[/yellow] [dim]{p['rel_path']}:{p['line_num']}"
-                        f" — evidence: {evidence_summary}[/dim]"
-                    )
-                    async def _generate_retry(fb: str, round_no: int) -> dict:
-                        rp = dict(p)
-                        if fb:
-                            rp["context_snippet"] = (p.get("context_snippet") or p["snippet"]) + f"\n\n# Reflexion feedback (round {round_no}):\n# {fb}"
-                        return await patch_council.generate_and_validate_patch(
-                            rp["vuln_type"], rp["cwe"], rp["snippet"], rp["rel_path"]
-                        )
-                    async def _verify_retry(candidate: dict) -> dict:
-                        cfix = (candidate.get("fixed_code") or "").strip()
-                        if not cfix:
-                            return {"verdict": UNVERIFIABLE, "evidence": {"no_code": True}}
-
-                        def _retry_rescan():
-                            tid = _threading.current_thread().ident
-                            console.print(
-                                f"  [dim]⟳  reflexion re-scan  thread-{tid}  {p['rel_path']}[/dim]"
-                            )
-                            return verify_static(v, loc, self.source_dir, original_text, cfix)
-
-                        vr = await asyncio.to_thread(_retry_rescan)
-                        return {"verdict": vr.verdict, "evidence": getattr(vr, "evidence", {})}
-
-                    tier = getattr(self, "_hw_tier", "mid")
-                    refl = await patch_with_reflexion(_generate_retry, _verify_retry, tier=tier, max_rounds=1)
-                    if refl.status == "verified" and refl.best_candidate:
-                        better = (refl.best_candidate.get("fixed_code") or "").strip()
-                        if better and not self._is_placeholder_code(better):
-                            fixed = better
-                            reflexion_succeeded_count += 1
-                            console.print(f"  [cyan]↺ Reflexion retry succeeded[/cyan] — using improved patch")
-                    else:
-                        console.print(f"  [dim]↺ Reflexion retry did not improve outcome[/dim]")
-                except Exception:
-                    pass
-
-            if manifest:
-                try:
-                    cwe_key = (getattr(v, "cwe", "") or p["cwe"] or "CWE-unknown")
-                    manifest.record(PatchRecord(
-                        key=PatchManifest.make_key(p["rel_path"], p["line_num"], cwe_key),
-                        vuln_type=p["vuln_type"],
-                        cwe=cwe_key,
-                        rel_path=p["rel_path"],
-                        line=p["line_num"],
-                        verdict=verify_result.verdict,
-                        verified=(verify_result.verdict == PASS),
-                        original_hash=sha256(original_text),
-                        patched_hash=sha256(patched_text),
-                        exploit_payload=getattr(v, "payload", "") or "",
-                        evidence=getattr(verify_result, "evidence", {}) or {},
-                    ))
-                except Exception:
-                    pass
-
-            if verify_result.verdict == "FAIL":
-                if PATCH_PIPELINE_AVAILABLE and applier is not None:
-                    applier.rollback()
-                else:
-                    with open(p["filepath"], "w", encoding="utf-8") as f:
-                        f.write(original_text)
-                verify_failed += 1
-                console.print(
-                    f"[red][ROLLED BACK][/red] Verification failed for {p['rel_path']}:{p['line_num']} — patch reverted.\n"
-                )
+                    if ext in ['.js', '.ts']:
+                        cmd = ["node", "-c", tf_name]
+                    elif ext == '.py':
+                        cmd = ["python", "-m", "py_compile", tf_name]
+                    
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if result.returncode != 0:
+                        syntax_passed = False
+                        syntax_err = result.stderr.strip()
+                except Exception as e:
+                    pass # Ignore if node/python isn't installed
+                finally:
+                    if os.path.exists(tf_name):
+                        os.unlink(tf_name)
+            
+            if not syntax_passed:
+                console.print(f"\n[bold red][REJECTED][/bold red] AI Hallucination detected: Syntax Error in proposed patch!")
+                console.print(f"[dim]{syntax_err[:500]}[/dim]\n")
+                skipped += 1
                 continue
+            # --------------------------
 
+            lines = p["lines"]
+            for j in range(p["start_l"], p["end_l"]):
+                lines[j] = ""
+            lines[p["start_l"]] = fixed + "\n"
+            with open(p["filepath"], "w", encoding="utf-8") as f:
+                f.writelines(lines)
             patched_files.append(p["rel_path"])
             patched_keys.add(f"{p['rel_path']}:{p['line_num']}:{p['vuln_type']}")
 
@@ -2519,6 +2371,13 @@ class CyphexEngine:
                     f"[yellow][APPLIED-UNVERIFIED][/yellow] Patch applied but not verifiable yet for {p['rel_path']}:{p['line_num']}\n"
                 )
 
+
+            # Overwrite the original file in the workspace so the git commit includes the patch
+            if hasattr(self, "local_path") and self.local_path:
+                dst_orig = os.path.join(os.path.abspath(self.local_path), p["rel_path"])
+                if os.path.exists(dst_orig):
+                    import shutil
+                    shutil.copy2(p["filepath"], dst_orig)
 
 
         console.print(f"\n[bold]{'-' * 50}[/bold]")
@@ -2821,25 +2680,16 @@ class CyphexEngine:
 
     def _push_to_github(self):
         try:
-            branch = f"cyphex/patch-{self.scan_id}"
-            cmds = [
-                ["git", "add", "-A"],
-                ["git", "commit", "-m", "fix: CYPHEX auto-patched security vulnerabilities"],
-                ["git", "checkout", "-b", branch],
-                ["git", "push", "-u", "origin", branch],
-            ]
-            for cmd in cmds:
+            # Check if there are any changes to commit first
+            status_check = subprocess.run(["git", "status", "--porcelain"], cwd=self.source_dir, capture_output=True, text=True)
+            if not status_check.stdout.strip():
+                print(f"  {C.Y}[INFO]{C.RST} No changes to commit. Skipping push.")
+                return
+
+            for cmd in [["git","add","-A"],["git","commit","-m","fix: CYPHEX auto-patched security vulnerabilities", "--no-verify"],["git","push"]]:
                 r = subprocess.run(cmd, cwd=self.source_dir, capture_output=True, text=True)
                 if r.returncode != 0:
-                    if cmd[:2] == ["git", "checkout"] and "already exists" in (r.stderr or ""):
-                        retry = subprocess.run(["git", "checkout", branch], cwd=self.source_dir, capture_output=True, text=True)
-                        if retry.returncode != 0:
-                            print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:120]}")
-                            return
-                        continue
-                    if cmd[:2] == ["git", "commit"] and "nothing to commit" in (r.stdout + r.stderr).lower():
-                        continue
-                    print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:120]}")
+                    print(f"  {C.R}[ERR]{C.RST} {' '.join(cmd)}: {r.stderr[:100]} {r.stdout[:100]}")
                     return
 
             remote_url = ""

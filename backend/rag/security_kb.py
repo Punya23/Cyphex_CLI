@@ -1,52 +1,127 @@
-"""Static security knowledge base loader for CWE fix strategies."""
+"""
+CYPHEX — Security Knowledge Base Loader
 
-from __future__ import annotations
+Loads security_kb.json and provides CWE → fix strategy lookups.
+Used to give the patch model proven fix patterns instead of inventing from scratch.
+"""
 
-import json
 import os
-from dataclasses import dataclass
-from typing import Any, Optional
+import json
+from typing import Optional
 
 
-@dataclass
-class Strategy:
-    name: str
-    pattern: str
-    applies_to: list[str]
+_KB_CACHE = None
 
 
-class SecurityKB:
-    def __init__(self, payload: dict[str, Any]):
-        self.payload = payload or {}
-        self.kb_version = self.payload.get("kb_version", "unknown")
-        self._cwe = self.payload.get("cwe", {})
+def _load_kb() -> dict:
+    """Load the security KB from the JSON file (cached)."""
+    global _KB_CACHE
+    if _KB_CACHE is not None:
+        return _KB_CACHE
 
-    def get(self, cwe: str) -> dict[str, Any]:
-        return self._cwe.get((cwe or "").upper(), {})
-
-    def primary_strategy(self, cwe: str) -> Optional[Strategy]:
-        item = self.get(cwe)
-        strategies = item.get("fix_strategies", [])
-        if not strategies:
-            return None
-        first = strategies[0]
-        return Strategy(
-            name=str(first.get("name", "")),
-            pattern=str(first.get("pattern", "")),
-            applies_to=list(first.get("applies_to", [])),
-        )
-
-    def anti_patterns(self, cwe: str) -> list[str]:
-        item = self.get(cwe)
-        return list(item.get("anti_patterns", []))
-
-
-def load_security_kb(base_dir: Optional[str] = None) -> SecurityKB:
-    here = base_dir or os.path.dirname(__file__)
-    path = os.path.join(here, "security_kb.json")
+    kb_path = os.path.join(os.path.dirname(__file__), "security_kb.json")
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(kb_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
-        data = {"kb_version": "missing", "cwe": {}}
-    return SecurityKB(data)
+            _KB_CACHE = data.get("entries", {})
+    except Exception:
+        _KB_CACHE = {}
+
+    return _KB_CACHE
+
+
+def get_fix_recipe(cwe: str) -> Optional[dict]:
+    """
+    Get the fix recipe for a CWE.
+
+    Returns dict with: name, description, fix_strategies, anti_patterns
+    or None if CWE not in KB.
+    """
+    kb = _load_kb()
+    return kb.get(cwe)
+
+
+def get_fix_strategies(cwe: str, framework: str = "") -> list:
+    """
+    Get applicable fix strategies for a CWE, optionally filtered by framework.
+
+    Returns list of {name, description, pattern, applies_to}.
+    """
+    recipe = get_fix_recipe(cwe)
+    if not recipe:
+        return []
+
+    strategies = recipe.get("fix_strategies", [])
+
+    if not framework:
+        return strategies
+
+    # Filter by framework
+    applicable = []
+    for s in strategies:
+        applies = s.get("applies_to", ["*"])
+        if "*" in applies or framework.lower() in [a.lower() for a in applies]:
+            applicable.append(s)
+
+    return applicable if applicable else strategies
+
+
+def get_anti_patterns(cwe: str) -> list:
+    """Get known anti-patterns for a CWE."""
+    recipe = get_fix_recipe(cwe)
+    if not recipe:
+        return []
+    return recipe.get("anti_patterns", [])
+
+
+def format_for_prompt(cwe: str, framework: str = "") -> str:
+    """
+    Format the KB recipe as a string suitable for inclusion in a prompt.
+    """
+    recipe = get_fix_recipe(cwe)
+    if not recipe:
+        return ""
+
+    strategies = get_fix_strategies(cwe, framework)
+    anti_patterns = get_anti_patterns(cwe)
+
+    parts = [f"CWE: {cwe} — {recipe.get('name', 'Unknown')}"]
+    parts.append(f"Description: {recipe.get('description', '')}")
+
+    if strategies:
+        parts.append("\nPROVEN FIX STRATEGIES:")
+        for i, s in enumerate(strategies, 1):
+            parts.append(f"  {i}. {s['name']}: {s.get('description', '')}")
+            parts.append(f"     Example: {s.get('pattern', '')}")
+
+    if anti_patterns:
+        parts.append(f"\nKNOWN ANTI-PATTERNS (avoid these): {', '.join(anti_patterns)}")
+
+    return "\n".join(parts)
+
+
+def detect_framework(deps: dict) -> str:
+    """Detect the web framework from dependency info."""
+    node_deps = deps.get("node_deps", [])
+    python_deps = deps.get("python_deps", [])
+
+    frameworks = {
+        "express": "express",
+        "fastify": "fastify",
+        "koa": "koa",
+        "next": "next",
+        "react": "react",
+        "vue": "vue",
+        "angular": "angular",
+        "flask": "flask",
+        "django": "django",
+        "fastapi": "fastapi",
+    }
+
+    for dep in node_deps + python_deps:
+        dep_lower = dep.lower()
+        for key, name in frameworks.items():
+            if key in dep_lower:
+                return name
+
+    return ""

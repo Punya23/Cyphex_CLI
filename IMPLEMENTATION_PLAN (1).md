@@ -173,13 +173,36 @@ Small, safe, high-impact. No new modules.
   `{minimal/low:4096, mid:6144, high/ultra:8192}` and use it in both call sites.
 
 ### 0.2 Block applying council-`rejected` patches
-- In [`_patch_workflow`](cli_engine.py#L1955) Phase 3, before the apply prompt: if the
-  council result's `patch_safety == "rejected"` **or** there were zero approvals, skip
-  with a clear message. Currently a user typing `y` can apply a rejected patch.
+- In [`_patch_workflow`](cli_engine.py#L1955) Phase 3, before the apply prompt: skip the
+  patch when the council **rejected** it. **Grounding correction:** the generator prompt
+  only emits `patch_safety ∈ {"safe", "review_needed"}` — it **never** returns
+  `"rejected"` ([patch_council.py](backend/council/patch_council.py#L13)). "Rejected"
+  comes from the *review* stage (`PATCH_REVIEW_SYSTEM` → `approved=false`). So the gate
+  is: **skip if zero reviewer approvals** (and surface `patch_safety=="review_needed"`
+  as a warning requiring explicit confirm). Currently a user typing `y` can apply a
+  patch every reviewer rejected.
 
-### 0.3 Acceptance for Phase 0
+### 0.3 Harden the existing patch prompt (free anti-regression win)
+Phase 3 rewrites the prompt fully, but these guards cost nothing now and stop common
+self-inflicted breakage. Edit `PATCH_GENERATION_SYSTEM`
+([patch_council.py](backend/council/patch_council.py#L10)):
+- **Anti-regression rules:** "Never remove existing `try/catch`/error handling. Never
+  add new `import`/`require` statements in the middle of a function — only at the top of
+  the file. Never delete or comment-out a route/handler to 'fix' it. Preserve the
+  function signature and surrounding control flow."
+- **Remove the comment-as-fix guidance:** the current Sensitive-Data rule literally says
+  *"Remove or comment out the route registration. Example: `// app.use(...)`"* — this
+  directly produces the R6 comment-as-code output and trips the Phase 2 anti-suppression
+  guard. Replace with: *"guard the route behind an auth/role check; do not comment it
+  out."* Apply the same change to the `Debug UI routes` and `IDOR` lines.
+- Keep the output contract (`unsafe_reason/fixed_code/patch_safety`) unchanged so nothing
+  downstream breaks.
+
+### 0.4 Acceptance for Phase 0
 - Council calls run at ≥4096 ctx; no model-pin regression on `cyphex-patch`.
-- A rejected patch can never be written to disk.
+- A patch with zero reviewer approvals can never be written to disk.
+- The generator prompt no longer suggests commented-out code, mid-function imports, or
+  removing error handling.
 
 ---
 
@@ -257,13 +280,22 @@ semgrep paths). One implementation, used by applier, verifier, manifest, regress
 - **Liveness:** a benign request to the same endpoint must return `< 500`. Catches
   "vuln gone because the route is gone."
 
-### 2.3 Sandbox restart helper (sandbox_manager has none)
+### 2.3 Sandbox restart helper (sandbox_manager has none) — cross-platform
 - Add `async restart_sandbox(sandbox_info) -> dict` that:
-  - native node/python: kill the tracked process group (`os.killpg` on POSIX; taskkill
-    tree on Windows — pattern already in `_robust_rmtree`) and re-launch with the same
+  - native node/python: kill the tracked process **tree**, then re-launch with the same
     `app_file`/port/env that `deploy_sandbox` used; re-`await asyncio.sleep` for boot.
   - docker-compose: `docker compose restart` in `self._docker_compose_dir`.
   - static server: bounce `self._static_proc`.
+- **Process-tree kill must be a first-class, cross-platform `_kill_tree(proc)` helper**
+  (a child `npm`/`node` often spawns grandchildren; killing only the parent orphans the
+  port):
+  - **POSIX (this dev machine is macOS):** start the process with
+    `start_new_session=True` (or `preexec_fn=os.setsid`) and kill via
+    `os.killpg(os.getpgid(pid), SIGTERM)` → wait → `SIGKILL` escalation.
+  - **Windows:** `taskkill /F /T /PID {pid}` (the `/T` flag kills the whole tree); fall
+    back to `psutil` children-walk if `taskkill` is unavailable. Reuse the tree-kill
+    pattern already in `_robust_rmtree`.
+  - Both paths share a timeout→escalate→verify-port-free sequence.
 - Verification calls this after each apply so the running app reflects the patched file.
 - **Cost control:** only restart when there *is* a dynamic finding to replay; static-only
   patches verify by re-scan with **no restart**.
@@ -319,6 +351,13 @@ Give the model the repo's own code + the canonical fix recipe. No embeddings, st
   - Python: **indentation-based** (walk up to the `def`/`async def` at lower indent,
     down until indentation returns). Braces don't apply.
   - Fallback: ±15 lines if no function boundary found.
+- **Validity sanity check (don't ship broken context to the model):** after a JS/TS
+  brace-walk, verify the extracted block is **brace-balanced** (and quote-balanced for
+  unescaped `'`/`"`/`` ` ``). If unbalanced — or if the block is implausibly large
+  (> ~200 lines, meaning the walk ran away) — **discard it and fall back to the ±15-line
+  window**. The function returns `(snippet, extraction_quality)` where quality ∈
+  `{"function", "window"}` so the prompt can say "approximate context" honestly and the
+  applier knows the snippet boundaries are not authoritative.
 - `extract_imports(content, lang)`: top-of-file `import`/`require`/`from`.
 
 ### 3.3 `security_kb.json` + `security_kb.py`
@@ -336,6 +375,8 @@ Give the model the repo's own code + the canonical fix recipe. No embeddings, st
 ### 3.5 Acceptance for Phase 3
 - The model receives the enclosing function + imports + a CWE recipe, not 5 lines.
 - Python context uses indentation; JS uses braces; neither crashes on the other.
+- An unbalanced/runaway brace-walk falls back to the ±15-line window instead of sending
+  broken context; the prompt is labeled with the real extraction quality.
 
 ---
 
@@ -462,7 +503,7 @@ are exactly what the CI bot will reuse.
 
 | Phase | Scope | Estimate |
 |------|-------|----------|
-| 0 | Context windows, block rejected | 0.5 day |
+| 0 | Context windows, block rejected, harden existing prompt | 0.5 day |
 | 1 | Resolver, range-accurate apply, dedup, per-finding tracking | 1 day |
 | 2 | Verifier (static+dynamic), restart helper, guards, manifest, honest score | 2–3 days |
 | 3 | Vectorless RAG, context extractor, security KB, prompt assembly | 1.5 days |

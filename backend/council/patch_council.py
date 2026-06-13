@@ -35,11 +35,20 @@ PATCH_GENERATION_SYSTEM = """
 You are CYPHEX Patch Agent, a secure code analysis assistant.
 RULES:
 1. Return ONLY valid JSON: {"unsafe_reason": string, "fixed_code": string, "patch_safety": "safe"|"review_needed"}
-2. fixed_code must be a COMPLETE drop-in replacement for the vulnerable snippet. Change ONLY what is needed to fix the vulnerability.
-3. Do not add imports unless strictly required, do not restructure, do not rename variables.
-4. IMPORTANT: Provide REAL, WORKING code. Never use pseudo-code, comments-as-placeholders, or stubs like "// add auth logic here".
-5. unsafe_reason: one sentence explaining why the original code is dangerous.
-6. patch_safety = "safe" only if the fix is unambiguous.
+2. fixed_code must be a COMPLETE drop-in replacement for the vulnerable snippet provided. It will EXACTLY replace the snippet from start to end.
+3. VERY IMPORTANT: You must preserve ALL opening and closing braces, parentheses, and structural blocks present in the original snippet. Do not truncate the code. If the original snippet includes a `try {` block, make sure the `catch` block is fully preserved. Failure to output syntactically valid code will cause a fatal compiler error.
+4. Do not add imports unless strictly required, do not restructure, do not rename variables.
+5. IMPORTANT: Provide REAL, WORKING code. Never use pseudo-code, comments-as-placeholders, or stubs like "// add auth logic here".
+6. unsafe_reason: one sentence explaining why the original code is dangerous.
+7. patch_safety = "safe" only if the fix is unambiguous.
+
+ANTI-REGRESSION RULES (CRITICAL — violations will be rejected by reviewers):
+8. NEVER remove existing try/catch/finally blocks or error handling.
+9. NEVER add new import/require statements in the middle of a function body — only at the top of the file.
+10. NEVER delete or comment out a route/handler to "fix" it — guard it behind auth/role checks instead.
+11. NEVER add scanner-suppression comments (nosemgrep, eslint-disable, # noqa, @ts-ignore).
+12. Preserve the function signature and surrounding control flow exactly.
+13. Your fix must be MINIMAL — change only what is needed to eliminate the vulnerability.
 
 ANTI-REGRESSION RULES (violating these gets the patch rejected):
 - Never remove existing try/catch blocks or error handling.
@@ -63,11 +72,11 @@ VULNERABILITY-SPECIFIC FIX PATTERNS (use these):
 - SQL Injection: Replace template literals with parameterized queries using ? placeholders and [value] arrays.
 - XSS: Remove dangerouslySetInnerHTML entirely. Render content as text children: <h3>{a.title}</h3> instead of dangerouslySetInnerHTML={{__html: a.title}}.
 - Hardcoded Secrets: Replace literal values with ${ENV_VAR} references. Example: MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-- Sensitive Data Exposure (debug routes): Guard the route behind an authentication/role check (e.g. require an admin role before the handler runs). Do NOT comment out or delete the route registration.
+- Sensitive Data Exposure (debug routes): Guard the route behind an admin role check (e.g., requireAdmin middleware). Do NOT comment it out.
 - SSRF: Add URL validation blocking private IPs (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16) and metadata endpoints.
 - IDOR: Use parameterized queries with ownership check: WHERE id = ? AND user_id = ?
 - Container as Root: Add USER node before CMD.
-- Debug UI routes/nav: Guard with an admin role check. Do NOT comment out or delete the route.
+- Debug UI routes/nav: Guard with admin role check middleware. Do NOT remove or comment out.
 
 CRITICAL: Your fix must ELIMINATE the vulnerability, not just add a superficial check. The fix will be reviewed by other AI models — incomplete patches will be rejected.
 """
@@ -81,135 +90,24 @@ RULES:
    - SQL Injection: Approve if template literals are replaced with parameterized queries (? placeholders).
    - XSS: Approve if dangerouslySetInnerHTML is removed OR input is escaped/sanitized.
    - Hardcoded Secrets: Approve if literal secrets are replaced with environment variable references (${VAR}).
-   - Sensitive Data Exposure: Approve if the debug route is auth-gated (admin/role check). Do NOT approve a patch that merely comments out or deletes the route — that is a suppression, not a fix.
+   - Sensitive Data Exposure: Approve if the debug route is auth-gated or removed.
    - SSRF: Approve if URL validation/allowlisting is added.
    - IDOR: Approve if ownership checks or parameterized queries are added.
    - Container as Root: Approve if USER directive is added before CMD.
-3. REJECT (approved=false) ONLY if:
+3. REJECT (approved=false) if ANY of these are true:
    - The patch does NOT address the vulnerability at all (no meaningful change).
    - The patch introduces a WORSE vulnerability than the original.
    - The patch contains placeholder comments instead of real code.
-4. Do NOT reject patches for minor style issues, missing error handling, or incomplete edge cases.
-   Focus ONLY on whether the core vulnerability is fixed.
+   - The patch REMOVES existing error handling (try/catch/finally blocks).
+   - The patch adds scanner-suppression comments (nosemgrep, eslint-disable, # noqa, @ts-ignore).
+   - The patch changes MORE code than necessary (blast radius too large).
+4. Do NOT reject patches for minor style issues or incomplete edge cases.
+   Focus ONLY on whether the core vulnerability is fixed without introducing regressions.
 """
 
 
-def _trim_block(text: str, max_chars: int = 4000) -> str:
-    if not text:
-        return ""
-    s = str(text).strip()
-    if len(s) <= max_chars:
-        return s
-    return s[:max_chars] + "\n... [truncated]"
 
 
-def _build_patch_prompt(vuln: dict) -> str:
-    vuln_name = vuln.get("vuln_name", "Unknown")
-    cwe = vuln.get("cwe", "CWE-unknown")
-    file_path = vuln.get("file_path", "unknown")
-    vulnerable_code = vuln.get("vulnerable_code", "")
-    context_snippet = vuln.get("context_snippet", "")
-    extraction_quality = vuln.get("extraction_quality", "window")
-    imports = vuln.get("imports", "")
-    secure_example = vuln.get("secure_example", "")
-    kb_strategy = vuln.get("kb_strategy", "")
-    kb_anti_patterns = vuln.get("kb_anti_patterns", "")
-    related_files = vuln.get("related_files", []) or []
-    exploit_payload = vuln.get("exploit_payload", "")
-
-    sections = [
-        f"Vulnerability: {vuln_name} ({cwe})",
-        f"File: {file_path}",
-        "",
-        "Vulnerable code:",
-        f"```\n{_trim_block(vulnerable_code, 3000)}\n```",
-    ]
-
-    if kb_strategy:
-        sections.extend([
-            "",
-            "CWE fix strategy (canonical):",
-            f"- {kb_strategy}",
-        ])
-    if kb_anti_patterns:
-        sections.extend([
-            "",
-            "Avoid these anti-patterns:",
-            f"- {_trim_block(kb_anti_patterns, 500)}",
-        ])
-    if imports:
-        sections.extend([
-            "",
-            "File imports/context:",
-            f"```\n{_trim_block(imports, 1000)}\n```",
-        ])
-    if context_snippet:
-        label = "enclosing function" if extraction_quality == "function" else "approximate local window"
-        sections.extend([
-            "",
-            f"Code context ({label}):",
-            f"```\n{_trim_block(context_snippet, 2500)}\n```",
-        ])
-    if secure_example:
-        sections.extend([
-            "",
-            f"In-repo secure reference file: {secure_example}",
-        ])
-    if related_files:
-        sections.extend([
-            "",
-            f"Related files: {', '.join(related_files[:3])}",
-        ])
-    if exploit_payload:
-        sections.extend([
-            "",
-            f"Exploit payload observed: {exploit_payload}",
-        ])
-
-    # ── Oracle pre-analysis (injected when available) ─────────────────────
-    oracle = vuln.get("oracle_analysis") or {}
-    if oracle:
-        sections.extend(["", "## Oracle Pre-Analysis"])
-        if oracle.get("attack_vector"):
-            sections.append(f"Attack vector:  {oracle['attack_vector']}")
-        if oracle.get("data_flow"):
-            sections.append(f"Data flow:      {oracle['data_flow']}")
-        if oracle.get("minimal_fix"):
-            sections.append(f"Minimal fix:    {oracle['minimal_fix']}")
-        avoid = oracle.get("avoid") or []
-        if avoid:
-            sections.append(f"Avoid:          {'; '.join(avoid[:3])}")
-
-    sections.extend([
-        "",
-        "Generate the fixed version of the vulnerable code. Return only the replacement snippet in fixed_code.",
-    ])
-    return "\n".join(sections)
-
-
-def _build_oracle_prompt(vuln: dict) -> str:
-    """Short prompt for the Oracle reasoning step."""
-    name = vuln.get("vuln_name", "Unknown")
-    cwe  = vuln.get("cwe", "CWE-unknown")
-    code = _trim_block(vuln.get("vulnerable_code", ""), 2000)
-    ctx  = _trim_block(vuln.get("context_snippet", ""), 1500)
-    kb   = vuln.get("kb_strategy", "")
-    payload = vuln.get("exploit_payload", "")
-
-    parts = [
-        f"Vulnerability: {name} ({cwe})",
-        "",
-        "Vulnerable code:",
-        f"```\n{code}\n```",
-    ]
-    if ctx:
-        parts += ["", "Enclosing context:", f"```\n{ctx}\n```"]
-    if kb:
-        parts += ["", f"Known fix strategy: {kb}"]
-    if payload:
-        parts += ["", f"Observed exploit payload: {payload}"]
-    parts += ["", "Decompose this vulnerability for the patch agent."]
-    return "\n".join(parts)
 
 class PatchCouncil(CouncilOrchestrator):
 

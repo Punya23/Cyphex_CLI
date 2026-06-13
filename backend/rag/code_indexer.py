@@ -1,178 +1,242 @@
-"""Vectorless lexical code index for retrieval-augmented patch prompts."""
+"""
+CYPHEX — Vectorless Code Indexer
 
-from __future__ import annotations
+Walks the source directory and builds a keyword-based index.
+No embeddings, no vector DB, no VRAM overhead — just regex + file walking.
+
+Used to:
+  - Find the actual source files related to a vulnerability
+  - Find the repo's own secure coding patterns for the model to follow
+  - Provide real code context instead of blind 5-line snippets
+"""
 
 import os
 import re
-from collections import Counter
-from dataclasses import dataclass
-from typing import Any, Optional
+from pathlib import Path
+from typing import Optional
 
-_SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "dist",
-    "build",
-    "__pycache__",
-    ".venv",
-    "venv",
+
+SKIP_DIRS = {
+    "node_modules", ".git", "dist", "build", "__pycache__",
+    ".venv", "venv", ".next", ".nuxt", "coverage", ".cache",
+    "vendor", "bower_components", ".svn",
 }
-_SKIP_EXT = {
-    ".map", ".lock", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
-    ".pdf", ".zip", ".gz", ".mp4", ".mp3", ".woff", ".woff2",
+
+SKIP_EXTENSIONS = {
+    ".map", ".min.js", ".min.css", ".lock", ".png", ".jpg",
+    ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2",
+    ".ttf", ".eot", ".mp3", ".mp4", ".zip", ".tar", ".gz",
+    ".pyc", ".pyo", ".class", ".o", ".so", ".dll", ".exe",
 }
-_SKIP_SUFFIX = (".min.js",)
-_MAX_BYTES = 512 * 1024
 
-_ROUTE_RE = re.compile(r"\b(app|router)\.(get|post|put|patch|delete|all)\s*\(\s*['\"]([^'\"]+)")
-_PY_ROUTE_RE = re.compile(r"@\w*\.route\(\s*['\"]([^'\"]+)")
-_IMPORT_RE = re.compile(r"^\s*(import\s+.+|from\s+.+\s+import\s+.+|const\s+.+\s*=\s*require\(.+\))\s*$", re.MULTILINE)
-_FUNC_RE = re.compile(r"\b(function\s+[A-Za-z_][A-Za-z0-9_]*|def\s+[A-Za-z_][A-Za-z0-9_]*|async\s+def\s+[A-Za-z_][A-Za-z0-9_]*)")
-_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+SOURCE_EXTENSIONS = {
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".py", ".php", ".rb", ".go", ".java", ".rs",
+    ".html", ".ejs", ".hbs", ".pug",
+    ".json", ".yaml", ".yml", ".toml",
+    ".env", ".env.example",
+    ".sql",
+}
 
-_DB_HINTS = ("select ", "insert ", "update ", "delete ", "sequelize", "prisma", "cursor.execute", "query(")
-_AUTH_HINTS = ("jwt", "auth", "authorize", "isadmin", "bearer", "session", "role", "permission")
-
-
-@dataclass
-class IndexedFile:
-    rel_path: str
-    routes: list[str]
-    has_db: bool
-    has_auth: bool
-    imports: list[str]
-    functions: list[str]
-    terms: Counter
+MAX_FILE_SIZE = 512 * 1024  # 512 KB
 
 
 class CodeIndexer:
+    """Vectorless keyword index of a source tree."""
+
     def __init__(self, source_dir: str):
-        self.source_dir = source_dir
-        self._files: list[IndexedFile] = []
-        self._build()
+        self.root = os.path.normpath(source_dir)
+        self.files: dict = {}  # rel_path → FileInfo dict
 
-    @property
-    def files(self) -> list[IndexedFile]:
-        return self._files
+    def build_index(self) -> int:
+        """Walk the source tree and build keyword index. Returns file count."""
+        self.files.clear()
 
-    def _should_skip(self, file_name: str) -> bool:
-        lower = file_name.lower()
-        ext = os.path.splitext(lower)[1]
-        if ext in _SKIP_EXT:
-            return True
-        if any(lower.endswith(sfx) for sfx in _SKIP_SUFFIX):
-            return True
-        return False
+        for dirpath, dirnames, filenames in os.walk(self.root):
+            # Skip excluded directories (in-place modification)
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
 
-    def _build(self) -> None:
-        for root, dirs, files in os.walk(self.source_dir):
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
-            for name in files:
-                if self._should_skip(name):
+            for fname in filenames:
+                ext = Path(fname).suffix.lower()
+                if ext in SKIP_EXTENSIONS:
                     continue
-                fp = os.path.join(root, name)
+                if ext not in SOURCE_EXTENSIONS and not fname.startswith("."):
+                    continue
+
+                fpath = os.path.join(dirpath, fname)
+
+                # Skip oversized files
                 try:
-                    if os.path.getsize(fp) > _MAX_BYTES:
+                    if os.path.getsize(fpath) > MAX_FILE_SIZE:
                         continue
-                    with open(fp, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read()
                 except OSError:
                     continue
 
-                rel = os.path.relpath(fp, self.source_dir)
-                routes = [m.group(3) for m in _ROUTE_RE.finditer(content)]
-                routes.extend([m.group(1) for m in _PY_ROUTE_RE.finditer(content)])
+                # Read content
+                try:
+                    content = open(fpath, encoding="utf-8", errors="ignore").read()
+                except Exception:
+                    continue
 
-                imports = [m.group(1).strip() for m in _IMPORT_RE.finditer(content)]
-                functions = [m.group(1).strip() for m in _FUNC_RE.finditer(content)]
-                lower = content.lower()
-                has_db = any(k in lower for k in _DB_HINTS)
-                has_auth = any(k in lower for k in _AUTH_HINTS)
-                terms = Counter(tok.lower() for tok in _TOKEN_RE.findall(content))
+                rel = os.path.relpath(fpath, self.root).replace("\\", "/")
 
-                self._files.append(
-                    IndexedFile(
-                        rel_path=rel,
-                        routes=routes[:20],
-                        has_db=has_db,
-                        has_auth=has_auth,
-                        imports=imports[:30],
-                        functions=functions[:50],
-                        terms=terms,
-                    )
-                )
+                self.files[rel] = {
+                    "abs_path": fpath,
+                    "content": content,
+                    "size": len(content),
+                    "routes": re.findall(r'["\']/([\w/:.-]+)["\']', content),
+                    "has_db": bool(re.search(
+                        r'db\.|\.query|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|sequelize|mongoose|prisma|typeorm',
+                        content, re.I
+                    )),
+                    "has_auth": bool(re.search(
+                        r'session|login|password|jwt|token|bcrypt|passport|auth|cookie',
+                        content, re.I
+                    )),
+                    "has_input": bool(re.search(
+                        r'req\.(body|query|params|headers)|request\.(form|args|json)',
+                        content, re.I
+                    )),
+                    "imports": re.findall(
+                        r'require\(["\'](.+?)["\']\)|from\s+["\'](.+?)["\']|import\s+.+?\s+from\s+["\'](.+?)["\']',
+                        content
+                    ),
+                    "functions": re.findall(
+                        r'(?:function|const|let|var|async)\s+(\w+)\s*[=(]',
+                        content
+                    ),
+                }
 
-    def find_for_vuln(self, vuln: Any, location: Any) -> list[str]:
-        payload = (getattr(vuln, "payload", "") or "").lower()
-        cwe = (getattr(vuln, "cwe", "") or "").upper()
-        endpoint = (getattr(vuln, "endpoint", "") or "").lower()
-        rel = (getattr(location, "rel", "") or "").lower()
-        url = (getattr(location, "url", "") or "").lower()
-        route_key = url or endpoint
+        return len(self.files)
 
-        payload_terms = [t.lower() for t in _TOKEN_RE.findall(payload)[:10]]
+    def find_for_vuln(self, vuln, location=None) -> list:
+        """
+        Find files most relevant to a vulnerability.
+        Returns list of {path, score, content, abs_path} sorted by score (top 3).
+        """
+        endpoint = getattr(vuln, "endpoint", "") or ""
+        vuln_name = (getattr(vuln, "name", "") or "").lower()
+        payload = getattr(vuln, "payload", "") or ""
+        cwe = getattr(vuln, "cwe", "") or ""
 
-        scored = []
-        for f in self._files:
-            s = 0
-            lower_path = f.rel_path.lower()
+        # Extract route from endpoint
+        route = ""
+        if ":" in endpoint and not endpoint.startswith("http"):
+            route = endpoint.split(":")[0].strip("/")
+        elif endpoint.startswith("http"):
+            # Extract path from URL
+            from urllib.parse import urlparse
+            parsed = urlparse(endpoint)
+            route = parsed.path.strip("/")
 
-            if rel and lower_path == rel:
-                s += 12
-            if route_key and any(r and r.lower() in route_key for r in f.routes):
-                s += 10
+        results = []
 
-            if cwe == "CWE-89" and f.has_db:
-                s += 5
-            if cwe in {"CWE-287", "CWE-306", "CWE-284"} and f.has_auth:
-                s += 5
-            if cwe in {"CWE-79", "CWE-918", "CWE-22", "CWE-942"} and (f.has_db or f.has_auth):
-                s += 3
+        for rel_path, meta in self.files.items():
+            score = 0
 
-            if payload_terms:
-                s += min(3, sum(1 for t in payload_terms if f.terms.get(t, 0) > 0))
+            # Route match (strongest signal)
+            if route:
+                for r in meta["routes"]:
+                    if route in r or r in route:
+                        score += 10
+                        break
 
-            if s > 0:
-                scored.append((s, f.rel_path))
+            # Direct file match from location
+            if location and location.rel:
+                if rel_path == location.rel:
+                    score += 20  # Exact file match
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [path for _, path in scored[:3]]
+            # CWE-type relevance
+            if "sql" in vuln_name or cwe == "CWE-89":
+                if meta["has_db"]:
+                    score += 5
+            if "auth" in vuln_name or "idor" in vuln_name or cwe in ("CWE-287", "CWE-306"):
+                if meta["has_auth"]:
+                    score += 5
+            if meta["has_input"]:
+                score += 2
 
-    # Patterns that indicate a secure usage already exists in the codebase
-    _SECURE_HINTS: dict[str, list[str]] = {
-        "CWE-89":  ["placeholder", "parameterized", "prepare"],
-        "CWE-79":  ["sanitize", "escape", "dompurify", "textcontent"],
-        "CWE-918": ["allowlist", "allowlist", "blocklist"],
-        "CWE-287": ["verifytoken", "verify", "authenticate"],
-        "CWE-306": ["authorize", "isadmin", "role"],
-        "CWE-284": ["authorize", "permission", "ownership"],
-        "CWE-22":  ["normalize", "realpath", "abspath"],
-        "CWE-78":  ["execfile", "spawnfile", "execfilepath"],
-        "CWE-798": ["process.env", "os.environ", "dotenv"],
-    }
+            # Payload term match
+            if payload:
+                for term in payload.split()[:3]:
+                    if len(term) > 3 and term in meta["content"]:
+                        score += 3
+                        break
+
+            if score > 0:
+                results.append({
+                    "path": rel_path,
+                    "abs_path": meta["abs_path"],
+                    "score": score,
+                    "content": meta["content"],
+                })
+
+        return sorted(results, key=lambda x: -x["score"])[:3]
 
     def find_secure_pattern(self, cwe: str) -> Optional[str]:
-        """Return a short code snippet (up to 8 lines) from the codebase that
-        demonstrates a secure usage for the given CWE, or None if not found."""
-        cwe = (cwe or "").upper()
-        hints = self._SECURE_HINTS.get(cwe, [])
-        if not hints:
+        """
+        Find an existing secure pattern in the repo for a given CWE.
+        "Fix it the way this repo already does it."
+        """
+        patterns = {
+            "CWE-89": [
+                r'\.query\s*\(\s*["\'][^"\']*\?\s*["\']',    # Parameterized queries
+                r'\.findOne\s*\(\s*\{',                        # ORM methods
+                r'\.create\s*\(\s*\{',
+            ],
+            "CWE-79": [
+                r'escapeHtml|DOMPurify|sanitize|encode',
+            ],
+            "CWE-78": [
+                r'execFile\s*\(|spawn\s*\(',                   # Safe subprocess
+            ],
+        }
+
+        search_patterns = patterns.get(cwe, [])
+        if not search_patterns:
             return None
-        for f in self._files:
-            if not any(f.terms.get(h, 0) for h in hints):
-                continue
-            # Re-read the file and find the first line matching any hint term
-            fp = os.path.join(self.source_dir, f.rel_path)
-            try:
-                with open(fp, "r", encoding="utf-8", errors="ignore") as fh:
-                    lines = fh.readlines()
-            except OSError:
-                continue
-            for i, line in enumerate(lines):
-                ll = line.lower()
-                if any(h in ll for h in hints):
-                    # Return up to 8 lines centered around the match
-                    start = max(0, i - 1)
-                    end = min(len(lines), i + 7)
-                    return "".join(lines[start:end]).strip()
+
+        for rel_path, meta in self.files.items():
+            for pattern in search_patterns:
+                match = re.search(pattern, meta["content"], re.I)
+                if match:
+                    # Extract the surrounding lines as an example
+                    lines = meta["content"].split("\n")
+                    match_line = meta["content"][:match.start()].count("\n")
+                    start = max(0, match_line - 2)
+                    end = min(len(lines), match_line + 3)
+                    snippet = "\n".join(lines[start:end])
+                    return f"// From {rel_path}:\n{snippet}"
+
         return None
+
+    def get_file_content(self, rel_path: str) -> Optional[str]:
+        """Get content of a specific file by relative path."""
+        meta = self.files.get(rel_path)
+        return meta["content"] if meta else None
+
+    def get_dependency_info(self) -> dict:
+        """Extract dependency information from package.json or requirements.txt."""
+        deps = {}
+
+        # Node.js
+        pkg = self.files.get("package.json")
+        if pkg:
+            try:
+                import json
+                data = json.loads(pkg["content"])
+                deps["node_deps"] = list(data.get("dependencies", {}).keys())
+                deps["node_dev_deps"] = list(data.get("devDependencies", {}).keys())
+            except Exception:
+                pass
+
+        # Python
+        req = self.files.get("requirements.txt")
+        if req:
+            deps["python_deps"] = [
+                line.split("==")[0].strip()
+                for line in req["content"].split("\n")
+                if line.strip() and not line.startswith("#")
+            ]
+
+        return deps

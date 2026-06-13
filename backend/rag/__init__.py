@@ -1,15 +1,8 @@
-"""RAG utilities for context-aware patch generation."""
+"""
+CYPHEX RAG — Package Init
 
-from backend.rag.code_indexer import CodeIndexer
-from backend.rag.context import detect_language, extract_function, extract_imports
-from backend.rag.security_kb import SecurityKB, Strategy, load_security_kb
-
-__all__ = [
-    "CodeIndexer",
-    "detect_language",
-    "extract_function",
-    "extract_imports",
-    "SecurityKB",
-    "Strategy",
-    "load_security_kb",
-]
+Vectorless retrieval-augmented generation for code context:
+  - code_indexer:  Keyword-based source tree indexer (no embeddings)
+  - security_kb:   CWE → proven fix patterns knowledge base
+  - patch_memory:  Verified-fix cache for reuse
+"""
