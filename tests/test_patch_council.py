@@ -1,6 +1,7 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch, MagicMock
 import sys
 import os
 
@@ -13,7 +14,24 @@ class TestPatchCouncil:
 
     @pytest.fixture
     def council(self):
-        return PatchCouncil()
+        # Hermetic selector: fix the patcher/reviewer roster so these tests do
+        # not depend on a live Ollama instance.
+        fake_models = [
+            SimpleNamespace(name="cyphex-patch", param_size=7.0),
+            SimpleNamespace(name="deepseek-coder:1.3b", param_size=1.3),
+            SimpleNamespace(name="llama3.1:8b", param_size=8.0),
+        ]
+        fake_selector = MagicMock()
+        fake_selector.models = fake_models
+        fake_selector.get.return_value = "cyphex-patch"
+        fake_selector.get_reviewers.return_value = ["deepseek-coder:1.3b", "llama3.1:8b"]
+        fake_selector.get_vram_costs.return_value = {}
+        with patch(
+            "backend.council.patch_council.get_selector",
+            new_callable=AsyncMock,
+            return_value=fake_selector,
+        ):
+            yield PatchCouncil()
 
     @pytest.mark.asyncio
     async def test_both_validators_approve(self, council):

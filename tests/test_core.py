@@ -168,9 +168,11 @@ class TestHardware:
 
     def test_mode_selection(self):
         from cyphex.hardware import detect_mode
-        assert detect_mode(8.0) == "full"
-        assert detect_mode(5.0) == "standard"
-        assert detect_mode(3.0) == "lite"
+        assert detect_mode(24.0) == "ultra"
+        assert detect_mode(12.0) == "high"
+        assert detect_mode(8.0) == "mid"
+        assert detect_mode(5.0) == "low"
+        assert detect_mode(3.0) == "minimal"
         assert detect_mode(1.0) == "cloud"
         assert detect_mode(0.0) == "cloud"
 
