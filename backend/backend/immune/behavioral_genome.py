@@ -19,14 +19,20 @@ from collections import Counter
 from datetime import datetime
 from typing import Optional
 
-import numpy as np
-
 try:
+    import numpy as np
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import StandardScaler
     import joblib
     HAS_SKLEARN = True
-except ImportError:
+except (ImportError, Exception):
+    # numpy/scipy/sklearn may not have Python 3.14 wheels yet.
+    # CLI degrades gracefully: immune system is disabled.
+    import types
+    np = types.ModuleType("numpy_stub")
+    np.ndarray = list  # type: ignore
+    np.array = list    # type: ignore
+    np.zeros = lambda *a, **kw: []  # type: ignore
     HAS_SKLEARN = False
 
 from models.genome import EndpointProfile, GenomeState
