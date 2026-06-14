@@ -10,6 +10,7 @@ Tests for SQL injection vulnerabilities:
 """
 
 import re
+import shlex
 from urllib.parse import quote
 
 from agents.base_agent import BaseAgent
@@ -64,6 +65,11 @@ class SQLiAgent(BaseAgent):
         r"org\.postgresql\.util\.PSQLException",
     ]
 
+    @staticmethod
+    def _q(value: str) -> str:
+        """Shell-quote untrusted values before embedding in terminal commands."""
+        return shlex.quote(str(value))
+
     async def run(self, context: ScanContext) -> AgentResult:
         await self.log("═══ SQL INJECTION TESTING ═══", "info")
 
@@ -111,11 +117,14 @@ class SQLiAgent(BaseAgent):
             if form.method.upper() == "POST" and form.inputs:
                 data_str = "&".join(f"{k}=test" for k in form.inputs)
                 await self.log(f"Running sqlmap on {form.action}...", "info")
+                action_q = self._q(form.action)
+                data_q = self._q(data_str)
+                out_dir_q = self._q(f"{self.terminal.working_dir}/sqlmap")
                 out = await self.terminal.run(
-                    f'sqlmap -u "{form.action}" --data="{data_str}" '
+                    f"sqlmap -u {action_q} --data={data_q} "
                     f"--batch --level=3 --risk=2 "
                     f"--threads=4 --random-agent "
-                    f"--output-dir={self.terminal.working_dir}/sqlmap",
+                    f"--output-dir={out_dir_q}",
                     timeout=120,
                 )
                 if "injection point" in out.stdout.lower():
@@ -141,20 +150,23 @@ class SQLiAgent(BaseAgent):
                 for inp in form.inputs:
                     data_parts.append(f"{inp}={encoded_payload}")
                 data_str = "&".join(data_parts)
+                action_q = self._q(form.action)
+                data_q = self._q(data_str)
 
                 out = await self.terminal.run(
-                    f'curl -s -w "\\n__STATUS__%{{http_code}}" '
-                    f'-X POST "{form.action}" '
-                    f'-d "{data_str}" '
-                    f'--max-time 10'
+                    f"curl -s -w '\\n__STATUS__%{{http_code}}' "
+                    f"-X POST {action_q} "
+                    f"-d {data_q} "
+                    f"--max-time 10"
                 )
             else:
                 params = "&".join(
                     f"{inp}={encoded_payload}" for inp in form.inputs
                 )
                 url = f"{form.action}?{params}" if "?" not in form.action else f"{form.action}&{params}"
+                url_q = self._q(url)
                 out = await self.terminal.run(
-                    f'curl -s -w "\\n__STATUS__%{{http_code}}" --max-time 10 "{url}"'
+                    f"curl -s -w '\\n__STATUS__%{{http_code}}' --max-time 10 {url_q}"
                 )
 
             if not out.stdout:
@@ -248,10 +260,11 @@ class SQLiAgent(BaseAgent):
                 for inp in form.inputs[1:]:
                     data_parts.append(f"{inp}=test")
                 data_str = "&".join(data_parts)
+                action_q = self._q(form.action)
+                data_q = self._q(data_str)
 
                 out = await self.terminal.run(
-                    f'curl -s -X POST "{form.action}" '
-                    f'-d "{data_str}" --max-time 10'
+                    f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
                 )
             else:
                 continue
@@ -276,8 +289,10 @@ class SQLiAgent(BaseAgent):
             )
             first_inp = form.inputs[0] if form.inputs else "username"
             data_str = f"{first_inp}={error_payload}"
+            action_q = self._q(form.action)
+            data_q = self._q(data_str)
             out = await self.terminal.run(
-                f'curl -s -X POST "{form.action}" -d "{data_str}" --max-time 10'
+                f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
             )
             if out.stdout:
                 cred_match = re.search(
@@ -297,9 +312,10 @@ class SQLiAgent(BaseAgent):
             encoded = quote(payload, safe="")
             # Replace parameter values with payload
             test_url = re.sub(r'=([^&]*)', f'={encoded}', url)
+            test_url_q = self._q(test_url)
 
             out = await self.terminal.run(
-                f'curl -s --max-time 10 "{test_url}"'
+                f"curl -s --max-time 10 {test_url_q}"
             )
 
             if out.stdout:
@@ -323,11 +339,13 @@ class SQLiAgent(BaseAgent):
 
         # First, get baseline response time
         baseline_data = "&".join(f"{inp}=test" for inp in form.inputs)
+        action_q = self._q(form.action)
+        baseline_data_q = self._q(baseline_data)
         baseline = await self.terminal.run(
-            f'curl -s -o /dev/null -w "%{{time_total}}" '
-            f'-X POST "{form.action}" '
-            f'-d "{baseline_data}" '
-            f'--max-time 15'
+            f"curl -s -o /dev/null -w '%{{time_total}}' "
+            f"-X POST {action_q} "
+            f"-d {baseline_data_q} "
+            f"--max-time 15"
         )
 
         try:
@@ -349,11 +367,12 @@ class SQLiAgent(BaseAgent):
         sleep_data = "&".join(
             f"{inp}={encoded_payload}" for inp in form.inputs
         )
+        sleep_data_q = self._q(sleep_data)
         out = await self.terminal.run(
-            f'curl -s -o /dev/null -w "%{{time_total}}" '
-            f'-X POST "{form.action}" '
-            f'-d "{sleep_data}" '
-            f'--max-time 15'
+            f"curl -s -o /dev/null -w '%{{time_total}}' "
+            f"-X POST {action_q} "
+            f"-d {sleep_data_q} "
+            f"--max-time 15"
         )
 
         try:

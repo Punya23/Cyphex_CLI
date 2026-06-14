@@ -9,6 +9,7 @@ Tests for:
 """
 
 import re
+import shlex
 from urllib.parse import quote
 
 from agents.base_agent import BaseAgent
@@ -40,6 +41,11 @@ class LFIAgent(BaseAgent):
         'content', 'layout', 'mod', 'conf',
     ]
 
+    @staticmethod
+    def _q(value: str) -> str:
+        """Shell-quote untrusted values before embedding in terminal commands."""
+        return shlex.quote(str(value))
+
     async def run(self, context: ScanContext) -> AgentResult:
         await self.log("═══ LFI / FILE UPLOAD / XXE TESTING ═══", "info")
 
@@ -53,9 +59,9 @@ class LFIAgent(BaseAgent):
         for path in ["/api/file", "/file", "/download", "/include", "/load"]:
             for param_name in ["path", "file", "name", "page"]:
                 url = f"{context.target_url.rstrip('/')}{path}"
+                probe_url_q = self._q(f"{url}?{param_name}=test.txt")
                 out = await self.terminal.run(
-                    f'curl -s -o /dev/null -w "%{{http_code}}" --max-time 5 '
-                    f'"{url}?{param_name}=test.txt"'
+                    f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {probe_url_q}"
                 )
                 status = out.stdout.strip().replace("'", "")
                 if status not in ["404", "000"]:
@@ -143,10 +149,13 @@ class LFIAgent(BaseAgent):
 
         for filename, bypass_type in extensions:
             # Use curl multipart upload
+            action_q = self._q(form.action)
+            form_field_q = self._q(f"file=@-;filename={filename}")
+            content_q = self._q(test_content)
             out = await self.terminal.run(
-                f'curl -s -X POST "{form.action}" '
-                f'-F "file=@-;filename={filename}" '
-                f'--max-time 10 <<< "{test_content}"'
+                f"curl -s -X POST {action_q} "
+                f"-F {form_field_q} "
+                f"--max-time 10 <<< {content_q}"
             )
 
             if out.stdout and any(kw in out.stdout.lower() for kw in [
@@ -176,11 +185,13 @@ class LFIAgent(BaseAgent):
 
         # Test known XML endpoints
         for endpoint in context.xml_endpoints:
+            endpoint_q = self._q(endpoint)
+            payload_q = self._q(xxe_payload)
             out = await self.terminal.run(
-                f'curl -s -X POST "{endpoint}" '
-                f'-H "Content-Type: application/xml" '
-                f"-d '{xxe_payload}' "
-                f'--max-time 10'
+                f"curl -s -X POST {endpoint_q} "
+                f"-H 'Content-Type: application/xml' "
+                f"-d {payload_q} "
+                f"--max-time 10"
             )
 
             if out.stdout and "root:x:0:0" in out.stdout:
@@ -197,11 +208,13 @@ class LFIAgent(BaseAgent):
         # Also test common API endpoints
         for path in ["/api", "/api/upload", "/api/import", "/api/data"]:
             url = f"{context.target_url.rstrip('/')}{path}"
+            url_q = self._q(url)
+            payload_q = self._q(xxe_payload)
             out = await self.terminal.run(
-                f'curl -s -X POST "{url}" '
-                f'-H "Content-Type: application/xml" '
-                f"-d '{xxe_payload}' "
-                f'--max-time 5'
+                f"curl -s -X POST {url_q} "
+                f"-H 'Content-Type: application/xml' "
+                f"-d {payload_q} "
+                f"--max-time 5"
             )
 
             if out.stdout and "root:x:0:0" in out.stdout:
@@ -229,9 +242,9 @@ class LFIAgent(BaseAgent):
         for path in ["/redirect", "/redir", "/goto", "/out"]:
             for param_name in ["url", "to", "next", "redirect"]:
                 full_url = f"{context.target_url.rstrip('/')}{path}"
+                probe_url_q = self._q(f"{full_url}?{param_name}=test")
                 out = await self.terminal.run(
-                    f'curl -s -o /dev/null -w "%{{http_code}}" --max-time 5 '
-                    f'"{full_url}?{param_name}=test"'
+                    f"curl -s -o /dev/null -w '%{{http_code}}' --max-time 5 {probe_url_q}"
                 )
                 status = out.stdout.strip().replace("'", "")
                 if status not in ["404", "000"]:
@@ -243,9 +256,10 @@ class LFIAgent(BaseAgent):
         evil_url = "https://evil-cyphex-test.com"
         for param in redirect_params:
             url = f"{param.url}?{param.name}={quote(evil_url)}"
+            url_q = self._q(url)
 
             out = await self.terminal.run(
-                f'curl -s -I -L --max-redirs 0 --max-time 5 "{url}"'
+                f"curl -s -I -L --max-redirs 0 --max-time 5 {url_q}"
             )
 
             if evil_url in out.stdout:
@@ -262,7 +276,7 @@ class LFIAgent(BaseAgent):
 
             # Also check if the URL appears in body (client-side redirect)
             out2 = await self.terminal.run(
-                f'curl -s --max-time 5 "{url}"'
+                f"curl -s --max-time 5 {url_q}"
             )
             if evil_url in (out2.stdout or ""):
                 await self.add_vuln(Vuln(

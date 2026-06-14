@@ -1821,7 +1821,7 @@ class CyphexEngine:
                             border_style="magenta",
                             padding=(0, 2)
                         ))
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 print(f"  {C.Y}⚠{C.RST} {C.GHOST}Council analysis skipped — start Ollama: {C.CYAN}ollama serve{C.RST}")
 
         return {
