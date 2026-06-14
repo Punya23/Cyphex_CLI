@@ -52,6 +52,16 @@ class CyphexConfig:
     IS_WINDOWS: bool = os.name == "nt"
     SHELL: str = "powershell" if os.name == "nt" else "/bin/bash"
 
+    # ─── API Security ───
+    # If empty, API is restricted to localhost clients only.
+    API_AUTH_TOKEN: str = ""
+    API_BIND_HOST: str = "127.0.0.1"
+    API_BIND_PORT: int = 8000
+    API_RELOAD: bool = False
+    # Comma-separated origins, e.g. "http://localhost:5173,http://127.0.0.1:5173"
+    API_CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    MAX_UPLOAD_MB: int = 500
+
     def __post_init__(self):
         # Override from env if available
         self.AI_BACKEND_MODE = os.getenv("AI_BACKEND_MODE", self.AI_BACKEND_MODE)
@@ -59,6 +69,12 @@ class CyphexConfig:
         self.CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", self.CEREBRAS_API_KEY)
         self.OLLAMA_URL = os.getenv("OLLAMA_URL", self.OLLAMA_URL)
         self.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", self.OLLAMA_MODEL)
+        self.API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", self.API_AUTH_TOKEN)
+        self.API_BIND_HOST = os.getenv("API_BIND_HOST", self.API_BIND_HOST)
+        self.API_BIND_PORT = int(os.getenv("API_BIND_PORT", str(self.API_BIND_PORT)))
+        self.API_RELOAD = os.getenv("API_RELOAD", str(self.API_RELOAD)).strip().lower() in {"1", "true", "yes", "on"}
+        self.API_CORS_ORIGINS = os.getenv("API_CORS_ORIGINS", self.API_CORS_ORIGINS)
+        self.MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", str(self.MAX_UPLOAD_MB)))
 
         # Set working dir
         if not self.WORKING_DIR:

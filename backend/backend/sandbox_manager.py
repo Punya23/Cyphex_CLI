@@ -128,9 +128,11 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     # ── Extract ZIP ──────────────────────────────────────────
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(sandbox_dir)
+            _safe_extract_zip(zf, sandbox_dir)
     except zipfile.BadZipFile:
         return {"error": "Invalid ZIP file", "sandbox_id": sandbox_id}
+    except ValueError as e:
+        return {"error": f"Unsafe ZIP content: {e}", "sandbox_id": sandbox_id}
 
     # If the ZIP had a single top-level folder, descend into it
     entries = os.listdir(sandbox_dir)
@@ -170,7 +172,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
 
         npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
         install_result = await _run_cmd(
-            f"{npm_cmd} install --no-audit --no-fund",
+            [npm_cmd, "install", "--no-audit", "--no-fund"],
             cwd=sandbox_dir,
             timeout=180,
         )
@@ -186,7 +188,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
                 pkg_data = json.load(f)
             deps = {**pkg_data.get("dependencies", {}), **pkg_data.get("devDependencies", {})}
             if "prisma" in deps:
-                await _run_cmd(f"{npm_cmd} exec prisma generate", cwd=sandbox_dir, timeout=120)
+                await _run_cmd([npm_cmd, "exec", "prisma", "generate"], cwd=sandbox_dir, timeout=120)
         except Exception:
             pass
 
@@ -194,9 +196,9 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     # For Python sandboxes
     requirements = os.path.join(sandbox_dir, "requirements.txt")
     if os.path.exists(requirements):
-        await _run_cmd(f"{sys.executable} -m pip install -r requirements.txt", cwd=sandbox_dir, timeout=120)
+        await _run_cmd([sys.executable, "-m", "pip", "install", "-r", "requirements.txt"], cwd=sandbox_dir, timeout=120)
     elif app_file and app_file.endswith(".py"):
-        await _run_cmd(f"{sys.executable} -m pip install flask requests", cwd=sandbox_dir, timeout=120)
+        await _run_cmd([sys.executable, "-m", "pip", "install", "flask", "requests"], cwd=sandbox_dir, timeout=120)
 
     # ── Patch entry file to respect PORT env var ─────────────
     _patch_port_in_entry(sandbox_dir, app_file, port)
@@ -206,25 +208,15 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     env["PORT"] = str(port)
 
     npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
-    if app_file == "__NPM_RUN_START_DEV__":
-        cmd = f"{npm_cmd} run start:dev"
-    elif app_file == "__NPM_RUN_DEV__":
-        cmd = f"{npm_cmd} run dev"
-    elif app_file == "__NPM_RUN_START__":
-        cmd = f"{npm_cmd} run start"
-    elif app_file.endswith(".js"):
-        cmd = f"node {app_file}"
-    elif app_file.endswith(".py"):
-        cmd = f"{sys.executable} {app_file}"
-    else:
-        cmd = f"node {app_file}"
+    cmd = _build_start_argv(app_file)
 
     proc = subprocess.Popen(
-        cmd, shell=True,
+        cmd,
         cwd=sandbox_dir,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        shell=False,
         preexec_fn=os.setsid if os.name != 'nt' else None,
     )
 
@@ -286,20 +278,20 @@ def stop_sandbox(sandbox_id: str) -> dict:
     return {"sandbox_id": sandbox_id, "status": "stopped"}
 
 
-def _build_start_cmd(app_file: str) -> str:
-    """Reconstruct the start command for a sandbox (mirrors deploy_sandbox)."""
+def _build_start_argv(app_file: str) -> list[str]:
+    """Reconstruct the start argv for a sandbox (mirrors deploy_sandbox)."""
     npm_cmd = shutil.which("npm") or ("npm.cmd" if os.name == "nt" else "npm")
     if app_file == "__NPM_RUN_START_DEV__":
-        return f"{npm_cmd} run start:dev"
+        return [npm_cmd, "run", "start:dev"]
     if app_file == "__NPM_RUN_DEV__":
-        return f"{npm_cmd} run dev"
+        return [npm_cmd, "run", "dev"]
     if app_file == "__NPM_RUN_START__":
-        return f"{npm_cmd} run start"
+        return [npm_cmd, "run", "start"]
     if app_file.endswith(".js"):
-        return f"node {app_file}"
+        return ["node", app_file]
     if app_file.endswith(".py"):
-        return f"{sys.executable} {app_file}"
-    return f"node {app_file}"
+        return [sys.executable, app_file]
+    return ["node", app_file]
 
 
 def _kill_proc_tree(proc) -> None:
@@ -364,14 +356,15 @@ async def restart_sandbox(sandbox_id: str, wait_seconds: float = 5.0) -> dict:
 
     env = _NODE_ENV.copy()
     env["PORT"] = str(port)
-    cmd = _build_start_cmd(app_file)
+    cmd = _build_start_argv(app_file)
 
     proc = subprocess.Popen(
-        cmd, shell=True,
+        cmd,
         cwd=sandbox_dir,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        shell=False,
         preexec_fn=os.setsid if os.name != "nt" else None,
     )
 
@@ -551,14 +544,14 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
-async def _run_cmd(cmd: str, cwd: str, timeout: int = 60) -> dict:
-    """Run a shell command and return result. Uses threaded subprocess on Windows."""
+async def _run_cmd(cmd: list[str], cwd: str, timeout: int = 60) -> dict:
+    """Run a subprocess command and return result (no shell execution)."""
     import traceback
 
     def _sync_run():
         return subprocess.run(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=cwd, env=_NODE_ENV, shell=True, timeout=timeout
+            cwd=cwd, env=_NODE_ENV, shell=False, timeout=timeout
         )
 
     try:
@@ -572,6 +565,30 @@ async def _run_cmd(cmd: str, cwd: str, timeout: int = 60) -> dict:
         return {"stdout": "", "stderr": "Command timed out", "exit_code": -1}
     except Exception:
         return {"stdout": "", "stderr": traceback.format_exc(), "exit_code": -1}
+
+
+def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: str) -> None:
+    """
+    Zip Slip protection: ensure every archive member resolves inside target_dir
+    before extraction. Reject absolute paths, parent traversal, and symlinks.
+    """
+    base = os.path.realpath(target_dir)
+    for info in zf.infolist():
+        name = info.filename.replace("\\", "/")
+        if not name or name.endswith("/"):
+            continue
+        if name.startswith("/") or name.startswith("../") or "/../" in name:
+            raise ValueError(f"path traversal entry: {info.filename}")
+        out_path = os.path.realpath(os.path.join(base, name))
+        if not out_path.startswith(base + os.sep):
+            raise ValueError(f"entry escapes sandbox: {info.filename}")
+
+        # Reject symlink entries in zip archives.
+        unix_mode = (info.external_attr >> 16) & 0o170000
+        if unix_mode == 0o120000:
+            raise ValueError(f"symlink entry not allowed: {info.filename}")
+
+    zf.extractall(target_dir)
 
 
 async def _check_server_up(url: str, retries: int = 5, delay: float = 1.0) -> bool:

@@ -23,7 +23,7 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Set, List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -46,13 +46,41 @@ app = FastAPI(
 )
 
 # CORS — allow the Vite dev server
+_cors_origins = [o.strip() for o in config.API_CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins or ["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _is_localhost_host(host: str | None) -> bool:
+    if not host:
+        return False
+    return host in {"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"}
+
+
+def _require_api_access(request: Request) -> None:
+    """
+    Access control policy:
+      1) If API_AUTH_TOKEN is set, every request must send X-API-Key.
+      2) If API_AUTH_TOKEN is empty, only localhost clients are allowed.
+    """
+    token = (config.API_AUTH_TOKEN or "").strip()
+    if token:
+        supplied = request.headers.get("x-api-key", "")
+        if supplied != token:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
+        return
+
+    client_host = request.client.host if request.client else None
+    if not _is_localhost_host(client_host):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Remote access disabled. Set API_AUTH_TOKEN to enable authenticated remote API access.",
+        )
 
 # ── In-memory state ──────────────────────────────────────────
 # scan_id -> scan metadata
@@ -135,8 +163,9 @@ def make_event_callback(scan_id: str):
 # ═══════════════════════════════════════════════════════════════
 
 @app.post("/api/scan", response_model=ScanResponse)
-async def start_scan(req: ScanRequest):
+async def start_scan(req: ScanRequest, request: Request):
     """Start a new vulnerability scan."""
+    _require_api_access(request)
     scan_id = f"scan_{uuid.uuid4().hex[:8]}"
     target = req.target_url.strip().rstrip("/")
     if not target.startswith("http"):
@@ -172,16 +201,18 @@ async def start_scan(req: ScanRequest):
 
 
 @app.get("/api/scan/{scan_id}")
-async def get_scan(scan_id: str):
+async def get_scan(scan_id: str, request: Request):
     """Get scan status and/or final report."""
+    _require_api_access(request)
     if scan_id not in scans:
         return {"error": "Scan not found"}, 404
     return scans[scan_id]
 
 
 @app.get("/api/scans")
-async def get_scans():
+async def get_scans(request: Request):
     """List all scans (most recent first)."""
+    _require_api_access(request)
     scan_list = sorted(
         scans.values(),
         key=lambda s: s.get("started_at", ""),
@@ -195,16 +226,20 @@ async def get_scans():
 # ═══════════════════════════════════════════════════════════════
 
 @app.post("/api/sandbox/upload")
-async def upload_sandbox(file: UploadFile = File(...)):
+async def upload_sandbox(request: Request, file: UploadFile = File(...)):
     """
     Upload a zipped source code application (sandbox) and deploy it.
     Accepts ZIP files up to 500 MB. Also accepts any file — if it's
     not a valid ZIP the sandbox_manager will report an error.
     """
 
-    # Save the uploaded file temporarily
+    _require_api_access(request)
+
+    # Save the uploaded file temporarily with strict size cap
     temp_dir = tempfile.mkdtemp()
     zip_path = os.path.join(temp_dir, file.filename or "upload.zip")
+    max_bytes = max(1, int(config.MAX_UPLOAD_MB)) * 1024 * 1024
+    total_bytes = 0
 
     try:
         with open(zip_path, "wb") as f:
@@ -213,6 +248,12 @@ async def upload_sandbox(file: UploadFile = File(...)):
                 chunk = await file.read(1024 * 1024)  # 1 MB chunks
                 if not chunk:
                     break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"error": f"Upload too large. Limit is {config.MAX_UPLOAD_MB} MB."},
+                    )
                 f.write(chunk)
     except Exception as e:
         return JSONResponse(
@@ -254,12 +295,14 @@ async def upload_sandbox(file: UploadFile = File(...)):
 
 
 @app.get("/api/sandboxes")
-async def get_sandboxes():
+async def get_sandboxes(request: Request):
     """List currently active sandboxes"""
+    _require_api_access(request)
     return {"sandboxes": list_sandboxes()}
 
 @app.post("/api/sandbox/{sandbox_id}/stop")
-async def kill_sandbox(sandbox_id: str):
+async def kill_sandbox(sandbox_id: str, request: Request):
+    _require_api_access(request)
     return stop_sandbox(sandbox_id)
 
 
@@ -270,6 +313,16 @@ async def kill_sandbox(sandbox_id: str):
 @app.websocket("/ws/{scan_id}")
 async def websocket_endpoint(websocket: WebSocket, scan_id: str):
     """Real-time event stream for a scan."""
+    token = (config.API_AUTH_TOKEN or "").strip()
+    client_host = websocket.client.host if websocket.client else None
+    if token:
+        if websocket.headers.get("x-api-key", "") != token:
+            await websocket.close(code=1008, reason="Invalid API key")
+            return
+    elif not _is_localhost_host(client_host):
+        await websocket.close(code=1008, reason="Remote access disabled")
+        return
+
     await websocket.accept()
 
     if scan_id not in ws_clients:
@@ -300,6 +353,16 @@ async def sandbox_websocket(websocket: WebSocket, sandbox_id: str):
     Real-time terminal feed for a sandbox.
     Streams all scan terminal_log events to connected clients.
     """
+    token = (config.API_AUTH_TOKEN or "").strip()
+    client_host = websocket.client.host if websocket.client else None
+    if token:
+        if websocket.headers.get("x-api-key", "") != token:
+            await websocket.close(code=1008, reason="Invalid API key")
+            return
+    elif not _is_localhost_host(client_host):
+        await websocket.close(code=1008, reason="Remote access disabled")
+        return
+
     await websocket.accept()
 
     if sandbox_id not in sandbox_ws_clients:
@@ -372,11 +435,11 @@ async def _run_scan_task(scan_id: str, target: str, cerebras_key: str):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n  🚀 CYPHEX API starting on http://localhost:8000\n")
+    print(f"\n  🚀 CYPHEX API starting on http://{config.API_BIND_HOST}:{config.API_BIND_PORT}\n")
     uvicorn.run(
         "api:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
+        host=config.API_BIND_HOST,
+        port=config.API_BIND_PORT,
+        reload=config.API_RELOAD,
         log_level="info",
     )
