@@ -2289,9 +2289,40 @@ class CyphexEngine:
                 applier = PatchApplier(p["filepath"])
                 res = applier.apply_range(p["start_l"], p["end_l"], fixed)
                 if not res.ok:
-                    console.print(f"[red][FAILED][/red] {res.error} — file left unchanged.\n")
-                    skipped += 1
-                    continue
+                    parse_err = res.error
+                    console.print(f"[yellow][PARSE-FAIL][/yellow] {parse_err}")
+                    # ── Parse-error reflexion: one retry with the error fed back ──
+                    _parse_retried = False
+                    if patch_council:
+                        try:
+                            feedback_code = p["snippet"] + (
+                                f"\n\n# ⚠ PREVIOUS PATCH FAILED SYNTAX CHECK: {parse_err}\n"
+                                "# Your fixed_code dropped or restructured lines from the snippet.\n"
+                                "# RULE: fixed_code must include ALL lines of the vulnerable snippet above.\n"
+                                "# Preserve unchanged lines verbatim. Only change the minimum to fix the vuln."
+                            )
+                            console.print("  [yellow]↺ Parse-error reflexion — re-generating patch[/yellow]")
+                            retry_r = await patch_council.generate_and_validate_patch(
+                                p["vuln_type"], p["cwe"], feedback_code, p["rel_path"]
+                            )
+                            retry_fixed = (retry_r.get("fixed_code") or "").strip()
+                            if retry_fixed and not self._is_placeholder_code(retry_fixed):
+                                retry_applier = PatchApplier(p["filepath"])
+                                retry_res = retry_applier.apply_range(p["start_l"], p["end_l"], retry_fixed)
+                                if retry_res.ok:
+                                    fixed = retry_fixed
+                                    applier = retry_applier
+                                    res = retry_res
+                                    _parse_retried = True
+                                    console.print("  [cyan]↺ Parse-error reflexion succeeded[/cyan]")
+                                else:
+                                    console.print(f"  [dim]↺ Parse-error reflexion still failed: {retry_res.error}[/dim]")
+                        except Exception as _exc:
+                            console.print(f"  [dim]↺ Parse-error reflexion error: {_exc}[/dim]")
+                    if not _parse_retried:
+                        console.print("[red][FAILED][/red] — file left unchanged.\n")
+                        skipped += 1
+                        continue
             else:
                 # Fallback (should not happen): correct slice replacement.
                 lines = p["lines"]

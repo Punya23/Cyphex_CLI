@@ -48,6 +48,11 @@ ANTI-REGRESSION RULES (violating these gets the patch rejected):
 - Never "fix" a vulnerability by deleting or commenting-out a route, handler, or feature.
   A commented-out line is NOT a valid fix and will be rejected.
 - Preserve the function signature, return type, and surrounding control flow.
+- SNIPPET INTEGRITY: fixed_code must be a COMPLETE verbatim replacement for ALL lines in
+  the "Vulnerable code" block. Never drop, restructure, or omit the first line of the
+  snippet (e.g. the route declaration `app.get(...)` or function signature `def foo():`
+  or class definition). Preserve unchanged context lines exactly as given — only edit
+  the minimum lines required to eliminate the vulnerability.
 
 VULNERABILITY-SPECIFIC FIX PATTERNS (use these):
 - SQL Injection: Replace template literals with parameterized queries using ? placeholders and [value] arrays.
