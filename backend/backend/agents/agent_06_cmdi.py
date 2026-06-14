@@ -148,8 +148,9 @@ class CMDiAgent(BaseAgent):
                         f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
                     )
                 else:
+                    url_q = self._q(f"{form.action}?{data_str}")
                     out = await self.terminal.run(
-                        f"curl -s --max-time 10 {self._q(f'{form.action}?{data_str}') }"
+                        f"curl -s --max-time 10 {url_q}"
                     )
 
                 if self._is_cmdi_confirmed(out.stdout, expected_cmd):
@@ -234,8 +235,9 @@ class CMDiAgent(BaseAgent):
                         f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
                     )
                 else:
+                    url_q = self._q(f"{form.action}?{data_str}")
                     out = await self.terminal.run(
-                        f"curl -s --max-time 10 {self._q(f'{form.action}?{data_str}') }"
+                        f"curl -s --max-time 10 {url_q}"
                     )
 
                 if out.stdout and expected in out.stdout:
