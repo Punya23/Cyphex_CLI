@@ -53,6 +53,11 @@ ANTI-REGRESSION RULES (violating these gets the patch rejected):
   snippet (e.g. the route declaration `app.get(...)` or function signature `def foo():`
   or class definition). Preserve unchanged context lines exactly as given — only edit
   the minimum lines required to eliminate the vulnerability.
+- BRACKET BALANCE: Your fixed_code must have the same net brace depth ({/} balance) as the
+  original snippet. If the snippet opens a `{` without closing it (e.g. a route handler
+  opening like `app.get('/path', (req, res) => {`), your replacement must also leave that
+  brace open — the handler body continues beyond the snippet boundary. Never add a
+  closing `}` or `});` that wasn't in the original snippet.
 
 VULNERABILITY-SPECIFIC FIX PATTERNS (use these):
 - SQL Injection: Replace template literals with parameterized queries using ? placeholders and [value] arrays.

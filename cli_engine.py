@@ -2296,10 +2296,14 @@ class CyphexEngine:
                     if patch_council:
                         try:
                             feedback_code = p["snippet"] + (
-                                f"\n\n# ⚠ PREVIOUS PATCH FAILED SYNTAX CHECK: {parse_err}\n"
-                                "# Your fixed_code dropped or restructured lines from the snippet.\n"
-                                "# RULE: fixed_code must include ALL lines of the vulnerable snippet above.\n"
-                                "# Preserve unchanged lines verbatim. Only change the minimum to fix the vuln."
+                                f"\n\n# ⚠ PREVIOUS PATCH FAILED: {parse_err}\n"
+                                "# RULES for your fixed_code:\n"
+                                "# 1. Include ALL lines of the vulnerable snippet above verbatim.\n"
+                                "# 2. The snippet is only a PARTIAL window — the function/handler continues\n"
+                                "#    for many more lines after this window. Do NOT add closing braces '}'\n"
+                                "#    or '});' that are not in the original snippet.\n"
+                                "# 3. Only INSERT the minimal fix (e.g. an auth guard) between existing lines.\n"
+                                "# 4. Your fixed_code must have the SAME net brace balance ({/}) as the snippet."
                             )
                             console.print("  [yellow]↺ Parse-error reflexion — re-generating patch[/yellow]")
                             retry_r = await patch_council.generate_and_validate_patch(

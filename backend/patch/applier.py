@@ -62,6 +62,24 @@ class PatchApplier:
         end_l = max(start_l, min(end_l, len(lines)))
 
         new_block = self._as_block(fixed_code, original)
+
+        # ── Bracket-balance pre-check ──────────────────────────────────────
+        # The snippet may be the *opening* of a multi-line handler.  If the
+        # replacement closes more braces than the original, it will orphan
+        # the remaining handler body and produce a syntax error.
+        orig_span = "".join(lines[start_l:end_l])
+        new_span  = "".join(new_block)
+        orig_bal  = orig_span.count("{") - orig_span.count("}")
+        new_bal   = new_span.count("{") - new_span.count("}")
+        if orig_bal != new_bal:
+            return ApplyResult(
+                False,
+                f"bracket-balance mismatch: original snippet has net depth "
+                f"{orig_bal:+d}, replacement has {new_bal:+d}. "
+                f"The snippet is only lines {start_l+1}–{end_l} of the file — "
+                f"do NOT close braces/brackets that continue beyond the snippet boundary."
+            )
+
         lines[start_l:end_l] = new_block
         new_text = "".join(lines)
 
@@ -152,7 +170,15 @@ class PatchApplier:
                 except OSError:
                     pass
             if proc.returncode != 0:
-                return False, (proc.stderr or "syntax error").strip().splitlines()[-1][:200]
+                err_lines = (proc.stderr or "syntax error").strip().splitlines()
+                # Node.js prints the version banner as the last line — skip it
+                content = [l for l in err_lines if not l.startswith("Node.js ")]
+                # Prefer the actual SyntaxError description
+                syntax = [l for l in content if "SyntaxError" in l or "Error:" in l]
+                msg = (syntax[-1] if syntax
+                       else content[-1] if content
+                       else err_lines[-1]).strip()[:200]
+                return False, msg
             return True, ""
         except Exception:
             return True, ""

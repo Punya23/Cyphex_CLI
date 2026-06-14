@@ -89,3 +89,32 @@ def test_python_parse_failure_auto_rolls_back():
     res = PatchApplier(fp).apply_range(1, 2, "    return (")  # broken syntax
     assert not res.ok
     assert open(fp).read() == "def f():\n    return 1\n"
+
+
+def test_bracket_balance_mismatch_rejects():
+    """Replacement that closes more braces than the original snippet is rejected.
+
+    Simulates the Missing Auth bug: the 5-line snippet opens a route handler
+    but the model generates a complete handler with closing `});` — orphaning
+    the remaining handler body.
+    """
+    fp = _mkfile(
+        "// comment\n"
+        "app.get('/admin', (req, res) => {\n"
+        "  const notice = req.query.notice || '';\n"
+        "\n"
+        "  // rest of handler continues...\n"
+        "  res.send('ok');\n"
+        "});\n"
+    )
+    # Original snippet covers lines 1-4 (0-based): opens `{` without closing
+    # Replacement closes the handler — net balance differs
+    replacement = (
+        "app.get('/admin', (req, res) => {\n"
+        "  if (!req.isAuthenticated()) return res.status(403).send('denied');\n"
+        "  res.render('admin');\n"
+        "});\n"
+    )
+    res = PatchApplier(fp).apply_range(1, 4, replacement)
+    assert not res.ok
+    assert "bracket-balance" in res.error
