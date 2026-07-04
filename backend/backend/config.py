@@ -26,6 +26,12 @@ class CyphexConfig:
     OLLAMA_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5-coder:7b"  # Best coding model you have installed
 
+    # ─── Cross-project patch memory (cognee, optional — pip install ".[memory]") ───
+    COGNEE_LLM_MODEL: str = ""              # Falls back to OLLAMA_MODEL if unset
+    COGNEE_EMBEDDING_MODEL: str = "nomic-embed-text"
+    COGNEE_RECALL_TIMEOUT_S: float = 8.0
+    COGNEE_REMEMBER_TIMEOUT_S: float = 20.0
+
     # ─── Cerebras AI (Cloud — LEGACY, currently broken) ───
     CEREBRAS_API_KEY: str = ""  # Set via CEREBRAS_API_KEY env var
     CEREBRAS_MODEL: str = "llama-3.3-70b"
@@ -69,12 +75,16 @@ class CyphexConfig:
         self.CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", self.CEREBRAS_API_KEY)
         self.OLLAMA_URL = os.getenv("OLLAMA_URL", self.OLLAMA_URL)
         self.OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", self.OLLAMA_MODEL)
-        self.API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", self.API_AUTH_TOKEN)
-        self.API_BIND_HOST = os.getenv("API_BIND_HOST", self.API_BIND_HOST)
-        self.API_BIND_PORT = int(os.getenv("API_BIND_PORT", str(self.API_BIND_PORT)))
-        self.API_RELOAD = os.getenv("API_RELOAD", str(self.API_RELOAD)).strip().lower() in {"1", "true", "yes", "on"}
-        self.API_CORS_ORIGINS = os.getenv("API_CORS_ORIGINS", self.API_CORS_ORIGINS)
-        self.MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", str(self.MAX_UPLOAD_MB)))
+        self.COGNEE_LLM_MODEL = os.getenv("COGNEE_LLM_MODEL", self.COGNEE_LLM_MODEL)
+        self.COGNEE_EMBEDDING_MODEL = os.getenv("COGNEE_EMBEDDING_MODEL", self.COGNEE_EMBEDDING_MODEL)
+        self.COGNEE_RECALL_TIMEOUT_S = float(os.getenv("COGNEE_RECALL_TIMEOUT_S", self.COGNEE_RECALL_TIMEOUT_S))
+        self.COGNEE_REMEMBER_TIMEOUT_S = float(os.getenv("COGNEE_REMEMBER_TIMEOUT_S", self.COGNEE_REMEMBER_TIMEOUT_S))
+
+        # Fall back to the main coding model if no cognee-specific model is set
+        # — users shouldn't be forced into downloading a separate large model
+        # just for this optional feature.
+        if not self.COGNEE_LLM_MODEL:
+            self.COGNEE_LLM_MODEL = self.OLLAMA_MODEL
 
         # Set working dir
         if not self.WORKING_DIR:

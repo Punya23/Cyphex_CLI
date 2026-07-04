@@ -2,7 +2,7 @@ import json
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
-from backend.council.council_orchestrator import CouncilOrchestrator
+from backend.council.council_orchestrator import CouncilOrchestrator, is_approved_vote
 from backend.council.model_selector import get_selector
 from backend.council.reasoning_strategy import select_strategy
 
@@ -294,10 +294,10 @@ class PatchCouncil(CouncilOrchestrator):
                 console.print(f"[red]Error from {model}: {e}[/red]")
                 approvals.append({"model": model, "approved": False, "reason": "Error during call"})
 
-        approved_count = sum(1 for a in approvals if a.get("approved", False))
+        approved_count = sum(1 for a in approvals if is_approved_vote(a.get("approved")))
         total_reviewers = len(approvals)
         # FIX: Use .get() instead of hard key access to prevent KeyError
-        dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not a.get("approved", False)]
+        dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not is_approved_vote(a.get("approved"))]
 
         if approved_count == total_reviewers:
             final_safety = "safe"
@@ -388,13 +388,15 @@ class PatchCouncil(CouncilOrchestrator):
         for i, v in enumerate(vuln_list, 1):
             console.print(f"[dim]  [{i}/{len(vuln_list)}] Patching: {v['vuln_name']}[/dim]")
             directive = CWE_DIRECTIVES.get(v['cwe'], "Eliminate the vulnerability completely. The fix must remove the dangerous pattern, not just add a superficial validation.")
+            memory_hint = v.get("memory_hint", "")
             prompt = (
                 f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
                 f"Severity: {v.get('severity', 'High')}\n"
                 f"File: {v['file_path']}\n\n"
                 f"Vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
                 f"FIX REQUIREMENT: {directive}\n\n"
-                f"Generate the fixed version of this code. The fix must ELIMINATE the vulnerability, not just add a superficial check."
+                + (f"{memory_hint}\n\n" if memory_hint else "")
+                + f"Generate the fixed version of this code. The fix must ELIMINATE the vulnerability, not just add a superficial check."
             )
             # ── Oracle: decompose the problem before generating the patch ──
             oracle = await self._oracle_reason(patch_model, v)
@@ -512,9 +514,9 @@ class PatchCouncil(CouncilOrchestrator):
             approvals = all_approvals[i] if i < len(all_approvals) else []
 
             # Safe key access — use .get() to prevent KeyError on missing 'reason'
-            approved_count = sum(1 for a in approvals if a.get("approved", False))
+            approved_count = sum(1 for a in approvals if is_approved_vote(a.get("approved")))
             total_reviewers = len(approvals)
-            dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not a.get("approved", False)]
+            dissent_reasons = [a.get("reason", "No reason provided") for a in approvals if not is_approved_vote(a.get("approved"))]
 
             fixed_code = patch_res.get("fixed_code", "")
 
@@ -608,57 +610,87 @@ class PatchCouncil(CouncilOrchestrator):
                         still_rejected.append(idx)
                         continue
 
-                    # Quick re-review with first available reviewer
-                    reviewer = unique_reviewers[0] if unique_reviewers else None
-                    new_approved = False
+                    # Re-review using the SAME reviewer set/quorum as the original
+                    # council pass (not a single reviewer) — FAIL CLOSED: an error
+                    # or a missing reviewer must never promote the patch to "safe".
                     new_approvals = []
-                    if reviewer:
+                    if unique_reviewers:
                         await self.vram.unload(patch_model)
-                        try:
-                            await self.vram.ensure_loaded(reviewer)
-                            review_prompt = (
-                                f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
-                                f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
-                                f"Proposed patch (attempt {retry_round + 1}):\n```\n{new_code}\n```\n\n"
-                                f"Previous rejection reason: \"{critique}\"\n"
-                                f"Has this new patch addressed the critique?"
-                            )
-                            review_result = await self._call(
-                                reviewer, PATCH_REVIEW_SYSTEM, review_prompt,
-                                task_name="Re-reviewing", severity=v.get('severity', ''), cwe=v.get('cwe', '')
-                            )
-                            is_approved = review_result.get("approved", False)
-                            reason = review_result.get("reason", "No reason")
-                            new_approvals = [{"model": reviewer, "approved": is_approved, "reason": reason}]
-                            new_approved = is_approved
-                            verdict = "[green]APPROVED[/green]" if is_approved else "[red]REJECTED[/red]"
-                            console.print(f"  [dim]   {reviewer} re-review: {verdict} — {reason[:60]}[/dim]")
-                            await self.vram.unload(reviewer)
-                        except Exception:
-                            new_approved = True  # Give benefit of doubt if review fails
+                        review_prompt = (
+                            f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
+                            f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                            f"Proposed patch (attempt {retry_round + 1}):\n```\n{new_code}\n```\n\n"
+                            f"Previous rejection reason: \"{critique}\"\n"
+                            f"Has this new patch addressed the critique?"
+                        )
+                        for reviewer in unique_reviewers:
+                            try:
+                                await self.vram.ensure_loaded(reviewer)
+                                review_result = await self._call(
+                                    reviewer, PATCH_REVIEW_SYSTEM, review_prompt,
+                                    task_name="Re-reviewing", severity=v.get('severity', ''), cwe=v.get('cwe', '')
+                                )
+                                is_approved = is_approved_vote(review_result.get("approved"))
+                                reason = review_result.get("reason", "No reason")
+                                new_approvals.append({"model": reviewer, "approved": is_approved, "reason": reason})
+                                verdict = "[green]APPROVED[/green]" if is_approved else "[red]REJECTED[/red]"
+                                console.print(f"  [dim]   {reviewer} re-review: {verdict} — {str(reason)[:60]}[/dim]")
+                                await self.vram.unload(reviewer)
+                            except Exception as e:
+                                # FAIL CLOSED: an errored re-review counts as NOT
+                                # approved — never as an automatic pass.
+                                console.print(f"  [red]   {reviewer} re-review error: {str(e)[:60]} — counted as NOT approved[/red]")
+                                new_approvals.append({"model": reviewer, "approved": False, "reason": f"Error during re-review: {str(e)[:60]}"})
                         # Reload patcher for next retry
                         try:
                             await self.vram.ensure_loaded(patch_model)
                         except Exception:
                             pass
                     else:
-                        new_approved = True  # No reviewer available — accept
+                        # FAIL CLOSED: no reviewer available — do NOT auto-accept.
+                        console.print("  [yellow]   No reviewer available for re-review — cannot promote to safe (fail closed)[/yellow]")
 
-                    if new_approved:
+                    approved_count = sum(1 for a in new_approvals if is_approved_vote(a.get("approved")))
+                    total_reviewers = len(new_approvals)
+
+                    if total_reviewers == 0:
+                        # Nobody actually reviewed this attempt — surface it for
+                        # human review, never mark it "safe" on faith.
+                        new_safety = "review_needed"
+                    elif approved_count == total_reviewers:
+                        new_safety = "safe"
+                    elif approved_count >= 1:
+                        new_safety = "review_needed"
+                    else:
+                        new_safety = "rejected"
+
+                    new_dissent = [a.get("reason", "") for a in new_approvals if not is_approved_vote(a.get("approved"))]
+
+                    if new_safety == "rejected":
+                        # Still fully rejected — keep the previously-reviewed code
+                        # on file, just refresh the critique for the next round.
+                        final_results[idx]["dissent_reasons"] = new_dissent
+                        final_results[idx]["approvals"] = new_approvals
+                        still_rejected.append(idx)
+                    else:
                         final_results[idx] = {
                             "fixed_code": new_code,
                             "unsafe_reason": new_result.get("unsafe_reason", ""),
-                            "patch_safety": "safe" if new_approved else "review_needed",
+                            "patch_safety": new_safety,
                             "approvals": new_approvals,
-                            "dissent_reasons": [],
-                            "vote_summary": f"Approved after reflexion (attempt {retry_round + 1})",
+                            "dissent_reasons": new_dissent,
+                            "vote_summary": (
+                                f"Approved after reflexion (attempt {retry_round + 1})"
+                                if new_safety == "safe" else
+                                f"{approved_count}/{total_reviewers} validators approved after reflexion (attempt {retry_round + 1})"
+                                if total_reviewers else
+                                f"Unreviewed candidate after reflexion (attempt {retry_round + 1}) — no reviewer available"
+                            ),
                         }
-                        console.print(f"  [green]   ✓ Patch improved and APPROVED on attempt {retry_round + 1}[/green]")
-                    else:
-                        # Update with new dissent for next round
-                        new_dissent = [a.get("reason", "") for a in new_approvals if not a.get("approved", False)]
-                        final_results[idx]["dissent_reasons"] = new_dissent
-                        still_rejected.append(idx)
+                        if new_safety == "safe":
+                            console.print(f"  [green]   ✓ Patch improved and APPROVED on attempt {retry_round + 1}[/green]")
+                        else:
+                            console.print(f"  [yellow]   Patch improved to REVIEW_NEEDED on attempt {retry_round + 1}[/yellow]")
 
                 rejected_indices = still_rejected
 

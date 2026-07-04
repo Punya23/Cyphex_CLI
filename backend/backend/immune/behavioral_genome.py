@@ -11,10 +11,13 @@ it just knows what YOUR app looks like and blocks everything else.
 Dependencies: scikit-learn, numpy (both CPU-only, work on Pi 5)
 """
 
+import hashlib
+import hmac
 import math
 import json
 import os
 import re
+import secrets
 from collections import Counter
 from datetime import datetime
 from typing import Optional
@@ -37,6 +40,59 @@ except (ImportError, Exception):
 
 from models.genome import EndpointProfile, GenomeState
 from models.scan import ScanContext
+
+
+# ── Genome cache integrity (HMAC) ──
+#
+# `BehavioralGenome.save()` persists trained scikit-learn objects
+# (IsolationForest / StandardScaler instances, not plain numeric/dict data)
+# via joblib, which deserializes with pickle under the hood. A `.pkl` file
+# placed at a predictable path (md5(target_url)-derived, see cli_engine.py)
+# could otherwise be swapped for a crafted payload that executes arbitrary
+# code the moment `load()` calls `joblib.load()`. Since the object graph
+# here is genuine sklearn estimators (not simple data that could be moved
+# to JSON/npz without a large refactor of the ML training code), we instead
+# sign the cache with a per-installation HMAC secret and refuse to
+# deserialize it if the signature is missing or doesn't match.
+_HMAC_KEY_FILENAME = ".genome_hmac.key"
+
+
+def _get_or_create_hmac_key(storage_dir: str) -> bytes:
+    """
+    Load the per-installation genome-signing secret, creating it on first
+    use. Stored under the same storage dir as the genome caches, with
+    permissions restricted to the owner.
+    """
+    storage_dir = storage_dir or "."
+    os.makedirs(storage_dir, exist_ok=True)
+    key_path = os.path.join(storage_dir, _HMAC_KEY_FILENAME)
+
+    if os.path.exists(key_path):
+        with open(key_path, "rb") as f:
+            key = f.read()
+        if key:
+            return key
+
+    # First run (or an empty/corrupt key file): generate a fresh secret and
+    # write it with restrictive (owner-only) permissions.
+    key = secrets.token_bytes(32)
+    fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(key)
+    try:
+        os.chmod(key_path, 0o600)
+    except OSError:
+        pass
+    return key
+
+
+def _sign_file(path: str, key: bytes) -> str:
+    """Compute a hex HMAC-SHA256 digest over a file's contents."""
+    digest = hmac.new(key, digestmod=hashlib.sha256)
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class BehavioralGenome:
@@ -559,14 +615,46 @@ class BehavioralGenome:
             "models": self.endpoint_models,
             "scalers": self.scalers,
         }
-        joblib.dump(models_data, filepath + ".pkl")
+        pkl_path = filepath + ".pkl"
+        joblib.dump(models_data, pkl_path)
+
+        # Sign the cache so a future `load()` can detect a swapped/tampered
+        # .pkl before handing it to joblib (== pickle) for deserialization.
+        key = _get_or_create_hmac_key(os.path.dirname(filepath))
+        digest = _sign_file(pkl_path, key)
+        hmac_path = pkl_path + ".hmac"
+        with open(hmac_path, "w") as f:
+            f.write(digest)
+        try:
+            os.chmod(hmac_path, 0o600)
+        except OSError:
+            pass
 
     @classmethod
     def load(cls, filepath: str) -> "BehavioralGenome":
         """Load genome from disk."""
         genome = cls()
-        if os.path.exists(filepath + ".pkl"):
-            models_data = joblib.load(filepath + ".pkl")
+        pkl_path = filepath + ".pkl"
+        if os.path.exists(pkl_path):
+            # Refuse to deserialize (joblib.load == pickle.load) unless the
+            # cache carries a valid HMAC signed with our per-installation
+            # secret. An attacker who can drop/replace a .pkl at this
+            # predictable path (md5(target_url)-derived) but not read our
+            # local secret cannot forge a matching signature.
+            hmac_path = pkl_path + ".hmac"
+            if not os.path.exists(hmac_path):
+                raise ValueError(
+                    f"Refusing to load genome cache without a signature: {pkl_path}"
+                )
+            with open(hmac_path, "r") as f:
+                expected_digest = f.read().strip()
+            key = _get_or_create_hmac_key(os.path.dirname(filepath))
+            actual_digest = _sign_file(pkl_path, key)
+            if not hmac.compare_digest(expected_digest, actual_digest):
+                raise ValueError(
+                    f"Genome cache HMAC mismatch (possible tampering) — refusing to load: {pkl_path}"
+                )
+            models_data = joblib.load(pkl_path)
             genome.endpoint_models = models_data.get("models", {})
             genome.scalers = models_data.get("scalers", {})
         return genome

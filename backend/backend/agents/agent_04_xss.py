@@ -95,7 +95,8 @@ class XSSAgent(BaseAgent):
             await self.log(f"Running dalfox on {form.action}...", "info")
             action_q = self._q(form.action)
             out = await self.terminal.run(
-                f"dalfox url {action_q} --silence --no-color --timeout 10",
+                f'dalfox url {shlex.quote(form.action)} '
+                f'--silence --no-color --timeout 10',
                 timeout=60,
             )
             if "POC" in out.stdout or "Verified" in out.stdout:
@@ -126,13 +127,15 @@ class XSSAgent(BaseAgent):
 
                 if form.method.upper() == "POST":
                     out = await self.terminal.run(
-                        f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
+                        f'curl -s -X POST {shlex.quote(form.action)} '
+                        f'-d {shlex.quote(data_str)} '
+                        f'--max-time 10'
                     )
                 else:
                     url = f"{form.action}?{data_str}"
                     url_q = self._q(url)
                     out = await self.terminal.run(
-                        f"curl -s --max-time 10 {url_q}"
+                        f'curl -s --max-time 10 {shlex.quote(url)}'
                     )
 
                 if not out.stdout:
@@ -174,7 +177,7 @@ class XSSAgent(BaseAgent):
             test_url = f"{param.url}?{param.name}={quote(payload, safe='')}"
             test_url_q = self._q(test_url)
             out = await self.terminal.run(
-                f"curl -s --max-time 10 {test_url_q}"
+                f'curl -s --max-time 10 {shlex.quote(test_url)}'
             )
 
             if out.stdout and payload in out.stdout:
@@ -214,7 +217,7 @@ class XSSAgent(BaseAgent):
         for url, page_data in context.sitemap.items():
             url_q = self._q(url)
             out = await self.terminal.run(
-                f"curl -sL --max-time 10 {url_q}"
+                f'curl -sL --max-time 10 {shlex.quote(url)}'
             )
             if not out.stdout:
                 continue
@@ -274,7 +277,9 @@ class XSSAgent(BaseAgent):
 
             # Step 1: Submit the stored payload (don't follow redirect)
             await self.terminal.run(
-                f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
+                f'curl -s -X POST {shlex.quote(form.action)} '
+                f'-d {shlex.quote(data_str)} '
+                f'--max-time 10'
             )
 
             # Step 2: Fetch the display page to verify persistence
@@ -297,7 +302,7 @@ class XSSAgent(BaseAgent):
             if display_url:
                 display_url_q = self._q(display_url)
                 out2 = await self.terminal.run(
-                    f"curl -sL --max-time 10 {display_url_q}"
+                    f'curl -sL --max-time 10 {shlex.quote(display_url)}'
                 )
                 if out2.stdout and self.CANARY in out2.stdout:
                     await self.add_vuln(Vuln(
@@ -328,7 +333,7 @@ class XSSAgent(BaseAgent):
             # First check if admin page is publicly accessible (BAC)
             url_q = self._q(url)
             out = await self.terminal.run(
-                f"curl -s -w '\\n__STATUS__%{{http_code}}' --max-time 5 {url_q}"
+                f'curl -s -w "\\n__STATUS__%{{http_code}}" --max-time 5 {shlex.quote(url)}'
             )
             body = out.stdout or ""
             status = "000"
@@ -376,7 +381,7 @@ class XSSAgent(BaseAgent):
                     test_url = f"{url}?{param_name}={quote(xss_payload, safe='')}"
                     test_url_q = self._q(test_url)
                     out2 = await self.terminal.run(
-                        f"curl -s --max-time 5 {test_url_q}"
+                        f'curl -s --max-time 5 {shlex.quote(test_url)}'
                     )
                     if out2.stdout and xss_payload in out2.stdout:
                         await self.add_vuln(Vuln(

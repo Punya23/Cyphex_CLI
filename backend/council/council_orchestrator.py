@@ -45,6 +45,26 @@ def ctx_for_tier() -> int:
     return _CTX_CACHE
 
 
+def is_approved_vote(value) -> bool:
+    """
+    Strictly interpret a council vote's "approved"/"confirmed" field.
+
+    Only Python's real `True`, or unambiguous string spellings of true
+    ("true"/"yes", case-insensitive), count as approved. Everything else —
+    `False`, `None`, a missing key, or ANY other string (including the
+    literal string "false", which some small local models emit despite
+    JSON-mode prompting) — counts as NOT approved.
+
+    This guards against `bool("false") == True` style bugs when tallying
+    votes returned by LLMs that don't reliably emit JSON booleans.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes")
+    return False
+
+
 def ctx_for_tier() -> dict:
     """
     Return tier-appropriate num_ctx and num_predict based on detected hardware.
@@ -214,7 +234,11 @@ class VRAMManager:
         self.loaded.pop(model, None)
 
     async def _raw_call(self, model: str, prompt: str, stream: bool = False) -> str:
-        async with httpx.AsyncClient(timeout=None) as client:
+        # Bounded timeout (consistent with the main call path's ~90s budget) —
+        # an unbounded timeout here let a hung Ollama warm-up call block the
+        # entire pipeline indefinitely.
+        warmup_timeout = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=warmup_timeout) as client:
             r = await client.post(
                 f"{OLLAMA_BASE}/api/generate",
                 json={
@@ -361,10 +385,12 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 # Display the decision if applicable
                 if isinstance(parsed, dict):
                     if "confirmed" in parsed:
-                        c = "green" if parsed["confirmed"] else "red"
+                        vote_ok = is_approved_vote(parsed["confirmed"])
+                        c = "green" if vote_ok else "red"
                         console.print(f"  └─ [{c}]{model} vote: {parsed['confirmed']}[/{c}] - {parsed.get('reason', '')}")
                     elif "approved" in parsed:
-                        c = "green" if parsed["approved"] else "red"
+                        vote_ok = is_approved_vote(parsed["approved"])
+                        c = "green" if vote_ok else "red"
                         console.print(f"  └─ [{c}]{model} review: {parsed['approved']}[/{c}] - {parsed.get('reason', '')}")
                 
                 return parsed

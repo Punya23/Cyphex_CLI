@@ -14,6 +14,7 @@ Storage: .cyphex/reasoning_trees/{tree_id}.json
 """
 
 import os
+import re
 import json
 import uuid
 import time
@@ -23,6 +24,28 @@ from dataclasses import dataclass, field, asdict
 
 
 TREE_DIR = os.path.join(".cyphex", "reasoning_trees")
+
+# tree_id is attacker-influenceable on the load path (unlike the writer, which
+# always generates it internally via uuid.uuid4().hex). Restrict to a safe
+# charset before it's ever joined into a filesystem path.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _safe_tree_path(tree_id: str, base_dir: str) -> Optional[str]:
+    """
+    Validate tree_id and resolve it to a path guaranteed to stay inside the
+    trees directory. Returns None if tree_id is missing, malformed, or would
+    resolve outside the trees directory (path traversal attempt).
+    """
+    if not tree_id or not _SAFE_ID_RE.match(tree_id):
+        return None
+    trees_dir = os.path.join(base_dir, TREE_DIR)
+    filepath = os.path.join(trees_dir, f"{tree_id}.json")
+    real_base = os.path.realpath(trees_dir)
+    real_path = os.path.realpath(filepath)
+    if os.path.dirname(real_path) != real_base:
+        return None
+    return real_path
 
 
 @dataclass
@@ -202,16 +225,17 @@ class ReasoningTree:
         for n in self.nodes:
             children_map[n["id"]] = n.get("children", [])
 
-        def depth(node_id, visited=None):
-            if visited is None:
-                visited = set()
-            if node_id in visited:
-                return 0
-            visited.add(node_id)
+        def depth(node_id):
+            # No visited-tracking needed: add_node() only ever creates a brand
+            # new node with a monotonically increasing id and attaches it to
+            # exactly one parent at creation time, so this graph is always a
+            # proper tree — no shared nodes, no cycles are possible. A shared
+            # mutable `visited` set across sibling branches previously made
+            # visiting one subtree cause its siblings to be undercounted as 0.
             kids = children_map.get(node_id, [])
             if not kids:
                 return 1
-            return 1 + max(depth(c, visited) for c in kids)
+            return 1 + max(depth(c) for c in kids)
 
         root_ids = [n["id"] for n in self.nodes if n.get("type") == "root"]
         if root_ids:
@@ -254,8 +278,8 @@ def save_tree(tree: ReasoningTree, base_dir: str = "."):
 
 def load_tree(tree_id: str, base_dir: str = ".") -> Optional[ReasoningTree]:
     """Load a reasoning tree by ID."""
-    filepath = os.path.join(base_dir, TREE_DIR, f"{tree_id}.json")
-    if not os.path.exists(filepath):
+    filepath = _safe_tree_path(tree_id, base_dir)
+    if not filepath or not os.path.exists(filepath):
         return None
     try:
         with open(filepath, "r", encoding="utf-8") as f:

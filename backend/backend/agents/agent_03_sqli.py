@@ -121,7 +121,8 @@ class SQLiAgent(BaseAgent):
                 data_q = self._q(data_str)
                 out_dir_q = self._q(f"{self.terminal.working_dir}/sqlmap")
                 out = await self.terminal.run(
-                    f"sqlmap -u {action_q} --data={data_q} "
+                    f'sqlmap -u {shlex.quote(form.action)} '
+                    f'--data={shlex.quote(data_str)} '
                     f"--batch --level=3 --risk=2 "
                     f"--threads=4 --random-agent "
                     f"--output-dir={out_dir_q}",
@@ -154,10 +155,10 @@ class SQLiAgent(BaseAgent):
                 data_q = self._q(data_str)
 
                 out = await self.terminal.run(
-                    f"curl -s -w '\\n__STATUS__%{{http_code}}' "
-                    f"-X POST {action_q} "
-                    f"-d {data_q} "
-                    f"--max-time 10"
+                    f'curl -s -w "\\n__STATUS__%{{http_code}}" '
+                    f'-X POST {shlex.quote(form.action)} '
+                    f'-d {shlex.quote(data_str)} '
+                    f'--max-time 10'
                 )
             else:
                 params = "&".join(
@@ -166,7 +167,7 @@ class SQLiAgent(BaseAgent):
                 url = f"{form.action}?{params}" if "?" not in form.action else f"{form.action}&{params}"
                 url_q = self._q(url)
                 out = await self.terminal.run(
-                    f"curl -s -w '\\n__STATUS__%{{http_code}}' --max-time 10 {url_q}"
+                    f'curl -s -w "\\n__STATUS__%{{http_code}}" --max-time 10 {shlex.quote(url)}'
                 )
 
             if not out.stdout:
@@ -264,7 +265,8 @@ class SQLiAgent(BaseAgent):
                 data_q = self._q(data_str)
 
                 out = await self.terminal.run(
-                    f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
+                    f'curl -s -X POST {shlex.quote(form.action)} '
+                    f'-d {shlex.quote(data_str)} --max-time 10'
                 )
             else:
                 continue
@@ -292,7 +294,8 @@ class SQLiAgent(BaseAgent):
             action_q = self._q(form.action)
             data_q = self._q(data_str)
             out = await self.terminal.run(
-                f"curl -s -X POST {action_q} -d {data_q} --max-time 10"
+                f'curl -s -X POST {shlex.quote(form.action)} '
+                f'-d {shlex.quote(data_str)} --max-time 10'
             )
             if out.stdout:
                 cred_match = re.search(
@@ -315,7 +318,7 @@ class SQLiAgent(BaseAgent):
             test_url_q = self._q(test_url)
 
             out = await self.terminal.run(
-                f"curl -s --max-time 10 {test_url_q}"
+                f'curl -s --max-time 10 {shlex.quote(test_url)}'
             )
 
             if out.stdout:
@@ -342,10 +345,10 @@ class SQLiAgent(BaseAgent):
         action_q = self._q(form.action)
         baseline_data_q = self._q(baseline_data)
         baseline = await self.terminal.run(
-            f"curl -s -o /dev/null -w '%{{time_total}}' "
-            f"-X POST {action_q} "
-            f"-d {baseline_data_q} "
-            f"--max-time 15"
+            f'curl -s -o /dev/null -w "%{{time_total}}" '
+            f'-X POST {shlex.quote(form.action)} '
+            f'-d {shlex.quote(baseline_data)} '
+            f'--max-time 15'
         )
 
         try:
@@ -369,10 +372,10 @@ class SQLiAgent(BaseAgent):
         )
         sleep_data_q = self._q(sleep_data)
         out = await self.terminal.run(
-            f"curl -s -o /dev/null -w '%{{time_total}}' "
-            f"-X POST {action_q} "
-            f"-d {sleep_data_q} "
-            f"--max-time 15"
+            f'curl -s -o /dev/null -w "%{{time_total}}" '
+            f'-X POST {shlex.quote(form.action)} '
+            f'-d {shlex.quote(sleep_data)} '
+            f'--max-time 15'
         )
 
         try:

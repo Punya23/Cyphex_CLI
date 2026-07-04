@@ -3,10 +3,21 @@ import re
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 
+# backend/backend has no __init__.py and is added directly to sys.path by the
+# CLI entrypoint (cli_engine.py inserts "backend/backend" before importing the
+# council package), so the rest of the codebase imports this module as a
+# top-level "models" package (e.g. `from models.scan import Vuln`) rather than
+# via the repo-root-qualified "backend.backend.models.scan". Try that
+# canonical form first so we bind the SAME Vuln class the rest of the app
+# uses; fall back to the fully-qualified path for contexts where only the
+# repo root is on sys.path; only give up to Any if neither resolves.
 try:
-    from backend.backend.models.scan import Vuln
+    from models.scan import Vuln
 except ImportError:
-    Vuln = Any
+    try:
+        from backend.backend.models.scan import Vuln
+    except ImportError:
+        Vuln = Any
 
 class RouteTracer:
     """

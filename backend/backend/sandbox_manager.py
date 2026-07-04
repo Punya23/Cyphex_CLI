@@ -23,6 +23,12 @@ import sys
 from datetime import datetime
 from typing import Dict, Optional
 
+# resource limits (RLIMIT_*) are POSIX-only; the module doesn't exist on Windows.
+if os.name != "nt":
+    import resource
+else:
+    resource = None
+
 
 # Active sandbox processes  { sandbox_id: { process, port, path, ... } }
 active_sandboxes: Dict[str, dict] = {}
@@ -31,15 +37,55 @@ active_sandboxes: Dict[str, dict] = {}
 SANDBOX_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sandboxes")
 os.makedirs(SANDBOX_BASE, exist_ok=True)
 
+# ── Hardening constants ──────────────────────────────────────────
+# Zip-bomb guard: max total *uncompressed* bytes we'll extract from an
+# uploaded ZIP. The upload handler in api.py separately caps the raw
+# (compressed-on-disk) upload size; this caps the decompressed size.
+MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+# Resource caps applied to the sandboxed app process on POSIX (see
+# _sandbox_preexec below). These bound a malicious/runaway uploaded app's
+# memory and CPU consumption on the host.
+SANDBOX_MAX_MEMORY_BYTES = 1024 * 1024 * 1024  # 1 GB virtual address space
+SANDBOX_MAX_CPU_SECONDS = 3600  # 1 hour of CPU time
+
 
 def _get_node_env() -> dict:
     """
-    Build an environment dict that includes node/npm in PATH.
-    Handles nvm, homebrew, standard install locations, and Windows.
+    Build an explicit allow-list environment for launching `npm install` and
+    the sandboxed app process.
+
+    IMPORTANT: we deliberately do NOT do `os.environ.copy()` here. The
+    sandbox runs untrusted, uploaded application code — blindly inheriting
+    the full host environment would hand that code any API keys, tokens, or
+    other secrets present in the host process's environment. Instead we
+    allow-list only the handful of variables node/npm plausibly need to
+    locate their binaries and run correctly (PATH, HOME/USERPROFILE for the
+    npm cache, TEMP/TMP for scratch files, a couple of Windows OS-loader
+    variables) plus NODE_ENV.
     """
-    env = os.environ.copy()
-    extra_paths = []
     home = os.path.expanduser("~")
+
+    env: dict = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", home),
+        "NODE_ENV": "production",
+    }
+
+    if os.name == "nt":
+        # Windows needs a few more variables for node/npm and the OS loader
+        # to function at all — none of these are secrets.
+        for var in ("SystemRoot", "SystemDrive", "TEMP", "TMP", "APPDATA", "USERPROFILE", "ComSpec"):
+            val = os.environ.get(var)
+            if val:
+                env[var] = val
+    else:
+        for var in ("TMPDIR", "LANG", "LC_ALL"):
+            val = os.environ.get(var)
+            if val:
+                env[var] = val
+
+    extra_paths = []
 
     if os.name == "nt":
         # Windows: add common Node.js install locations
@@ -71,6 +117,34 @@ def _get_node_env() -> dict:
 
 # Pre-compute once at import time
 _NODE_ENV = _get_node_env()
+
+
+def _sandbox_preexec():
+    """
+    preexec_fn for the sandboxed app subprocess (POSIX only).
+
+    Combines the existing "own session" setup (so the whole process group
+    can be killed on stop_sandbox) with resource limits that bound how much
+    memory and CPU time a malicious/runaway uploaded app can consume on the
+    host. Both must run in the *same* preexec callback since Popen only
+    accepts one.
+    """
+    os.setsid()
+    if resource is not None:
+        try:
+            resource.setrlimit(
+                resource.RLIMIT_AS,
+                (SANDBOX_MAX_MEMORY_BYTES, SANDBOX_MAX_MEMORY_BYTES),
+            )
+        except Exception:
+            pass
+        try:
+            resource.setrlimit(
+                resource.RLIMIT_CPU,
+                (SANDBOX_MAX_CPU_SECONDS, SANDBOX_MAX_CPU_SECONDS),
+            )
+        except Exception:
+            pass
 
 
 def _robust_rmtree(path: str, retries: int = 3):
@@ -112,6 +186,83 @@ def _robust_rmtree(path: str, retries: int = 3):
                 traceback.print_exc()
 
 
+def safe_extract_zip(zip_path: str, dest_dir: str) -> Optional[dict]:
+    """
+    Safely extract a ZIP file into dest_dir.
+
+    Guards against:
+      - Zip-slip: archive members whose resolved path would land outside
+        dest_dir (via "../" traversal or an absolute path).
+      - Symlink members: archive entries that are themselves symlinks
+        (which could point outside dest_dir once followed/created).
+      - Zip bombs: archives whose total *uncompressed* size exceeds
+        MAX_UNCOMPRESSED_BYTES.
+
+    Returns None on success. Returns an error dict (same shape used
+    elsewhere in this module) if the archive is rejected — in which case
+    NOTHING is extracted.
+    """
+    dest_root = os.path.realpath(dest_dir)
+
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            infolist = zf.infolist()
+
+            total_uncompressed = 0
+            for member in infolist:
+                name = member.filename
+                normalized = name.replace("\\", "/")
+
+                # Reject path traversal via ".." path segments.
+                if any(part == ".." for part in normalized.split("/")):
+                    return {"error": f"Refusing to extract ZIP: unsafe path in archive entry '{name}'"}
+
+                # Reject anything that resolves outside dest_dir (belt-and-braces
+                # in case of absolute paths, drive letters, etc.).
+                dest = os.path.realpath(os.path.join(dest_dir, name))
+                if dest != dest_root and not dest.startswith(dest_root + os.sep):
+                    return {"error": f"Refusing to extract ZIP: path traversal detected in entry '{name}'"}
+
+                # Reject symlink entries — the unix file-type bits live in the
+                # high 16 bits of external_attr; 0o120000 (S_IFLNK) marks a symlink.
+                unix_mode = (member.external_attr >> 16) & 0o170000
+                if unix_mode == 0o120000:
+                    return {"error": f"Refusing to extract ZIP: symlink entry not allowed ('{name}')"}
+
+                total_uncompressed += member.file_size
+                if total_uncompressed > MAX_UNCOMPRESSED_BYTES:
+                    return {
+                        "error": (
+                            "Refusing to extract ZIP: uncompressed size exceeds "
+                            f"{MAX_UNCOMPRESSED_BYTES // (1024 * 1024)}MB limit"
+                        )
+                    }
+
+            # All members validated as safe — extract the whole archive.
+            zf.extractall(dest_dir)
+    except zipfile.BadZipFile:
+        return {"error": "Invalid ZIP file"}
+
+    return None
+
+
+def flatten_single_top_level(dest_dir: str):
+    """
+    If dest_dir contains exactly one entry and it's a directory, move that
+    directory's contents up into dest_dir and remove it.
+
+    Many ZIP exports (e.g. GitHub's "Download ZIP") wrap the project in a
+    single top-level folder; this normalizes that away so entry-file
+    detection (package.json, app.py, etc.) works against dest_dir directly.
+    """
+    entries = os.listdir(dest_dir)
+    if len(entries) == 1 and os.path.isdir(os.path.join(dest_dir, entries[0])):
+        inner = os.path.join(dest_dir, entries[0])
+        for item in os.listdir(inner):
+            shutil.move(os.path.join(inner, item), dest_dir)
+        os.rmdir(inner)
+
+
 async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dict:
     """
     Extract a ZIP file, install deps, and start the sandbox app.
@@ -125,23 +276,14 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         _robust_rmtree(sandbox_dir)
     os.makedirs(sandbox_dir, exist_ok=True)
 
-    # ── Extract ZIP ──────────────────────────────────────────
-    try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            _safe_extract_zip(zf, sandbox_dir)
-    except zipfile.BadZipFile:
-        return {"error": "Invalid ZIP file", "sandbox_id": sandbox_id}
-    except ValueError as e:
-        return {"error": f"Unsafe ZIP content: {e}", "sandbox_id": sandbox_id}
+    # ── Extract ZIP (zip-slip / zip-bomb / symlink safe) ──────
+    extract_error = safe_extract_zip(zip_path, sandbox_dir)
+    if extract_error is not None:
+        extract_error.setdefault("sandbox_id", sandbox_id)
+        return extract_error
 
     # If the ZIP had a single top-level folder, descend into it
-    entries = os.listdir(sandbox_dir)
-    if len(entries) == 1 and os.path.isdir(os.path.join(sandbox_dir, entries[0])):
-        inner = os.path.join(sandbox_dir, entries[0])
-        # Move contents up
-        for item in os.listdir(inner):
-            shutil.move(os.path.join(inner, item), sandbox_dir)
-        os.rmdir(inner)
+    flatten_single_top_level(sandbox_dir)
 
     # ── Detect app type and entry file ───────────────────────
     app_file = _detect_entry_file(sandbox_dir)
@@ -175,7 +317,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         npm_cmd_clean = npm_cmd.strip('"')
 
         install_result = await _run_cmd(
-            [npm_cmd_clean, "install", "--no-audit", "--no-fund"],
+            [npm_cmd_clean, "install", "--ignore-scripts", "--no-audit", "--no-fund"],
             cwd=sandbox_dir,
             timeout=180,
         )
@@ -232,8 +374,7 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        shell=False,
-        preexec_fn=os.setsid if os.name != 'nt' else None,
+        preexec_fn=_sandbox_preexec if os.name != 'nt' else None,
     )
 
     # Wait for the server to start (native modules like sqlite3 can be slow)

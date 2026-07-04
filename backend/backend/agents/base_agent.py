@@ -10,6 +10,7 @@ Each agent gets:
 """
 
 import json
+import shlex
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime
@@ -26,6 +27,13 @@ from live_log_queue import log_queue
 
 class BaseAgent(ABC):
     """Base class all CYPHEX agents inherit from."""
+
+    # Binaries the autonomous exploit loop is allowed to execute. This must
+    # match what the system prompt in `autonomous_exploit_loop` tells the
+    # model it can use — the model's output is untrusted (it can be steered
+    # by attacker-controlled content reflected back from the scanned
+    # target, i.e. indirect prompt injection) so it is enforced here too.
+    ALLOWED_EXPLOIT_COMMANDS = {"curl", "grep"}
 
     def __init__(
         self,
@@ -314,6 +322,80 @@ class BaseAgent(ABC):
                     pass
         return None
 
+    def _validate_exploit_command(self, cmd: str) -> tuple[bool, str]:
+        """
+        Enforce the curl/grep-only allowlist promised to the model in the
+        autonomous exploit loop's system prompt.
+
+        The command string is LLM-generated and the conversation feeding it
+        includes raw content reflected back from the scanned target, so a
+        malicious/compromised target can attempt indirect prompt injection
+        to get arbitrary shell commands executed on the CYPHEX host. Never
+        trust `cmd` — parse it and check every pipeline/command stage's
+        binary against ALLOWED_EXPLOIT_COMMANDS before it is ever handed to
+        the real shell.
+
+        Note: plain `shlex.split` is a POSIX-ish *word* tokenizer, not a
+        full shell grammar — it does NOT treat `;`, `&&`, `||`, `&`, `|` as
+        operators when they aren't surrounded by whitespace (e.g.
+        `"curl x;rm -rf /"` would come back as a single token `"x;rm"`,
+        silently hiding the second command from a naive argv[0] check).
+        We instead use `shlex.shlex(..., punctuation_chars=True)`, which
+        always splits those shell control-operator characters into their
+        own tokens — matching real bash's tokenization — while still
+        respecting quoting. Every resulting command stage's binary is then
+        checked against ALLOWED_EXPLOIT_COMMANDS. We also reject any token
+        containing `$(` or a backtick (command/process substitution),
+        since real bash — which `terminal.run()` ultimately shells out to
+        — evaluates those regardless of quoting, and they are never needed
+        for the curl/grep usage the system prompt describes. Together this
+        closes the two main ways a single allowlisted `argv[0]` check
+        could otherwise be bypassed to run a second, non-allowlisted
+        command.
+
+        Returns (is_valid, reason). If not valid, `reason` explains why so
+        the caller can log it and skip the step instead of crashing.
+        """
+        try:
+            lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError as e:
+            return False, f"could not parse command ({e})"
+
+        if not tokens:
+            return False, "empty command"
+
+        for tok in tokens:
+            if "$(" in tok or "`" in tok:
+                return False, (
+                    f"token {tok!r} contains command/process substitution, "
+                    f"which is never required for curl/grep"
+                )
+
+        # Split on shell control-operator tokens so `curl ... | grep ...`,
+        # `curl ...; rm -rf /`, `curl ... && evil`, etc. are all validated
+        # stage-by-stage rather than only checking the first command.
+        CONTROL_OPERATORS = {"|", ";", "&&", "||", "&"}
+        stages: list[list[str]] = [[]]
+        for tok in tokens:
+            if tok in CONTROL_OPERATORS:
+                stages.append([])
+            else:
+                stages[-1].append(tok)
+
+        for stage in stages:
+            if not stage:
+                return False, "empty command stage (e.g. trailing/leading operator)"
+            binary = stage[0]
+            if binary not in self.ALLOWED_EXPLOIT_COMMANDS:
+                return False, (
+                    f"'{binary}' is not in the allowlist "
+                    f"{sorted(self.ALLOWED_EXPLOIT_COMMANDS)}"
+                )
+
+        return True, ""
+
     async def autonomous_exploit_loop(self, context: ScanContext, task_description: str, max_steps: int = 5) -> None:
         """
         AI-driven ReAct loop for advanced exploitation using the Cyphex Virtual Subsystem (CVS).
@@ -379,7 +461,22 @@ If you need more information, generate the next command to gather it.
             cmd = data["command"]
             if not cmd.strip():
                 break
-                
+
+            # Enforce the curl/grep-only allowlist before touching the real
+            # shell — refuse and skip rather than crash the whole scan.
+            is_valid, reason = self._validate_exploit_command(cmd)
+            if not is_valid:
+                await self.log(
+                    f"Refusing to execute disallowed command ({reason}): {cmd!r}",
+                    "danger",
+                )
+                conversation_history += (
+                    f"\n$ {cmd}\n[CYPHEX] Command rejected by allowlist — {reason}. "
+                    f"Only {sorted(self.ALLOWED_EXPLOIT_COMMANDS)} are permitted.\n"
+                )
+                await asyncio.sleep(1)
+                continue
+
             # Execute command
             result = await self.terminal.run(cmd)
             

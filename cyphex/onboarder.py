@@ -147,13 +147,22 @@ def onboard_project(repo_url: str = None, local_path: str = None) -> str:
 
     # ── Step 1: Resolve target directory ──
     if repo_url:
+        # Defense-in-depth against git argument/transport injection: only
+        # accept plain https:// URLs, and reject anything that could be
+        # parsed as a CLI option (starts with "-").
+        if not repo_url.startswith("https://") or repo_url.startswith("-"):
+            print(f"  {C.R}[X] Refusing to clone: repo URL must be a plain https:// URL ({repo_url!r}){C.RST}")
+            return None
+
         sandbox_name = f"onboard_{int(time.time())}"
         target_dir = os.path.join(workspace_dir, "backend", "sandboxes", sandbox_name)
         print(f"  {C.B}[1/4] Cloning repository...{C.RST}")
         print(f"  {C.DIM}$ git clone --depth 1 {repo_url}{C.RST}")
+        clone_env = os.environ.copy()
+        clone_env["GIT_ALLOW_PROTOCOL"] = "https"
         res = subprocess.run(
-            ["git", "clone", "--depth", "1", repo_url, target_dir],
-            capture_output=True, text=True
+            ["git", "clone", "--depth", "1", "--", repo_url, target_dir],
+            capture_output=True, text=True, env=clone_env
         )
         if res.returncode != 0:
             print(f"  {C.R}[X] Clone failed: {res.stderr.strip()}{C.RST}")
@@ -221,7 +230,7 @@ def onboard_project(repo_url: str = None, local_path: str = None) -> str:
         print(f"  {C.DIM}$ npm install (in {os.path.relpath(app_dir, workspace_dir)}){C.RST}")
         subprocess.run(
             ["npm", "install", "--ignore-scripts"],
-            cwd=app_dir, shell=True, capture_output=True
+            cwd=app_dir, capture_output=True
         )
     print(f"  {C.G}[OK] Dependencies ready.{C.RST}\n")
 

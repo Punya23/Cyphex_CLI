@@ -80,6 +80,13 @@ try:
 except ImportError as _e:
     PATCH_V2_AVAILABLE = False
 
+# ── Cross-project patch memory (cognee, optional) ──
+try:
+    from backend.rag import cognee_memory
+    COGNEE_AVAILABLE = cognee_memory.is_available()
+except ImportError:
+    COGNEE_AVAILABLE = False
+
 # ── Oracle Agent-Reasoning + Session Memory ──
 try:
     from backend.reasoning.oracle_adapter import get_reasoner, get_strategy_info, AGENT_REASONING_AVAILABLE
@@ -586,16 +593,32 @@ class CyphexEngine:
 
         if repo_url:
             print(f"  Cloning {C.CY}{repo_url}{C.RST} (branch: {branch})")
+
+            # --- Security: validate repo_url/branch before touching subprocess ---
+            # Reject dangerous git transports (e.g. `ext::`, `fd::`, `file://`) that
+            # can be abused for command execution or local file disclosure, and
+            # reject leading-dash values that git would otherwise parse as options
+            # instead of positional arguments (argument injection).
+            if repo_url.startswith("-") or (branch and branch.startswith("-")):
+                print(f"  {C.R}[ERR]{C.RST} Invalid repo URL or branch: values starting with '-' are not allowed.")
+                return None
+            if not (repo_url.startswith("https://") or repo_url.startswith("git@") or repo_url.startswith("ssh://")):
+                print(f"  {C.R}[ERR]{C.RST} Unsupported repo URL scheme. Only https://, git@, and ssh:// URLs are allowed.")
+                return None
+
+            # Defense-in-depth: even if a disallowed transport slips through,
+            # tell git itself to refuse anything but the protocols we support.
+            git_env = {**os.environ, "GIT_ALLOW_PROTOCOL": "https:ssh:git"}
             try:
                 proc = subprocess.run(
-                    ["git", "clone", "--depth", "1", "-b", branch, repo_url, dest],
-                    capture_output=True, text=True, timeout=120
+                    ["git", "clone", "--depth", "1", "-b", branch, "--", repo_url, dest],
+                    capture_output=True, text=True, timeout=120, env=git_env
                 )
                 if proc.returncode != 0:
                     # Try without branch
                     proc = subprocess.run(
-                        ["git", "clone", "--depth", "1", repo_url, dest],
-                        capture_output=True, text=True, timeout=120
+                        ["git", "clone", "--depth", "1", "--", repo_url, dest],
+                        capture_output=True, text=True, timeout=120, env=git_env
                     )
                 if proc.returncode != 0:
                     print(f"  {C.R}[ERR]{C.RST} Git clone failed: {proc.stderr[:200]}")
@@ -2301,11 +2324,14 @@ class CyphexEngine:
         verified_count = 0
         template_count = 0
         skipped = 0
-        reflexion_succeeded_count = 0
-        regression_tests_emitted = 0
-
-        manifest = PatchManifest(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
-        patch_memory = PatchMemory(self.source_dir) if (PATCH_PIPELINE_AVAILABLE and self.source_dir) else None
+        # Identity (not path-substring) set of vulnerabilities that were both patched
+        # AND verified with a PASS verdict. Used later to compute the "remaining"
+        # vulnerability list / after-patch score, so that (a) patching ONE finding in
+        # a file can't silently clear every OTHER finding in that same file, and
+        # (b) an UNVERIFIABLE (inconclusive) verdict never counts as "fixed" — only
+        # PASS does. Keyed on the Vuln object's identity since `p["vuln"] is v` for
+        # the same object drawn from `vulns` below.
+        remediated_vuln_ids = set()
 
 
 
@@ -2479,10 +2505,22 @@ class CyphexEngine:
                             if repo_pattern:
                                 enriched_code += f"\n\n// REPO'S OWN SECURE PATTERN (use this style):\n{repo_pattern[:300]}"
 
+                    memory_hint = ""
+                    if COGNEE_AVAILABLE:
+                        try:
+                            hits = await asyncio.wait_for(
+                                cognee_memory.recall_similar_fixes(p["cwe"], p.get("snippet_fn", p["snippet"])),
+                                timeout=cyphex_config.COGNEE_RECALL_TIMEOUT_S,
+                            )
+                            memory_hint = cognee_memory.format_hint(hits)
+                        except Exception:
+                            memory_hint = ""
+
                     vuln_inputs.append({
                         "vuln_name": p["vuln_type"], "cwe": p["cwe"],
                         "vulnerable_code": enriched_code, "file_path": p["rel_path"],
                         "severity": p["vuln"].severity,
+                        "memory_hint": memory_hint,
                     })
 
                 # Show context enrichment panel
@@ -2649,7 +2687,12 @@ class CyphexEngine:
             original_content = open(p["filepath"], "r", encoding="utf-8", errors="ignore").read()
 
             if use_v2:
-                apply_result = apply_patch(p["filepath"], p["line_num"], p["line_num"], fixed)
+                # Apply over the SAME 1-indexed inclusive range that was shown to the
+                # operator in the "Vulnerable Code" / diff panels above (start_l/end_l,
+                # 0-indexed with end_l exclusive) — not just the single vuln line —
+                # otherwise the other lines in the displayed window are left untouched
+                # while `fixed` (which may span multiple lines) only replaces one line.
+                apply_result = apply_patch(p["filepath"], p["start_l"] + 1, p["end_l"], fixed)
                 if not apply_result.success:
                     console.print(f"[bold red][REJECTED][/bold red] Apply failed: {apply_result.error}")
                     skipped += 1
@@ -2729,6 +2772,8 @@ class CyphexEngine:
                     continue
 
                 verified_count += 1 if vr.verdict == "PASS" else 0
+                if vr.verdict == "PASS":
+                    remediated_vuln_ids.add(id(v))
 
                 # Record in manifest
                 if manifest:
@@ -2743,6 +2788,20 @@ class CyphexEngine:
                 # Store in patch memory for future reuse
                 if patch_memory and vr.verdict == "PASS":
                     patch_memory.store(p["cwe"], p.get("snippet_fn", p["snippet"]), fixed, fix_source, verified=True)
+                    if COGNEE_AVAILABLE:
+                        try:
+                            await asyncio.wait_for(
+                                cognee_memory.remember_fix(
+                                    cwe=p["cwe"],
+                                    vulnerable_code=p.get("snippet_fn", p["snippet"]),
+                                    fixed_code=fixed,
+                                    project_id=cognee_memory.project_id_for(getattr(self, "repo_url", "") or "", self.source_dir),
+                                    framework=framework,
+                                ),
+                                timeout=cyphex_config.COGNEE_REMEMBER_TIMEOUT_S,
+                            )
+                        except Exception as e:
+                            console.print(f"[dim]cognee remember skipped: {e}[/dim]")
 
                 # ── Record in session memory ──
                 if session and REASONING_AVAILABLE:
@@ -2843,14 +2902,12 @@ class CyphexEngine:
 
 
         # ── After-Patching Score ──
-        remaining_vulns = len(vulns) - len(patched_files)
-        # Recalculate severity counts after patching
-        patched_set = set(patched_files)
-        remaining = [v for v in vulns
-                     if not any(v.endpoint and p_entry in v.endpoint for p_entry in patched_set)]
-        # Guard: if nothing was patched, remaining IS the full vuln list
-        if not patched_files:
-            remaining = list(vulns)
+        # Match by vulnerability identity (remediated_vuln_ids), NOT a substring
+        # match against file paths — a substring match would incorrectly treat
+        # every OTHER finding in a patched file as "fixed" too, and would count
+        # UNVERIFIABLE patches as remediated even though they were never confirmed.
+        remaining = [v for v in vulns if id(v) not in remediated_vuln_ids]
+        remaining_vulns = len(remaining)
         crit_a = sum(1 for v in remaining if v.severity == "Critical")
         high_a = sum(1 for v in remaining if v.severity == "High")
         med_a  = sum(1 for v in remaining if v.severity == "Medium")

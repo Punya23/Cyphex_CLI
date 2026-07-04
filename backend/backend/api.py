@@ -16,6 +16,7 @@ Endpoints:
 import asyncio
 import json
 import os
+import shutil
 import sys
 import uuid
 import tempfile
@@ -33,7 +34,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scan_orchestrator import ScanOrchestrator
 from config import config
-from sandbox_manager import deploy_sandbox, list_sandboxes, stop_sandbox
+from auth import get_or_create_api_key, install_api_key_middleware, verify_ws_key
+from sandbox_manager import (
+    deploy_sandbox,
+    list_sandboxes,
+    stop_sandbox,
+    safe_extract_zip,
+    flatten_single_top_level,
+)
+from cyphex.docker_sandbox import docker_available, deploy_docker_sandbox
+
+# Maximum size (bytes) accepted for an uploaded sandbox ZIP. Enforced while
+# streaming the upload to disk (see upload_sandbox) so we never write an
+# unbounded amount of attacker-controlled data to disk.
+MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 # ═══════════════════════════════════════════════════════════════
 #  FastAPI Application
@@ -45,12 +59,27 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# CORS — allow the Vite dev server
-_cors_origins = [o.strip() for o in config.API_CORS_ORIGINS.split(",") if o.strip()]
+# API-key auth — registered BEFORE CORSMiddleware below. Starlette wraps
+# middleware so the LAST one added ends up OUTERMOST (sees the request
+# first); CORS must be outermost so it can answer OPTIONS preflight
+# requests directly, before they ever reach this check (verified: a
+# middleware added before CORSMiddleware never sees preflight requests
+# at all — CORS short-circuits them).
+install_api_key_middleware(app)
+
+# CORS — allow only the Vite dev server (or whatever CYPHEX_CORS_ORIGINS
+# lists), never a wildcard. Credentials aren't needed since auth is via
+# the X-API-Key header, not cookies.
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get(
+        "CYPHEX_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins or ["http://localhost:5173", "http://127.0.0.1:5173"],
-    allow_credentials=False,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -242,19 +271,32 @@ async def upload_sandbox(request: Request, file: UploadFile = File(...)):
     total_bytes = 0
 
     try:
+        bytes_written = 0
         with open(zip_path, "wb") as f:
-            # Stream-write in chunks to handle large files
+            # Stream-write in chunks to handle large files, enforcing
+            # MAX_UPLOAD_BYTES so we never buffer/write an unbounded upload.
             while True:
                 chunk = await file.read(1024 * 1024)  # 1 MB chunks
                 if not chunk:
                     break
-                total_bytes += len(chunk)
-                if total_bytes > max_bytes:
-                    return JSONResponse(
-                        status_code=413,
-                        content={"error": f"Upload too large. Limit is {config.MAX_UPLOAD_MB} MB."},
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise ValueError(
+                        f"Uploaded file exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit"
                     )
                 f.write(chunk)
+    except ValueError as e:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        if os.path.exists(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except OSError:
+                pass
+        return JSONResponse(
+            status_code=413,
+            content={"error": str(e)},
+        )
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -262,8 +304,23 @@ async def upload_sandbox(request: Request, file: UploadFile = File(...)):
         )
 
     try:
-        # Deploy using sandbox_manager
-        sandbox_meta = await deploy_sandbox(zip_path)
+        # Prefer the isolated Docker sandbox when Docker is available; only
+        # fall back to running the untrusted upload directly on the host
+        # (native sandbox) when Docker isn't installed/running.
+        if docker_available():
+            extract_dir = tempfile.mkdtemp()
+            try:
+                extract_error = safe_extract_zip(zip_path, extract_dir)
+                if extract_error is not None:
+                    return JSONResponse(status_code=400, content=extract_error)
+
+                flatten_single_top_level(extract_dir)
+
+                sandbox_meta = await deploy_docker_sandbox(extract_dir)
+            finally:
+                shutil.rmtree(extract_dir, ignore_errors=True)
+        else:
+            sandbox_meta = await deploy_sandbox(zip_path)
 
         if "error" in sandbox_meta:
             return JSONResponse(
@@ -313,16 +370,9 @@ async def kill_sandbox(sandbox_id: str, request: Request):
 @app.websocket("/ws/{scan_id}")
 async def websocket_endpoint(websocket: WebSocket, scan_id: str):
     """Real-time event stream for a scan."""
-    token = (config.API_AUTH_TOKEN or "").strip()
-    client_host = websocket.client.host if websocket.client else None
-    if token:
-        if websocket.headers.get("x-api-key", "") != token:
-            await websocket.close(code=1008, reason="Invalid API key")
-            return
-    elif not _is_localhost_host(client_host):
-        await websocket.close(code=1008, reason="Remote access disabled")
+    if not verify_ws_key(websocket):
+        await websocket.close(code=4401)
         return
-
     await websocket.accept()
 
     if scan_id not in ws_clients:
@@ -353,16 +403,9 @@ async def sandbox_websocket(websocket: WebSocket, sandbox_id: str):
     Real-time terminal feed for a sandbox.
     Streams all scan terminal_log events to connected clients.
     """
-    token = (config.API_AUTH_TOKEN or "").strip()
-    client_host = websocket.client.host if websocket.client else None
-    if token:
-        if websocket.headers.get("x-api-key", "") != token:
-            await websocket.close(code=1008, reason="Invalid API key")
-            return
-    elif not _is_localhost_host(client_host):
-        await websocket.close(code=1008, reason="Remote access disabled")
+    if not verify_ws_key(websocket):
+        await websocket.close(code=4401)
         return
-
     await websocket.accept()
 
     if sandbox_id not in sandbox_ws_clients:
@@ -435,11 +478,19 @@ async def _run_scan_task(scan_id: str, target: str, cerebras_key: str):
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n  🚀 CYPHEX API starting on http://{config.API_BIND_HOST}:{config.API_BIND_PORT}\n")
+
+    _host = os.environ.get("CYPHEX_API_HOST", "127.0.0.1")
+    _port = int(os.environ.get("CYPHEX_API_PORT", "8000"))
+    _reload = os.environ.get("CYPHEX_API_RELOAD", "true").lower() == "true"
+
+    print(f"\n  🚀 CYPHEX API starting on http://{_host}:{_port}")
+    print(f"  🔑 API key: {get_or_create_api_key()}")
+    print(f"     (persisted at ~/.cyphex/api_key — set CYPHEX_API_KEY to override)\n")
+
     uvicorn.run(
         "api:app",
-        host=config.API_BIND_HOST,
-        port=config.API_BIND_PORT,
-        reload=config.API_RELOAD,
+        host=_host,
+        port=_port,
+        reload=_reload,
         log_level="info",
     )

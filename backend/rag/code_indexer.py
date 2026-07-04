@@ -34,9 +34,38 @@ SOURCE_EXTENSIONS = {
     ".py", ".php", ".rb", ".go", ".java", ".rs",
     ".html", ".ejs", ".hbs", ".pug",
     ".json", ".yaml", ".yml", ".toml",
-    ".env", ".env.example",
     ".sql",
 }
+
+# Filenames that commonly hold secrets — NEVER index their content, even though
+# the "unknown extension" dotfile fallback below would otherwise let them
+# through. Indexed content is fed into LLM prompts and logs, so a `.env` file
+# ending up here would leak real credentials to the model/API/logs.
+_SECRET_FILENAME_RE = re.compile(
+    r"""^(
+        \.env(\..*)?              # .env, .env.local, .env.production, ...
+        |id_rsa(\.pub)?           # SSH keys
+        |id_dsa(\.pub)?
+        |id_ecdsa(\.pub)?
+        |id_ed25519(\.pub)?
+        |credentials\.json
+        |\.npmrc
+        |\.netrc
+        |\.htpasswd
+        |\.pgpass
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+_SECRET_SUFFIXES = {".pem", ".key"}
+
+
+def _is_secret_file(fname: str) -> bool:
+    """True if this filename is a well-known secret-bearing file that must
+    never be read into the index/prompt/log pipeline."""
+    if Path(fname).suffix.lower() in _SECRET_SUFFIXES:
+        return True
+    return bool(_SECRET_FILENAME_RE.match(fname))
+
 
 MAX_FILE_SIZE = 512 * 1024  # 512 KB
 
@@ -57,6 +86,11 @@ class CodeIndexer:
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
 
             for fname in filenames:
+                # Secret-bearing files are excluded outright — never read their
+                # content into the index (see _is_secret_file docstring).
+                if _is_secret_file(fname):
+                    continue
+
                 ext = Path(fname).suffix.lower()
                 if ext in SKIP_EXTENSIONS:
                     continue
