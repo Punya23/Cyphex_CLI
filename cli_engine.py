@@ -399,7 +399,9 @@ class CyphexEngine:
         elapsed = time.time() - self.start_ts if self.start_ts else 0.0
         mode = "JUDGE" if self.judge_mode else "SCAN"
         step_num, step_total = num.split("/")
-        done = int(step_num)
+        # step_num may be '2b', '3', etc — strip non-digit suffix for progress bar
+        import re as _re
+        done = int(_re.sub(r"[^0-9]", "", step_num) or "0")
         total = int(step_total)
 
         if SOC_UI:
@@ -408,7 +410,7 @@ class CyphexEngine:
 
         # Fallback: original ANSI rendering
         step_icons = {
-            "1": "📥", "2": "🔍", "3": "📦", "4": "⚡",
+            "1": "📥", "2": "🔍", "2b": "🌐", "3": "📦", "4": "⚡",
             "5": "🧬", "6": "⚔️", "7": "📊", "8": "🔧",
         }
         icon = step_icons.get(step_num, "◆")
