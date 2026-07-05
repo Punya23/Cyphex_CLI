@@ -277,7 +277,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
         self._reasoning_calls = 0
 
     async def _call(self, model: str, system: str, prompt: str, task_name: str = "Reasoning",
-                    severity: str = "", cwe: str = "") -> dict:
+                    severity: str = "", cwe: str = "", temperature: float = 0.1) -> dict:
         """
         Call a model and return parsed JSON.
         Routes through Oracle agent-reasoning when available (adds CoT/reflection).
