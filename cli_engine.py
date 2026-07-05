@@ -175,7 +175,8 @@ class CyphexEngine:
     async def run(self, repo_url=None, local_path=None, source_path=None,
                   target_url=None, branch="main",
                   generations=10, output_file=None, auto_patch=True,
-                  judge_mode=False, judge=False, non_interactive=False):
+                  judge_mode=False, judge=False, non_interactive=False,
+                  network_scan=False):
         self.start_ts = time.time()
         self.repo_url = repo_url
         self.local_path = local_path
@@ -267,14 +268,19 @@ class CyphexEngine:
         except ImportError:
             pass  # cyphex package not installed
 
+        # Step 2b: Network Security Scan (optional, --network flag)
+        if network_scan:
+            self._step("2b/9", "NETWORK SECURITY SCAN")
+            await self._run_network_scan()
+
         # Step 3: Deploy sandbox
-        self._step("3/8", "DEPLOYING SANDBOX")
+        self._step("3/9", "DEPLOYING SANDBOX")
         target_url = await self._deploy(self.source_dir)
         if not target_url:
             return
 
         # Step 4: Dynamic scan (crawl + attack)
-        self._step("4/8", "DYNAMIC VULNERABILITY SCAN")
+        self._step("4/9", "DYNAMIC VULNERABILITY SCAN")
         if target_url == "offline_mode":
             print(f"  {C.Y}[WARN] Sandbox deployment failed. Skipping dynamic scan. Proceeding with static vulnerabilities.{C.RST}")
             self.context = ScanContext(target_url="http://offline.local")
@@ -287,16 +293,21 @@ class CyphexEngine:
             self.context = await self._dynamic_scan(target_url)
         self.context.confirmed_vulns.extend(file_vulns)
 
+        # Merge network findings (if netmap ran in step 2b)
+        if hasattr(self, "_network_vulns") and self._network_vulns:
+            self.context.confirmed_vulns.extend(self._network_vulns)
+            print(f"  {C.G}[OK]{C.RST} +{len(self._network_vulns)} network vulnerability findings merged")
+
         # Step 5: Build genome + evolve
-        self._step("5/8", "IMMUNE SYSTEM - BUILD GENOME")
+        self._step("5/9", "IMMUNE SYSTEM - BUILD GENOME")
         self.genome = await self._build_and_evolve(self.context, generations)
 
         # Step 6: AI Attack Simulation
-        self._step("6/8", "AI ATTACK SIMULATION - GENOME DEFENSE")
+        self._step("6/9", "AI ATTACK SIMULATION - GENOME DEFENSE")
         self._simulate_attacks()
 
         # Step 7: Report
-        self._step("7/8", "SECURITY REPORT")
+        self._step("7/9", "SECURITY REPORT")
         report = await self._print_report(time.time() - self.start_ts)
         if output_file:
             self._save_report(report, output_file)
@@ -305,7 +316,7 @@ class CyphexEngine:
 
         # Step 8: Patch workflow
         if auto_patch and self.context.confirmed_vulns:
-            self._step("8/8", "AI PATCH + VERIFY  (RAG · Council · Reflexion · Memory)")
+            self._step("8/9", "AI PATCH + VERIFY  (RAG · Council · Reflexion · Memory)")
             await self._patch_workflow()
 
         # Cleanup
@@ -1812,6 +1823,111 @@ class CyphexEngine:
             print(f"\n  {C.G}[SCAN][OK]{C.RST} endpoints={len(context.all_endpoints)} forms={len(forms_found)} vulns={len(context.confirmed_vulns)}")
 
         return context
+
+    async def _run_network_scan(self) -> None:
+        """
+        Network Security step (Step 2b/9) — runs when --network flag is set.
+        Discovers local subnet, port-scans all live hosts, maps open ports to
+        known vulnerabilities, and stores findings in self._network_vulns so
+        they get merged into confirmed_vulns after the DAST step.
+        """
+        self._network_vulns: list = []
+
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
+            from backend.network.discovery import NetworkDiscovery
+            from backend.network.vuln_mapper import NetworkVulnMapper
+            from backend.network.network_genome import NetworkBehavioralGenome
+        except ImportError as e:
+            print(f"  {C.Y}[SKIP]{C.RST} Network scan unavailable: {e}")
+            print(f"  {C.DIM}Run: pip install networkx scikit-learn joblib{C.RST}")
+            return
+
+        try:
+            # ── Discovery ──────────────────────────────────────────────────────
+            disc = NetworkDiscovery(timeout=0.6, max_concurrent=192)
+            net_map = await disc.discover("auto")
+            live = net_map.live_hosts()
+
+            if not live:
+                print(f"  {C.Y}[WARN]{C.RST} No live hosts found on local subnet")
+                return
+
+            print(f"  {C.G}[OK]{C.RST}  {len(live)} live hosts discovered")
+
+            # ── Vuln mapping ────────────────────────────────────────────────────
+            mapper = NetworkVulnMapper()
+            net_vulns = await mapper.map(net_map, active_checks=True)
+
+            # ── Train genome baselines (synthetic) ─────────────────────────────
+            genome = NetworkBehavioralGenome()
+            for host in live:
+                genome.train(host.ip, windows=[])
+            genome.save()
+
+            # ── Print summary table ─────────────────────────────────────────────
+            _SEV_COL = {
+                "Critical": C.R, "High": "\033[91m", "Medium": C.Y,
+                "Low": C.B, "Info": C.DIM,
+            }
+            print(f"\n  {'HOST':<18} {'HOSTNAME':<20} {'RISK':<8} PORTS")
+            print("  " + "─" * 68)
+            for host in net_map.hosts_by_risk():
+                if not host.is_up:
+                    continue
+                ports_str = " ".join(str(p.port) for p in host.open_ports[:7])
+                if len(host.open_ports) > 7:
+                    ports_str += f" +{len(host.open_ports) - 7}"
+                risk_pct = int(host.risk_score * 100)
+                risk_col = C.R if risk_pct >= 75 else C.Y if risk_pct >= 40 else C.G
+                print(
+                    f"  {host.ip:<18} {host.hostname[:19]:<20}"
+                    f" {risk_col}{risk_pct}%{C.RST}     {C.DIM}{ports_str}{C.RST}"
+                )
+
+            if net_vulns:
+                print(f"\n  ◈ Network findings: {len(net_vulns)}")
+                crit = sum(1 for v in net_vulns if v.severity == "Critical")
+                high = sum(1 for v in net_vulns if v.severity == "High")
+                confirmed = sum(1 for v in net_vulns if v.confirmed)
+                if crit:
+                    print(f"    {C.R}● {crit} Critical{C.RST}", end="")
+                if high:
+                    print(f"  {C.Y}● {high} High{C.RST}", end="")
+                if confirmed:
+                    print(f"  {C.G}● {confirmed} confirmed via active probe{C.RST}", end="")
+                print()
+                for nv in net_vulns[:8]:
+                    col = _SEV_COL.get(nv.severity, C.W)
+                    confirm_mark = " ✓" if nv.confirmed else ""
+                    print(
+                        f"  {col}[{nv.severity[:4]}]{C.RST}"
+                        f"  {nv.host}:{nv.port}  {nv.service}"
+                        f"  {C.DIM}{nv.title[:50]}{C.RST}{confirm_mark}"
+                    )
+                if len(net_vulns) > 8:
+                    print(f"  {C.DIM}  … and {len(net_vulns) - 8} more (see full report){C.RST}")
+
+            # ── Convert NetworkVuln → Vuln objects for the main pipeline ────────
+            for nv in net_vulns:
+                self._network_vulns.append(Vuln(
+                    name=f"[NETWORK] {nv.title}",
+                    severity=nv.severity,
+                    endpoint=f"{nv.host}:{nv.port}",
+                    confirmed=nv.confirmed,
+                    cwe="CWE-200" if nv.severity in ("Critical", "High") else "CWE-1035",
+                    evidence=nv.evidence or f"{nv.service} on port {nv.port}",
+                    fix=nv.remediation,
+                    description="; ".join(nv.issues[:3]),
+                ))
+
+
+            print(f"\n  {C.G}[OK]{C.RST} Network genome baselines saved → cyphex netwatch to monitor\n")
+
+        except Exception as e:
+            print(f"  {C.Y}[WARN]{C.RST} Network scan error: {str(e)[:120]}")
+            print(f"  {C.DIM}Continuing with application scan...{C.RST}")
 
     async def _build_and_evolve(self, context, generations):
         genome = BehavioralGenome()
