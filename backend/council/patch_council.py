@@ -107,6 +107,57 @@ RULES:
 
 
 
+def _build_patch_prompt(vuln_dict: dict) -> str:
+    """
+    Build the Stage-1 patch generation prompt from a vuln_dict.
+
+    Required keys: vuln_name (or vuln_type), cwe, file_path, vulnerable_code.
+    Optional keys: oracle_analysis, memory_hint, severity.
+
+    Returns the full prompt string to pass to the LLM.
+    """
+    vuln_name = vuln_dict.get("vuln_name") or vuln_dict.get("vuln_type", "Unknown Vulnerability")
+    cwe = vuln_dict.get("cwe", "")
+    file_path = vuln_dict.get("file_path", "")
+    vulnerable_code = vuln_dict.get("vulnerable_code", "")
+    memory_hint = vuln_dict.get("memory_hint", "")
+    oracle = vuln_dict.get("oracle_analysis")
+
+    parts = [
+        f"Vulnerability: {vuln_name} ({cwe})",
+        f"File: {file_path}",
+        "",
+        f"Vulnerable code:\n```\n{vulnerable_code}\n```",
+        "",
+    ]
+
+    if oracle:
+        thinking = oracle.get("thinking", "")
+        data_flow = oracle.get("data_flow", "")
+        minimal_fix = oracle.get("minimal_fix", "")
+        avoid = oracle.get("avoid", [])
+        if thinking or data_flow or minimal_fix:
+            parts.append("ORACLE ANALYSIS (use this reasoning to guide your fix):")
+            if thinking:
+                parts.append(f"  Thinking: {thinking}")
+            if data_flow:
+                parts.append(f"  Data flow: {data_flow}")
+            if minimal_fix:
+                parts.append(f"  Minimal fix required: {minimal_fix}")
+            if avoid:
+                parts.append(f"  Do NOT do: {'; '.join(avoid)}")
+            parts.append("")
+
+    if memory_hint:
+        parts.append(memory_hint)
+        parts.append("")
+
+    parts.append(
+        "Generate the fixed version of this code. "
+        "The fix must ELIMINATE the vulnerability, not just add a superficial check."
+    )
+
+    return "\n".join(parts)
 
 
 class PatchCouncil(CouncilOrchestrator):

@@ -74,7 +74,7 @@ try:
     from backend.patch.templates import apply_template
     from backend.patch.regression import generate_regression_test
     from backend.rag.code_indexer import CodeIndexer
-    from backend.rag.security_kb import format_for_prompt, detect_framework, get_fix_strategies
+    from backend.rag.security_kb import format_for_prompt, detect_framework, get_fix_strategies, load_security_kb
     from backend.rag.patch_memory import PatchMemory
     PATCH_V2_AVAILABLE = True
 except ImportError as _e:
@@ -100,6 +100,10 @@ try:
 except ImportError:
     AGENT_REASONING_AVAILABLE = False
     REASONING_AVAILABLE = False
+
+# Backwards-compat alias — some code paths use PATCH_PIPELINE_AVAILABLE,
+# others use PATCH_V2_AVAILABLE; both should reflect the same flag.
+PATCH_PIPELINE_AVAILABLE = PATCH_V2_AVAILABLE
 
 class C:
     """Premium cyber-themed color palette — turquoise/purple/black."""
@@ -2437,7 +2441,7 @@ class CyphexEngine:
             console.print(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
         patchable = list(_deduped.values())
 
-        if RAG_AVAILABLE and self.source_dir:
+        if PATCH_V2_AVAILABLE and self.source_dir:
             try:
                 kb = load_security_kb()
                 indexer = CodeIndexer(self.source_dir)
