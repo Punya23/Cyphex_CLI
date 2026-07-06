@@ -176,7 +176,7 @@ class CyphexEngine:
                   target_url=None, branch="main",
                   generations=10, output_file=None, auto_patch=True,
                   judge_mode=False, judge=False, non_interactive=False,
-                  network_scan=False):
+                  network_scan=False, use_deepagents=False):
         self.start_ts = time.time()
         self.repo_url = repo_url
         self.local_path = local_path
@@ -203,7 +203,7 @@ class CyphexEngine:
 
             # Skip steps 2-3, go directly to dynamic scan
             self._step("4/8", "DYNAMIC VULNERABILITY SCAN")
-            self.context = await self._dynamic_scan(target_url)
+            self.context = await self._dynamic_scan(target_url, use_deepagents=use_deepagents)
 
             # Continue with remaining steps (immune system, patching, report)
             self._step("5/8", "AI IMMUNE SYSTEM")
@@ -290,7 +290,7 @@ class CyphexEngine:
                 if ep_path not in self.context.all_endpoints:
                     self.context.all_endpoints.append(ep_path)
         else:
-            self.context = await self._dynamic_scan(target_url)
+            self.context = await self._dynamic_scan(target_url, use_deepagents=use_deepagents)
         self.context.confirmed_vulns.extend(file_vulns)
 
         # Merge network findings (if netmap ran in step 2b)
@@ -1111,9 +1111,35 @@ class CyphexEngine:
             return []
 
     # Step 4: Dynamic scan
-    async def _dynamic_scan(self, target_url):
+    async def _dynamic_scan(self, target_url, use_deepagents=False):
         """CLI-focused dynamic scan with explicit per-agent visibility."""
         context = ScanContext(target_url=target_url)
+
+        def agent_header(agent_id: str, name: str, objective: str):
+            if SOC_UI:
+                ui.render_agent_header(agent_id, name, objective)
+                return
+            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
+            print(f"\n  {border}")
+            print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
+            print(f"  {C.GHOST}{objective}{C.RST}")
+            print(f"  {border}")
+
+        def show_cmd(agent: str, cmd: str):
+            print(f"  {C.DIM}[{agent}]$ {cmd}{C.RST}")
+
+        asi = None
+        if use_deepagents:
+            print(f"\n  {C.G}[DEEPAGENTS ENABLED]{C.RST} Initialising adaptive intelligence engine...")
+            from backend.deepagents.attack_graph import AttackGraph
+            from backend.deepagents.attack_surface_index import AttackSurfaceIndex
+            from backend.deepagents.oracle_attack import AttackOracle
+            from backend.council.council_orchestrator import CouncilOrchestrator
+            
+            attack_graph = AttackGraph()
+            asi = AttackSurfaceIndex()
+            orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
+            oracle = AttackOracle(orchestrator=orchestrator)
 
         def agent_header(agent_id: str, name: str, objective: str):
             if SOC_UI:
@@ -1144,6 +1170,8 @@ class CyphexEngine:
                 show_cmd("Crawler", f'curl -sL "{url}"')
                 try:
                     resp = await client.get(url)
+                    if asi:
+                        asi.ingest_response(url, "GET", "", resp.status_code, resp.text, dict(resp.headers))
                 except Exception as exc:
                     print(f"  {C.R}[Crawler][ERR]{C.RST} {path}: {str(exc)[:80]}")
                     continue
@@ -1254,6 +1282,9 @@ class CyphexEngine:
                         else:
                             show_cmd("API", f'curl -s -X POST "{full_url}" -H "Content-Type: application/json" -d \'{{...}}\'')
                             resp = await client.post(full_url, json=body)
+                        if asi:
+                            body_str = str(body) if body else ""
+                            asi.ingest_response(full_url, method, body_str, resp.status_code, resp.text, dict(resp.headers))
                     except Exception:
                         continue
                     if resp.status_code != 404:
@@ -1322,6 +1353,22 @@ class CyphexEngine:
                         seen_bases.add(base)
                         deduped_get.append(item)
                 _live_get_with_params = deduped_get
+
+            if use_deepagents:
+                from backend.deepagents import DeepSQLiAgent, DeepXSSAgent, DeepCMDiAgent, DeepAuthAgent
+                agents_to_run = [
+                    DeepSQLiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepXSSAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepCMDiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepAuthAgent(self.scan_id, target_url, attack_graph, asi, oracle)
+                ]
+                
+                for agent in agents_to_run:
+                    agent_header(agent.__class__.__name__, agent.PRIMARY_VULN_CLASS, "DeepAgent Hypothesis Testing")
+                    res = await agent.run(context)
+                    context.confirmed_vulns.extend(res.vulns)
+                    
+                return context
 
             # Agent 04 - XSS
             agent_header("Agent 04", "XSS", "Probe reflected XSS payload execution paths")

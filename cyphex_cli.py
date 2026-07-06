@@ -107,6 +107,11 @@ def main():
         action="store_true",
         help="Also run network security scan (host discovery + port scan + vuln report)",
     )
+    scan_p.add_argument(
+        "--use-deepagents",
+        action="store_true",
+        help="Use the new experimental DeepAgents for adaptive Oracle-guided DAST",
+    )
 
     sub.add_parser("doctor", help="Check local runtime/tooling readiness")
     sub.add_parser("council-doctor", help="Check all 4 council models are available in Ollama")
@@ -280,6 +285,7 @@ def main():
             judge_mode=args.judge,
             non_interactive=args.non_interactive,
             network_scan=args.network,
+            use_deepagents=args.use_deepagents,
         ))
 
 
