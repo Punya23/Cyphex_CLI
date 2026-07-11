@@ -2,6 +2,10 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse, parse_qs
 
+from backend.config.dast_constants import (
+    TECH_SIGNATURES, SQL_ERROR_SIGS, FILE_PARAM_KEYWORDS, FORMAT_PARAM_KEYWORDS
+)
+
 @dataclass
 class EndpointProfile:
     url: str
@@ -31,19 +35,6 @@ class AttackSurfaceIndex:
     No embeddings, no external APIs — pure keyword/pattern extraction.
     """
     
-    TECH_SIGNATURES = {
-        "express": [r"X-Powered-By: Express", r"Cannot GET"],
-        "django": [r"csrfmiddlewaretoken", r"Django"],
-        "rails": [r"X-Powered-By: Phusion", r"authenticity_token"],
-        "laravel": [r"laravel_session", r"XSRF-TOKEN"],
-        "spring": [r"X-Application-Context", r"whitelabel error"],
-    }
-    
-    SQL_ERROR_SIGS = [
-        r"sql syntax", r"ORA-\d{5}", r"PSQLException",
-        r"sqlite3?\.OperationalError", r"mysql_fetch",
-    ]
-
     def __init__(self):
         self.endpoints: dict[str, EndpointProfile] = {}
         self.tokens_seen: dict[str, str] = {}   # token → endpoint that leaked it
@@ -77,9 +68,9 @@ class AttackSurfaceIndex:
                     profile.has_string_params = True
                 
                 k_lower = k.lower()
-                if any(kw in k_lower for kw in ["file", "path", "dir", "doc", "url"]):
+                if any(kw in k_lower for kw in FILE_PARAM_KEYWORDS):
                     profile.has_file_param = True
-                if "format" in k_lower or "export" in k_lower:
+                if any(kw in k_lower for kw in FORMAT_PARAM_KEYWORDS):
                     profile.has_format_param = True
 
         # Check body params if form/json
@@ -106,7 +97,7 @@ class AttackSurfaceIndex:
 
         # Detect tech from headers & body
         header_str = str(headers or {})
-        for tech, sigs in self.TECH_SIGNATURES.items():
+        for tech, sigs in TECH_SIGNATURES.items():
             for sig in sigs:
                 if re.search(sig, response_body, re.I) or re.search(sig, header_str, re.I):
                     self.detected_technologies.add(tech)
@@ -123,7 +114,7 @@ class AttackSurfaceIndex:
             profile.leaks_sensitive = True
             
         # Detect errors
-        for sig in self.SQL_ERROR_SIGS:
+        for sig in SQL_ERROR_SIGS:
             if re.search(sig, response_body, re.I):
                 sig_text = f"{base_path}: SQL error signature '{sig}' found"
                 if sig_text not in self.error_signatures:

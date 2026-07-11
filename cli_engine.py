@@ -1401,15 +1401,15 @@ class CyphexEngine:
                     
                 return context
 
+            from backend.config.dast_constants import XSS_PAYLOADS
             # Agent 04 - XSS
             agent_header("Agent 04", "XSS", "Probe reflected XSS payload execution paths")
-            xss_payloads = ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>"]
             seen_xss = set()
             for form in forms_found:
                 form_key = form.action
                 if form_key in seen_xss or not form.inputs:
                     continue
-                for payload in xss_payloads:
+                for payload in XSS_PAYLOADS:
                     if form.method == "GET":
                         q = "&".join([f"{inp}={payload}" for inp in form.inputs])
                         show_cmd("XSS", f'curl -s "{form.action}?{q}"')
@@ -1436,15 +1436,14 @@ class CyphexEngine:
                     else:
                         print(f"  {C.G}  Decision: Payload not reflected \u2192 endpoint appears clean{C.RST}")
 
+            from backend.config.dast_constants import SQLI_PAYLOADS, SQL_ERRORS_BASIC
             # Agent 03 - SQLi
             agent_header("Agent 03", "Injection (SQLi)", "Probe SQL injection indicators")
-            sqli_payloads = ["' OR '1'='1", "' UNION SELECT NULL--"]
-            sql_errors = ["sql", "syntax error", "sqlite", "mysql", "postgres"]
             seen_sqli = set()
             for form in forms_found:
                 if not form.inputs or form.action in seen_sqli:
                     continue
-                for payload in sqli_payloads:
+                for payload in SQLI_PAYLOADS:
                     if form.method == "GET":
                         q = "&".join([f"{inp}={payload}" for inp in form.inputs])
                         show_cmd("SQLi", f'curl -s "{form.action}?{q}"')
@@ -1454,12 +1453,12 @@ class CyphexEngine:
                         resp = await client.post(form.action, data={inp: payload for inp in form.inputs})
 
                     lower = resp.text.lower()
-                    indicator = any(e in lower for e in sql_errors) or payload.lower() in lower
+                    indicator = any(e in lower for e in SQL_ERRORS_BASIC) or payload.lower() in lower
                     print(f"  {C.Y}[Agent 03 \u25b6 Reasoning]{C.RST} Injecting SQL tautology into {form.inputs} at {form.action}")
                     print(f"  {C.DIM}  Payload:  {payload}{C.RST}")
                     print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                     if indicator:
-                        matched = [e for e in sql_errors if e in lower]
+                        matched = [e for e in SQL_ERRORS_BASIC if e in lower]
                         print(f"  {C.R}  Decision: SQL error keywords found ({', '.join(matched[:3])}) \u2192 SQLi CONFIRMED \u2713{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] SQL Injection",
@@ -1473,14 +1472,14 @@ class CyphexEngine:
                     else:
                         print(f"  {C.G}  Decision: No SQL error indicators \u2192 endpoint appears clean{C.RST}")
 
+            from backend.config.dast_constants import DEFAULT_CREDS
             # Agent 05 - Auth
             agent_header("Agent 05", "Auth", "Try weak/default credential flows")
-            default_creds = [("admin", "admin"), ("admin", "admin123")]
             login_forms = [f for f in forms_found if any("pass" in i.lower() for i in f.inputs)]
             for form in login_forms[:2]:
                 user_field = next((i for i in form.inputs if i.lower() in ("username", "user", "email")), form.inputs[0])
                 pass_field = next((i for i in form.inputs if "pass" in i.lower()), form.inputs[-1])
-                for u, p in default_creds:
+                for u, p in DEFAULT_CREDS:
                     show_cmd("Auth", f'curl -s -X POST "{form.action}" -d "{user_field}={u}&{pass_field}={p}"')
                     resp = await client.post(form.action, data={user_field: u, pass_field: p})
                     lower = resp.text.lower()
@@ -1501,15 +1500,16 @@ class CyphexEngine:
                     else:
                         print(f"  {C.G}  Decision: No success indicator \u2192 credentials rejected{C.RST}")
 
+            from backend.config.dast_constants import LFI_TARGETS, LFI_PAYLOADS, FILE_PARAM_KEYWORDS
             # Agent 07 - LFI
             agent_header("Agent 07", "LFI", "Try file traversal payloads")
-            lfi_targets = ["/download?file=../../../etc/passwd", "/api/file?path=../../../etc/passwd"]
+            lfi_targets = LFI_TARGETS.copy()
             # Inject source-discovered routes with file/path params
             for r in _live_file_routes:
                 for p in r.get("params", []):
-                    if p.lower() in ("file", "path", "filename", "name", "doc", "filepath"):
-                        lfi_targets.append(f"{r['path']}?{p}=../../../etc/passwd")
-                        lfi_targets.append(f"{r['path']}?{p}=....//....//....//etc/passwd")
+                    if p.lower() in FILE_PARAM_KEYWORDS:
+                        for pl in LFI_PAYLOADS:
+                            lfi_targets.append(f"{r['path']}?{p}={pl}")
             for suffix in lfi_targets:
                 full = f"{target_url}{suffix}"
                 show_cmd("LFI", f'curl -s "{full}"')
@@ -1532,18 +1532,18 @@ class CyphexEngine:
                 else:
                     print(f"  {C.G}  Decision: No file content leaked \u2192 endpoint clean{C.RST}")
 
+            from backend.config.dast_constants import CMDI_TARGETS, CMDI_INJECT_PAYLOADS
             # Agent 06 - CMDi
             agent_header("Agent 06", "CMDi", "Probe command execution sinks")
-            cmdi_targets = ["/api/ping?host=127.0.0.1;id", "/ping?host=127.0.0.1|whoami"]
+            cmdi_targets = CMDI_TARGETS.copy()
             # Inject discovered GET endpoints — try CMDi payloads in each param
-            cmdi_inject_payloads = [";id", "|whoami", "$(id)", "`id`"]
             for path, _text in _live_get_with_params:
                 base = path.split("?")[0]
                 qs = path.split("?", 1)[1] if "?" in path else ""
                 for param_pair in qs.split("&"):
                     key = param_pair.split("=")[0]
                     if key:
-                        for payload in cmdi_inject_payloads[:2]:  # Limit to 2 payloads per param
+                        for payload in CMDI_INJECT_PAYLOADS[:2]:  # Limit to 2 payloads per param
                             cmdi_targets.append(f"{base}?{key}={payload}")
             for suffix in cmdi_targets:
                 full = f"{target_url}{suffix}"
@@ -1609,9 +1609,10 @@ class CyphexEngine:
                 else:
                     print(f"  [SupplyChain] {manifest} status={resp.status_code}")
 
+            from backend.config.dast_constants import IDOR_PATHS
             # ── Agent 09 — IDOR Prober ─────────────────────────────────
             agent_header("Agent 09", "IDOR", "Probe insecure direct object references by enumerating sequential IDs")
-            idor_paths = ["/api/employees/", "/api/payroll/", "/api/users/", "/api/payslips/", "/api/orders/"]
+            idor_paths = IDOR_PATHS.copy()
             # Inject source-discovered routes with :id params
             idor_seen = set(idor_paths)
             for r in _live_id_routes:
@@ -1645,27 +1646,21 @@ class CyphexEngine:
                 elif ok_responses:
                     print(f"  {C.DIM}[IDOR] Only 1 ID responded — not enough for confirmed IDOR{C.RST}")
 
+            from backend.config.dast_constants import SSRF_ENDPOINTS, SSRF_GET_ENDPOINTS, URL_PARAM_KEYWORDS, SSRF_INTERNAL_PAYLOADS
             # ── Agent 10 — SSRF Prober ─────────────────────────────────
             agent_header("Agent 10", "SSRF", "Probe server-side request forgery via URL parameters")
-            ssrf_endpoints = [
-                ("/api/fetch", {"url": "http://127.0.0.1"}),
-                ("/api/fetch", {"url": "http://169.254.169.254/latest/meta-data/"}),
-                ("/api/proxy", {"url": "http://127.0.0.1"}),
-            ]
-            ssrf_get_endpoints = [
-                "/api/fetch?url=http://127.0.0.1",
-                "/api/fetch?url=http://169.254.169.254/latest/meta-data/",
-            ]
+            ssrf_endpoints = SSRF_ENDPOINTS.copy()
+            ssrf_get_endpoints = SSRF_GET_ENDPOINTS.copy()
             # Inject source-discovered routes with url/callback params
             for r in _live_url_routes:
                 for p in r.get("params", []):
-                    if p.lower() in ("url", "callback", "callbackurl", "webhook", "target", "redirect"):
+                    if p.lower() in URL_PARAM_KEYWORDS:
                         if r["method"] == "POST":
-                            ssrf_endpoints.append((r["path"], {p: "http://169.254.169.254/latest/meta-data/"}))
-                            ssrf_endpoints.append((r["path"], {p: "http://127.0.0.1"}))
+                            for pl in SSRF_INTERNAL_PAYLOADS:
+                                ssrf_endpoints.append((r["path"], {p: pl}))
                         else:
-                            ssrf_get_endpoints.append(f"{r['path']}?{p}=http://169.254.169.254/latest/meta-data/")
-                            ssrf_get_endpoints.append(f"{r['path']}?{p}=http://127.0.0.1")
+                            for pl in SSRF_INTERNAL_PAYLOADS:
+                                ssrf_get_endpoints.append(f"{r['path']}?{p}={pl}")
             for path, body in ssrf_endpoints:
                 full = f"{target_url}{path}"
                 show_cmd("SSRF", f'curl -s -X POST "{full}" -d \'url={body["url"]}\'')
@@ -1705,16 +1700,17 @@ class CyphexEngine:
                 except Exception:
                     continue
 
+            from backend.config.dast_constants import SDE_PATHS, SDE_INDICATORS
             # ── Agent 12 — Sensitive Data Exposure ─────────────────────
             agent_header("Agent 12", "Data Exposure", "Probe debug and config endpoints for sensitive data leaks")
-            sde_paths = ["/api/debug", "/api/env", "/api/config", "/debug", "/env", "/api/health"]
+            sde_paths = SDE_PATHS.copy()
             # Inject source-discovered debug/admin/info routes
             sde_seen = set(sde_paths)
             for r in _live_debug_routes:
                 if r["method"] == "GET" and r["path"] not in sde_seen:
                     sde_paths.append(r["path"])
                     sde_seen.add(r["path"])
-            sde_indicators = ["DB_", "SECRET", "KEY", "PASSWORD", "TOKEN", "process.env", "DATABASE_URL", "MONGO", "REDIS"]
+            sde_indicators = SDE_INDICATORS
             for path in sde_paths:
                 full = f"{target_url}{path}"
                 show_cmd("SDE", f'curl -s "{full}"')
@@ -1740,14 +1736,10 @@ class CyphexEngine:
                 except Exception:
                     continue
 
+            from backend.config.dast_constants import CMDI_API_TESTS
             # ── Agent 13 — Command Injection (API) ────────────────────
             agent_header("Agent 13", "CMDi (API)", "Probe command injection via API ping/exec endpoints")
-            cmdi_api_tests = [
-                ("POST", "/api/ping", {"host": "127.0.0.1; id"}),
-                ("POST", "/api/ping", {"host": "127.0.0.1 && whoami"}),
-                ("POST", "/api/ping", {"host": "127.0.0.1 | cat /etc/passwd"}),
-                ("POST", "/api/exec", {"cmd": "id"}),
-            ]
+            cmdi_api_tests = CMDI_API_TESTS
             # Inject discovered POST endpoints with CMDi payloads
             for path, body in _live_post:
                 if body and isinstance(body, dict):

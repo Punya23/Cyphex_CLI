@@ -42,9 +42,8 @@ class AttackGraph:
         
     def _find_auth_endpoints(self) -> List[str]:
         """Find endpoints that likely require authentication."""
-        # Simple heuristic, will be populated via ASI
-        auth_keywords = ["/admin", "/user", "/profile", "/dashboard", "/api/private"]
-        return [node for node in self.nodes if any(k in node for k in auth_keywords)]
+        from backend.config.dast_constants import AUTH_KEYWORDS
+        return [node for node in self.nodes if any(k in node for k in AUTH_KEYWORDS)]
 
     def update_from_finding(self, finding) -> List[AttackEdge]:
         """
