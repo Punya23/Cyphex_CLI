@@ -807,6 +807,15 @@ class CyphexEngine:
                 # Strip obsolete 'version' key to prevent warnings
                 self._strip_compose_version(compose_file)
 
+                # ── Pre-flight: tear down any stale containers from a previous
+                #    scan so we never hit "container name already in use" conflicts.
+                print(f"  {C.GHOST}[DOCKER] Cleaning up any stale containers...{C.RST}")
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["docker", "compose", "-f", compose_file, "down", "--remove-orphans"],
+                    cwd=source_dir, capture_output=True, text=True, timeout=60
+                )
+
                 # Build and start containers
                 proc = await asyncio.to_thread(
                     subprocess.run,
@@ -815,12 +824,34 @@ class CyphexEngine:
                 )
 
                 if proc.returncode != 0:
-                    # Common failure: a service has no Dockerfile
-                    # Try deploying only services with valid Dockerfiles
                     stderr_text = proc.stderr or ""
-                    if "dockerfile" in stderr_text.lower() or "no such file" in stderr_text.lower():
+                    # Conflict: container name already in use → force-remove and retry once
+                    if "conflict" in stderr_text.lower() or "already in use" in stderr_text.lower():
+                        print(f"  {C.Y}[DOCKER]{C.RST} Container conflict detected — force-removing and retrying...")
+                        await asyncio.to_thread(
+                            subprocess.run,
+                            ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
+                            cwd=source_dir, capture_output=True, text=True, timeout=60
+                        )
+                        # Also kill any containers with the same names by brute force
+                        try:
+                            containers_out = subprocess.run(
+                                ["docker", "compose", "-f", compose_file, "ps", "-q"],
+                                cwd=source_dir, capture_output=True, text=True, timeout=10
+                            )
+                            ids = containers_out.stdout.strip().split()
+                            if ids:
+                                subprocess.run(["docker", "rm", "-f"] + ids, capture_output=True, timeout=15)
+                        except Exception:
+                            pass
+                        proc = await asyncio.to_thread(
+                            subprocess.run,
+                            ["docker", "compose", "-f", compose_file, "up", "-d", "--build"],
+                            cwd=source_dir, capture_output=True, text=True, timeout=300
+                        )
+                    # Common failure: a service has no Dockerfile
+                    elif "dockerfile" in stderr_text.lower() or "no such file" in stderr_text.lower():
                         print(f"  {C.Y}▸ [INFO]{C.RST} {C.SLATE}Some services lack Dockerfiles — deploying buildable services only...{C.RST}")
-                        # Parse compose to find services with valid build contexts
                         buildable = self._get_buildable_services(compose_file, source_dir)
                         if buildable:
                             print(f"  {C.GHOST}Deploying: {C.CYAN2}{', '.join(buildable)}{C.RST}")
