@@ -1,67 +1,110 @@
+"""
+CYPHEX DeepAgents — BaseDeepAgent
+
+Upgraded with:
+- Parallel hypothesis testing (asyncio.gather, 3 concurrent probes)
+- Baseline latency measurement for time-based blind detection
+- Payload mutation on failure (Oracle mutate() call)
+- Full Evidence recording into ScanContext.raw_evidence
+- Confidence scoring per finding
+"""
 import time
+import asyncio
 import httpx
 from rich.console import Console
 
 from backend.backend.agents.base_agent import BaseAgent
-from backend.backend.models.scan import ScanContext, Vuln
+from backend.backend.models.scan import ScanContext, Vuln, Evidence
 from backend.backend.models.agent_result import AgentResult
 from backend.deepagents.attack_graph import AttackGraph
 from backend.deepagents.attack_surface_index import AttackSurfaceIndex
-from backend.deepagents.oracle_attack import AttackOracle, Hypothesis
+from backend.deepagents.oracle_attack import AttackOracle, Hypothesis, HttpRequest
 
 console = Console()
 
+# How many hypotheses to test in parallel (keep at 3 to avoid hammering target)
+_PARALLEL_BATCH = 3
+# Minimum confidence threshold to emit a confirmed finding
+_CONFIDENCE_THRESHOLD = 60
+
+
 class HypothesisResult:
-    def __init__(self, confirmed: bool, vuln: Vuln = None):
+    def __init__(self, confirmed: bool, vuln: Vuln = None, confidence: int = 0):
         self.confirmed = confirmed
         self.vuln = vuln
+        self.confidence = confidence
+
 
 class BaseDeepAgent(BaseAgent):
     """
     Extends BaseAgent with the full Observe→Think→Act adaptive loop.
-    Uses local Ollama only — zero external API dependency.
+    Uses only local Ollama models — zero external API dependency.
     """
 
     MAX_HYPOTHESES = 10
     MAX_ATTEMPTS_PER_HYPOTHESIS = 5
     PRIMARY_VULN_CLASS = "Unknown"
+    # Parallel batch size (subclasses can lower for expensive tests like time-based)
+    PARALLEL_BATCH = _PARALLEL_BATCH
 
     def __init__(self, scan_id: str, target_url: str, attack_graph: AttackGraph,
                  asi: AttackSurfaceIndex, oracle: AttackOracle, **kwargs):
         super().__init__(scan_id, target_url, **kwargs)
-        self.graph = attack_graph          # Shared across all DeepAgents
-        self.asi = asi                     # Shared vectorless RAG surface
-        self.oracle = oracle               # Per-agent Oracle instance
-        self.vulns = []
+        self.graph = attack_graph
+        self.asi = asi
+        self.oracle = oracle
+        self.vulns: list[Vuln] = []
+        # Cached baseline latency (measured once per agent run)
+        self._baseline_ms: float = 0.0
+
+    # ── Public entry point ────────────────────────────────────────────────────
 
     async def run(self, context: ScanContext) -> AgentResult:
-        console.print(f"[cyan]DeepAgent[/cyan] [yellow]{self.__class__.__name__}[/yellow] initialising against {self.target}...")
-        
-        # Step 1: Oracle analyses the surface and generates attack plan
+        console.print(
+            f"[cyan]DeepAgent[/cyan] [yellow]{self.__class__.__name__}[/yellow] "
+            f"initialising against {self.target}..."
+        )
+
+        # Measure baseline response time once
+        self._baseline_ms = await self._measure_baseline()
+
+        # Oracle generates attack plan
         surface_summary = self.asi.summarise_for_prompt()
-        console.print(f"[dim]DeepAgent {self.__class__.__name__} consulting Oracle for plan...[/dim]")
-        
+        console.print(f"[dim]DeepAgent {self.__class__.__name__} consulting Oracle...[/dim]")
         try:
             plan = await self.oracle.plan(
                 target=self.target,
                 surface_summary=surface_summary,
                 vuln_class=self.PRIMARY_VULN_CLASS,
             )
-            console.print(f"[cyan]Oracle[/cyan] generated plan with {len(plan.hypotheses)} hypotheses.")
+            console.print(
+                f"[cyan]Oracle[/cyan] generated {len(plan.hypotheses)} hypotheses "
+                f"for {self.__class__.__name__}."
+            )
         except Exception as e:
-            console.print(f"[red]Failed to generate plan for {self.__class__.__name__}: {str(e)}[/red]")
+            console.print(f"[red]Oracle plan failed for {self.__class__.__name__}: {e}[/red]")
             return AgentResult(agent=self.__class__.__name__, vulns=self.vulns, context=context)
 
-        # Step 2: Execute hypotheses adaptively
-        for i, hyp in enumerate(plan.hypotheses[:self.MAX_HYPOTHESES]):
-            console.print(f"[dim]Testing hypothesis {i+1}/{len(plan.hypotheses)}: {hyp.vuln_type} on {hyp.test_request.path}[/dim]")
-            result = await self._test_hypothesis(hyp, context)
-            if result.confirmed and result.vuln:
-                self.vulns.append(result.vuln)
-                # Update shared graph
-                new_edges = self.graph.update_from_finding(result.vuln)
-                for edge in new_edges:
-                    console.print(f"[green]New Attack Chain Discovered:[/green] {edge.action} from {edge.source} to {edge.target}")
+        # Execute hypotheses in parallel batches
+        hypotheses = plan.hypotheses[:self.MAX_HYPOTHESES]
+        for i in range(0, len(hypotheses), self.PARALLEL_BATCH):
+            batch = hypotheses[i:i + self.PARALLEL_BATCH]
+            results = await asyncio.gather(
+                *[self._test_hypothesis(hyp, context) for hyp in batch],
+                return_exceptions=True
+            )
+            for hyp, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    console.print(f"[yellow]Hypothesis {hyp.id} errored: {result}[/yellow]")
+                    continue
+                if result.confirmed and result.vuln:
+                    self.vulns.append(result.vuln)
+                    new_edges = self.graph.update_from_finding(result.vuln)
+                    for edge in new_edges:
+                        console.print(
+                            f"[green]Attack chain discovered:[/green] "
+                            f"{edge.action} {edge.source} → {edge.target}"
+                        )
 
         return AgentResult(
             agent=self.__class__.__name__,
@@ -69,45 +112,99 @@ class BaseDeepAgent(BaseAgent):
             context=context,
         )
 
-    async def _http_probe(self, request) -> tuple[int, str, float, dict]:
-        """Send the HTTP request and measure response time."""
-        url = self.target.rstrip('/') + request.path
-        if not url.startswith("http"):
-             url = f"http://{url}"
-             
-        start_time = time.time()
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    async def _measure_baseline(self) -> float:
+        """GET the root URL once to establish a response-time baseline."""
         try:
+            url = self.target.rstrip("/") + "/"
+            if not url.startswith("http"):
+                url = "http://" + url
+            t0 = time.time()
             async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-                headers = request.headers or {}
-                if request.method.upper() == "GET":
-                     res = await client.get(url, headers=headers)
-                elif request.method.upper() == "POST":
-                     res = await client.post(url, headers=headers, content=request.body)
+                await client.get(url)
+            return time.time() - t0
+        except Exception:
+            return 0.5  # safe fallback
+
+    async def _http_probe(self, request: HttpRequest) -> tuple[int, str, float, dict]:
+        """Send the HTTP request and return (status, body, elapsed_s, headers)."""
+        # Resolve absolute URL
+        path = request.path
+        if not path.startswith("http"):
+            url = self.target.rstrip("/") + "/" + path.lstrip("/")
+        else:
+            url = path
+
+        # Inject the payload into the path if it uses the {PAYLOAD} placeholder
+        if "{PAYLOAD}" in url and request.payload:
+            url = url.replace("{PAYLOAD}", request.payload)
+
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=15.0, verify=False, follow_redirects=True) as client:
+                headers = dict(request.headers or {})
+                method = request.method.upper()
+                if method == "GET":
+                    res = await client.get(url, headers=headers)
+                elif method == "POST":
+                    content_type = headers.get("Content-Type", "application/x-www-form-urlencoded")
+                    if "json" in content_type:
+                        res = await client.post(url, headers=headers, content=request.body)
+                    else:
+                        res = await client.post(url, headers=headers, data=request.body)
+                elif method == "PUT":
+                    res = await client.put(url, headers=headers, content=request.body)
+                elif method == "DELETE":
+                    res = await client.delete(url, headers=headers)
+                elif method == "PATCH":
+                    res = await client.patch(url, headers=headers, content=request.body)
                 else:
-                     res = await client.request(request.method, url, headers=headers, content=request.body)
-                     
-                elapsed = time.time() - start_time
+                    res = await client.request(method, url, headers=headers, content=request.body)
+
+                elapsed = time.time() - t0
                 return res.status_code, res.text, elapsed, dict(res.headers)
         except Exception as e:
-            elapsed = time.time() - start_time
+            elapsed = time.time() - t0
             return 0, str(e), elapsed, {}
 
-    async def _test_hypothesis(self, hyp: Hypothesis, context: ScanContext) -> HypothesisResult:
-        for attempt in range(self.MAX_ATTEMPTS_PER_HYPOTHESIS):
-            # Execute the probe
-            status, body, elapsed, headers = await self._http_probe(hyp.test_request)
+    async def _record_evidence(self, context: ScanContext, request: HttpRequest,
+                                status: int, body: str) -> None:
+        """Append a raw Evidence record to the shared ScanContext."""
+        url = self.target.rstrip("/") + "/" + request.path.lstrip("/")
+        context.raw_evidence.append(Evidence(
+            request_method=request.method,
+            request_url=url,
+            request_body=request.body or request.payload,
+            response_status=status,
+            response_body=body,
+        ))
 
-            # Update ASI with this response
+    async def _test_hypothesis(self, hyp: Hypothesis,
+                                context: ScanContext) -> HypothesisResult:
+        """
+        Test one hypothesis through up to MAX_ATTEMPTS_PER_HYPOTHESIS probes.
+        On failure, asks Oracle to mutate the payload and tries variants.
+        """
+        current_request = hyp.test_request
+
+        for attempt in range(self.MAX_ATTEMPTS_PER_HYPOTHESIS):
+            status, body, elapsed, headers = await self._http_probe(current_request)
+
+            # Update ASI with observation
             self.asi.ingest_response(
-                url=hyp.test_request.path,
-                method=hyp.test_request.method,
-                body=hyp.test_request.body,
+                url=current_request.path,
+                method=current_request.method,
+                body=current_request.body,
                 status=status,
                 response_body=body,
-                headers=headers
+                headers=headers,
             )
 
-            # Oracle decides: confirmed? rejected? try next?
+            # Record evidence
+            await self._record_evidence(context, current_request, status, body)
+
+            # Oracle evaluates
             try:
                 decision = await self.oracle.decide(
                     hypothesis=hyp,
@@ -115,30 +212,67 @@ class BaseDeepAgent(BaseAgent):
                     response_body=body,
                     response_time=elapsed,
                     attempt=attempt,
+                    baseline_time=self._baseline_ms,
                 )
             except Exception as e:
-                console.print(f"[red]Oracle decision failed: {e}[/red]")
+                console.print(f"[red]Oracle decide failed: {e}[/red]")
                 break
 
-            console.print(f"[dim]  Attempt {attempt+1} Oracle decision: {decision.action} ({decision.thinking})[/dim]")
+            console.print(
+                f"[dim]  [{hyp.id}] attempt {attempt+1} → {decision.action} "
+                f"(conf={decision.confidence}%) {decision.thinking}[/dim]"
+            )
 
             if decision.action == "confirmed" and decision.vuln:
-                vuln = Vuln(
-                    name=decision.vuln.get("name", hyp.vuln_type),
-                    cwe=decision.vuln.get("cwe", hyp.cwe),
-                    severity=decision.vuln.get("severity", hyp.severity),
-                    endpoint=hyp.test_request.path,
-                    description=f"Confirmed {hyp.vuln_type} on {hyp.test_request.path}",
-                    evidence=decision.vuln.get("evidence", ""),
-                )
-                return HypothesisResult(confirmed=True, vuln=vuln)
+                if decision.confidence >= _CONFIDENCE_THRESHOLD:
+                    v = decision.vuln
+                    vuln = Vuln(
+                        name=v.get("name", hyp.vuln_type),
+                        cwe=v.get("cwe", hyp.cwe),
+                        severity=v.get("severity", hyp.severity),
+                        endpoint=current_request.path,
+                        payload=current_request.payload or current_request.body,
+                        confirmed=True,
+                        evidence=v.get("evidence", body[:300]),
+                        fix=v.get("fix", ""),
+                        description=(
+                            f"Confirmed {hyp.vuln_type} on {current_request.path}. "
+                            f"Confidence: {decision.confidence}%"
+                        ),
+                    )
+                    return HypothesisResult(True, vuln, decision.confidence)
 
             if decision.action == "abandoned":
-                return HypothesisResult(confirmed=False)
+                return HypothesisResult(False)
 
-            if decision.action == "adapt" and decision.next_probe:
-                # Oracle generated a better probe — use it
-                console.print(f"[yellow]  Adapting payload for next attempt...[/yellow]")
-                hyp.test_request = decision.next_probe
+            if decision.action == "adapt":
+                if decision.next_probe:
+                    # Oracle gave us a better probe
+                    current_request = decision.next_probe
+                    hyp.test_request = current_request
+                else:
+                    # Ask Oracle to mutate the current payload
+                    variants = await self.oracle.mutate(
+                        payload=current_request.payload or current_request.body,
+                        vuln_class=self.PRIMARY_VULN_CLASS,
+                        reason=f"HTTP {status}, decision=adapt",
+                    )
+                    if variants:
+                        # Try the first variant immediately
+                        new_payload = variants[0]
+                        # Build a new request with the mutated payload
+                        new_path = current_request.path
+                        if current_request.payload and current_request.payload in new_path:
+                            new_path = new_path.replace(current_request.payload, new_payload)
+                        current_request = HttpRequest(
+                            method=current_request.method,
+                            path=new_path,
+                            body=current_request.body.replace(
+                                current_request.payload, new_payload
+                            ) if current_request.payload in current_request.body else current_request.body,
+                            headers=current_request.headers,
+                            payload=new_payload,
+                        )
+                        hyp.test_request = current_request
 
-        return HypothesisResult(confirmed=False)
+        return HypothesisResult(False)

@@ -1,28 +1,27 @@
-from backend.deepagents.base_deep_agent import BaseDeepAgent
-from backend.backend.models.scan import ScanContext
-from backend.backend.models.agent_result import AgentResult
+"""
+CYPHEX DeepAgents — Public exports
+10 specialized autonomous vulnerability agents using local Ollama models.
+"""
+from backend.deepagents.deep_sqli import DeepSQLiAgent
+from backend.deepagents.deep_xss import DeepXSSAgent
+from backend.deepagents.deep_cmdi import DeepCMDiAgent
+from backend.deepagents.deep_auth import DeepAuthAgent
+from backend.deepagents.deep_idor import DeepIDORAgent
+from backend.deepagents.deep_ssrf import DeepSSRFAgent
+from backend.deepagents.deep_ssti import DeepSSTIAgent
+from backend.deepagents.deep_path_traversal import DeepPathTraversalAgent
+from backend.deepagents.deep_xxe import DeepXXEAgent
+from backend.deepagents.deep_business_logic import DeepBusinessLogicAgent
 
-class DeepSQLiAgent(BaseDeepAgent):
-    """
-    Oracle-guided DeepAgent for SQL Injection.
-    """
-    PRIMARY_VULN_CLASS = "SQL Injection"
-
-class DeepXSSAgent(BaseDeepAgent):
-    """
-    Oracle-guided DeepAgent for Cross-Site Scripting.
-    """
-    PRIMARY_VULN_CLASS = "Cross-Site Scripting (XSS)"
-
-class DeepCMDiAgent(BaseDeepAgent):
-    """
-    Oracle-guided DeepAgent for Command Injection.
-    """
-    PRIMARY_VULN_CLASS = "Command Injection"
-
-class DeepAuthAgent(BaseDeepAgent):
-    """
-    Oracle-guided DeepAgent for Authentication/Authorisation testing.
-    Chains findings from the AttackGraph.
-    """
-    PRIMARY_VULN_CLASS = "Authentication Bypass / Privilege Escalation"
+__all__ = [
+    "DeepSQLiAgent",
+    "DeepXSSAgent",
+    "DeepCMDiAgent",
+    "DeepAuthAgent",
+    "DeepIDORAgent",
+    "DeepSSRFAgent",
+    "DeepSSTIAgent",
+    "DeepPathTraversalAgent",
+    "DeepXXEAgent",
+    "DeepBusinessLogicAgent",
+]

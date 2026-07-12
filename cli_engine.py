@@ -1386,20 +1386,48 @@ class CyphexEngine:
                 _live_get_with_params = deduped_get
 
             if use_deepagents:
-                from backend.deepagents import DeepSQLiAgent, DeepXSSAgent, DeepCMDiAgent, DeepAuthAgent
+                from backend.deepagents import (
+                    DeepSQLiAgent, DeepXSSAgent, DeepCMDiAgent, DeepAuthAgent,
+                    DeepIDORAgent, DeepSSRFAgent, DeepSSTIAgent,
+                    DeepPathTraversalAgent, DeepXXEAgent, DeepBusinessLogicAgent,
+                )
                 agents_to_run = [
                     DeepSQLiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                     DeepXSSAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                     DeepCMDiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
-                    DeepAuthAgent(self.scan_id, target_url, attack_graph, asi, oracle)
+                    DeepAuthAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepIDORAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepSSRFAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepSSTIAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepPathTraversalAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepXXEAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepBusinessLogicAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                 ]
-                
-                for agent in agents_to_run:
-                    agent_header(agent.__class__.__name__, agent.PRIMARY_VULN_CLASS, "DeepAgent Hypothesis Testing")
-                    res = await agent.run(context)
-                    context.confirmed_vulns.extend(res.vulns)
-                    
+
+                total = len(agents_to_run)
+                for idx, agent in enumerate(agents_to_run, 1):
+                    agent_header(
+                        f"DeepAgent {idx}/{total}",
+                        f"{agent.__class__.__name__} — {agent.PRIMARY_VULN_CLASS}",
+                        "Oracle-Guided Hypothesis Testing",
+                    )
+                    try:
+                        res = await agent.run(context)
+                        context.confirmed_vulns.extend(res.vulns)
+                        if res.vulns:
+                            print(
+                                f"  {C.NEON}✓{C.RST} {C.BOLD}{agent.__class__.__name__}{C.RST} "
+                                f"confirmed {C.R}{len(res.vulns)} vuln(s){C.RST}"
+                            )
+                        # Display any new attack chains
+                        if attack_graph.edges:
+                            print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
+                    except Exception as e:
+                        print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
+                        continue
+
                 return context
+
 
             from backend.config.dast_constants import XSS_PAYLOADS
             # Agent 04 - XSS
