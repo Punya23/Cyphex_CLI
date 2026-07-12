@@ -38,6 +38,7 @@ try:
 except ImportError:
     SOC_UI = False
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
+sys.path.insert(0, os.path.dirname(__file__))
 
 from sandbox_manager import (
     deploy_sandbox,
@@ -1935,7 +1936,6 @@ class CyphexEngine:
 
         try:
             import sys as _sys
-            _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
             from backend.network.discovery import NetworkDiscovery
             from backend.network.vuln_mapper import NetworkVulnMapper
             from backend.network.network_genome import NetworkBehavioralGenome

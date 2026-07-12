@@ -298,7 +298,6 @@ async def _cmd_netmap(args):
     """cyphex netmap — discover network, scan ports, report vulnerabilities."""
     try:
         import sys as _sys
-        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
         from backend.network.discovery import NetworkDiscovery
         from backend.network.vuln_mapper import NetworkVulnMapper
         from backend.network.network_genome import NetworkBehavioralGenome
@@ -406,7 +405,6 @@ async def _cmd_netwatch(args):
     """cyphex netwatch — continuous behavioural anomaly monitoring."""
     try:
         import sys as _sys
-        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
         from backend.network.network_genome import NetworkBehavioralGenome
         from backend.network.flow_collector import continuous_sample
         from backend.network.oracle_network import NetworkOracle
@@ -466,7 +464,6 @@ async def _cmd_netaudit(args):
     """cyphex netaudit --host IP — deep audit of a single host."""
     try:
         import sys as _sys
-        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend"))
         from backend.network.discovery import NetworkDiscovery
         from backend.network.vuln_mapper import NetworkVulnMapper
         from backend.network.oracle_network import NetworkOracle
