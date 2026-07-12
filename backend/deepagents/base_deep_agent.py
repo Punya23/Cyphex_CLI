@@ -13,7 +13,6 @@ import asyncio
 import httpx
 from rich.console import Console
 
-from backend.backend.agents.base_agent import BaseAgent
 from backend.backend.models.scan import ScanContext, Vuln, Evidence
 from backend.backend.models.agent_result import AgentResult
 from backend.deepagents.attack_graph import AttackGraph
@@ -21,6 +20,7 @@ from backend.deepagents.attack_surface_index import AttackSurfaceIndex
 from backend.deepagents.oracle_attack import AttackOracle, Hypothesis, HttpRequest
 
 console = Console()
+
 
 # How many hypotheses to test in parallel (keep at 3 to avoid hammering target)
 _PARALLEL_BATCH = 3
@@ -35,9 +35,9 @@ class HypothesisResult:
         self.confidence = confidence
 
 
-class BaseDeepAgent(BaseAgent):
+class BaseDeepAgent:
     """
-    Extends BaseAgent with the full Observe→Think→Act adaptive loop.
+    Standalone DeepAgent base — full Observe→Think→Act adaptive loop.
     Uses only local Ollama models — zero external API dependency.
     """
 
@@ -49,7 +49,9 @@ class BaseDeepAgent(BaseAgent):
 
     def __init__(self, scan_id: str, target_url: str, attack_graph: AttackGraph,
                  asi: AttackSurfaceIndex, oracle: AttackOracle, **kwargs):
-        super().__init__(scan_id, target_url, **kwargs)
+        self.scan_id = scan_id
+        self.target = target_url.rstrip("/")
+        self.console = console
         self.graph = attack_graph
         self.asi = asi
         self.oracle = oracle
