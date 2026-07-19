@@ -120,6 +120,7 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
     cwe = vuln_dict.get("cwe", "")
     file_path = vuln_dict.get("file_path", "")
     vulnerable_code = vuln_dict.get("vulnerable_code", "")
+    context = vuln_dict.get("context", "")
     memory_hint = vuln_dict.get("memory_hint", "")
     oracle = vuln_dict.get("oracle_analysis")
 
@@ -127,9 +128,23 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
         f"Vulnerability: {vuln_name} ({cwe})",
         f"File: {file_path}",
         "",
-        f"Vulnerable code:\n```\n{vulnerable_code}\n```",
-        "",
     ]
+
+    # Read-only surrounding context (imports, enclosing function, KB recipe,
+    # repo secure pattern). The model must NOT reproduce or return this — it is
+    # only here so the fix is written correctly for the exact window below.
+    if context:
+        parts.append("READ-ONLY CONTEXT (do NOT include this in your output):")
+        parts.append(f"```\n{context}\n```")
+        parts.append("")
+
+    parts.append(
+        "Vulnerable code — REPLACE ONLY THESE LINES. Return a drop-in replacement "
+        "for exactly this block, preserving its net brace/paren balance (if it "
+        "opens a brace and does not close it, your replacement must do the same):"
+    )
+    parts.append(f"```\n{vulnerable_code}\n```")
+    parts.append("")
 
     if oracle:
         thinking = oracle.get("thinking", "")
@@ -153,7 +168,9 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
         parts.append("")
 
     parts.append(
-        "Generate the fixed version of this code. "
+        "Generate the fixed version of the 'Vulnerable code' block ONLY. "
+        "Return a drop-in replacement for exactly those lines — do NOT include the "
+        "read-only context, and preserve the snippet's net brace/paren balance. "
         "The fix must ELIMINATE the vulnerability, not just add a superficial check."
     )
 
@@ -575,7 +592,12 @@ class PatchCouncil(CouncilOrchestrator):
                 final_safety = "rejected"
             elif not review_completed and total_reviewers == 0:
                 final_safety = "review_needed"
-            elif approved_count == total_reviewers and total_reviewers > 0:
+            elif (approved_count == total_reviewers and total_reviewers > 0
+                  and set(a.get("model") for a in approvals) != {patch_model}):
+                # Unanimous approval from at least one INDEPENDENT reviewer.
+                # On single-model hardware get_reviewers falls back to [patcher],
+                # so the reviewer set == {patch_model}; that is self-review, not
+                # validation — fall through to "review_needed" instead of "safe".
                 final_safety = "safe"
             elif approved_count >= 1:
                 final_safety = "review_needed"

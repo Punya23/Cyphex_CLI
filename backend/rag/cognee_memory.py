@@ -84,13 +84,11 @@ def _ensure_configured() -> bool:
 
         os.makedirs(COGNEE_DATA_DIR, exist_ok=True)
 
-        # CYPHEX is a single-user local CLI tool — cognee's multi-user
-        # access control is irrelevant overhead, and (as of 1.2.2) its
-        # default dataset-to-database handler ("ladybug") isn't compatible
-        # with the kuzu graph provider used here, which would otherwise
-        # raise on every remember()/recall() call. Read live via os.environ
-        # at call time (not cached), so setting it here is reliable
-        # regardless of when cognee was first imported.
+        # CYPHEX is a single-user local CLI tool — cognee's multi-user access
+        # control is irrelevant overhead, so disable it (also avoids the
+        # multi-user migration bookkeeping). Read live via os.environ at call
+        # time (not cached), so setting it here is reliable regardless of when
+        # cognee was first imported.
         os.environ.setdefault("ENABLE_BACKEND_ACCESS_CONTROL", "false")
 
         # Harmless defense-in-depth for any code path that reads env vars
@@ -110,8 +108,13 @@ def _ensure_configured() -> bool:
         # Authoritative — mutates the live (possibly already-cached) config
         # objects directly, so this always wins regardless of import order.
         cognee.config.set_vector_db_provider("lancedb")
-        cognee.config.set_graph_database_provider("kuzu")
-        # Cascades to derive the lancedb/kuzu file paths under this directory.
+        # NB: do NOT call set_graph_database_provider("kuzu") here — it's a no-op
+        # (the setter doesn't re-run GraphConfig's derivation, and cognee maps
+        # both "kuzu" and the default "ladybug" to the same adapter), and forcing
+        # "kuzu" via env would build a fresh empty graph and orphan the existing
+        # on-disk ladybug graph. Keep the default provider so we open the graph
+        # already on disk.
+        # Cascades to derive the lancedb/graph file paths under this directory.
         cognee.config.system_root_directory(COGNEE_DATA_DIR)
         cognee.config.data_root_directory(COGNEE_DATA_DIR)
 
@@ -210,8 +213,14 @@ async def recall_similar_fixes(cwe: str, vulnerable_code: str, limit: int = 3) -
     query = f"How was a {cwe} vulnerability fixed in code similar to:\n{vulnerable_code}"
 
     try:
+        # Use CHUNKS (raw retrieved chunks), NOT GRAPH_COMPLETION. The latter
+        # runs a full Ollama LLM completion over the retrieved subgraph, which
+        # can't finish inside the recall timeout budget — so every recall timed
+        # out and the memory hint was always empty (silent no-op). CHUNKS returns
+        # the stored vuln+fix payloads directly with no LLM call, and returns []
+        # cleanly on an empty/cold graph.
         results = await cognee.search(
-            query_type=SearchType.GRAPH_COMPLETION,
+            query_type=SearchType.CHUNKS,
             query_text=query,
             datasets=[DATASET_NAME],
         )

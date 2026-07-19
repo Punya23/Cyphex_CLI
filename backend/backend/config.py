@@ -29,8 +29,12 @@ class CyphexConfig:
     # ─── Cross-project patch memory (cognee, optional — pip install ".[memory]") ───
     COGNEE_LLM_MODEL: str = ""              # Falls back to OLLAMA_MODEL if unset
     COGNEE_EMBEDDING_MODEL: str = "nomic-embed-text"
-    COGNEE_RECALL_TIMEOUT_S: float = 8.0
-    COGNEE_REMEMBER_TIMEOUT_S: float = 20.0
+    COGNEE_RECALL_TIMEOUT_S: float = 20.0    # CHUNKS retrieval + cold vector load
+    COGNEE_REMEMBER_TIMEOUT_S: float = 120.0  # cognify() runs an LLM extraction pass;
+                                              # too small a budget truncates it mid-way,
+                                              # leaving the fix stored-but-not-recallable.
+                                              # Runs after the patch is applied, so a
+                                              # larger budget never delays remediation.
 
     # ─── Cerebras AI (Cloud — LEGACY, currently broken) ───
     CEREBRAS_API_KEY: str = ""  # Set via CEREBRAS_API_KEY env var

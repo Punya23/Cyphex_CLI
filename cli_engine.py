@@ -61,9 +61,14 @@ try:
     from backend.council.debate_protocol import DebateProtocol
     from backend.council.analysis_council import AnalysisCouncil
     from backend.council.route_tracer import RouteTracer
+    from backend.council.council_orchestrator import is_approved_vote
     COUNCIL_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     COUNCIL_AVAILABLE = False
+    # All-or-nothing gate: a single missing transitive dep (e.g. httpx) or a
+    # broken import inside any council module disables every council feature.
+    # Surface the reason instead of silently showing "Council: OFF".
+    console.print(f"[yellow]⚠ AI Council disabled (import failed): {e}[/yellow]")
 
 # ── New Patching Infrastructure (vectorless RAG + grounded reasoning) ──
 try:
@@ -229,13 +234,13 @@ class CyphexEngine:
             return
 
         # Step 1: Get source code
-        self._step("1/8", "GETTING SOURCE CODE")
+        self._step("1/9", "GETTING SOURCE CODE")
         self.source_dir = await self._get_source(repo_url, local_path, branch)
         if not self.source_dir:
             return
 
         # Step 2: Analyze code files
-        self._step("2/8", "STATIC CODE ANALYSIS")
+        self._step("2/9", "STATIC CODE ANALYSIS")
         file_vulns = self._analyze_code_files(self.source_dir)
 
         # Augment with multi-language scanner (Semgrep + 20-language fallback)
@@ -269,16 +274,20 @@ class CyphexEngine:
         except ImportError:
             pass  # cyphex package not installed
 
-        # Step 2b: Network Security Scan (optional, --network flag)
-        if network_scan:
-            self._step("2b/9", "NETWORK SECURITY SCAN")
-            await self._run_network_scan()
-
         # Step 3: Deploy sandbox
         self._step("3/9", "DEPLOYING SANDBOX")
         target_url = await self._deploy(self.source_dir)
         if not target_url:
             return
+
+        # Step 3b: Network Security Scan (optional, --network flag)
+        # Runs AFTER the Docker sandbox is deployed so the container's freshly
+        # published app+DB ports are live on the host when the subnet sweep runs.
+        # (Running it before deploy would sweep a network where the target's
+        # ports are still closed — the scan would miss the very thing we deploy.)
+        if network_scan:
+            self._step("3b/9", "NETWORK SECURITY SCAN")
+            await self._run_network_scan()
 
         # Step 4: Dynamic scan (crawl + attack)
         self._step("4/9", "DYNAMIC VULNERABILITY SCAN")
@@ -294,7 +303,7 @@ class CyphexEngine:
             self.context = await self._dynamic_scan(target_url, use_deepagents=use_deepagents)
         self.context.confirmed_vulns.extend(file_vulns)
 
-        # Merge network findings (if netmap ran in step 2b)
+        # Merge network findings (if netmap ran in step 3b)
         if hasattr(self, "_network_vulns") and self._network_vulns:
             self.context.confirmed_vulns.extend(self._network_vulns)
             print(f"  {C.G}[OK]{C.RST} +{len(self._network_vulns)} network vulnerability findings merged")
@@ -411,7 +420,7 @@ class CyphexEngine:
 
         # Fallback: original ANSI rendering
         step_icons = {
-            "1": "📥", "2": "🔍", "2b": "🌐", "3": "📦", "4": "⚡",
+            "1": "📥", "2": "🔍", "3": "📦", "3b": "🌐", "4": "⚡",
             "5": "🧬", "6": "⚔️", "7": "📊", "8": "🔧",
         }
         icon = step_icons.get(step_num, "◆")
@@ -1927,7 +1936,7 @@ class CyphexEngine:
 
     async def _run_network_scan(self) -> None:
         """
-        Network Security step (Step 2b/9) — runs when --network flag is set.
+        Network Security step (Step 3b/9) — runs when --network flag is set.
         Discovers local subnet, port-scans all live hosts, maps open ports to
         known vulnerabilities, and stores findings in self._network_vulns so
         they get merged into confirmed_vulns after the DAST step.
@@ -2042,7 +2051,12 @@ class CyphexEngine:
             except Exception:
                 genome = BehavioralGenome()
 
-        genome.build_from_scan(context)
+        # Only build when the genome has no profiles yet. A freshly loaded genome
+        # already carries its profiles/models/attack-history, so re-building here
+        # (and again inside run_evolution) would retrain on normal-only samples and
+        # wipe the adversarial adaptation we just restored.
+        if not genome.endpoint_profiles:
+            genome.build_from_scan(context)
         print(f"  {C.G}[OK]{C.RST} Genome built: {len(genome.endpoint_profiles)} endpoints")
 
         controller = EvolutionController()
@@ -2085,9 +2099,16 @@ class CyphexEngine:
             table.add_column("Type", justify="center")
             table.add_column("Score", justify="right")
             table.add_column("Verdict", justify="center")
+            # Score through the TRAINED genome (score_request = ML + heuristic),
+            # not the static heuristic alone — otherwise the evolution/training we
+            # just ran has no effect on what the user sees. Use one representative
+            # endpoint (avoids max-over-all false-positive inflation) and the single
+            # configured block threshold so the verdicts match live operation.
+            _thr = cyphex_config.GENOME_BLOCK_THRESHOLD
+            _ep = next(iter(genome.endpoint_profiles), None) or getattr(context, "target_url", "/")
             for payload, ptype in [("' OR 1=1--", "sqli"), ("<script>alert(1)</script>", "xss"), ("; cat /etc/passwd", "cmdi"), ("normal search", "benign"), ("John O'Brien", "benign")]:
-                score = genome._heuristic_score(genome.extract_features(payload))
-                verdict = "[red]BLOCK[/red]" if score >= 0.5 else "[green]ALLOW[/green]"
+                score = genome.score_request(_ep, payload)
+                verdict = "[red]BLOCK[/red]" if score >= _thr else "[green]ALLOW[/green]"
                 table.add_row(payload[:26], ptype, f"{score:.3f}", verdict)
             console.print(table)
 
@@ -2113,11 +2134,17 @@ class CyphexEngine:
             ("Normal Number", "42", "benign"),
         ]
 
+        # Score through the TRAINED genome (ML + heuristic) against one
+        # representative endpoint, at the configured operational threshold — so
+        # this "genome defense" reflects the model the evolution loop trained,
+        # not the static heuristic that ignores training.
+        _thr = cyphex_config.GENOME_BLOCK_THRESHOLD
+        _ep = next(iter(self.genome.endpoint_profiles), None) or getattr(self.context, "target_url", "/")
         blocked = fp = mal = 0
         attacks_data = []
         for name, payload, ptype in attacks:
-            score = self.genome._heuristic_score(self.genome.extract_features(payload))
-            is_blocked = score >= 0.5
+            score = self.genome.score_request(_ep, payload)
+            is_blocked = score >= _thr
             is_benign = ptype == "benign"
             before = "[green]ALLOWED[/green]"
             after = "[red]BLOCKED[/red]" if is_blocked else "[green]ALLOWED[/green]"
@@ -2376,7 +2403,11 @@ class CyphexEngine:
         # ═══════════════════════════════════════════════════════════════
         # V2 PIPELINE: Vectorless RAG + Grounded Reasoning
         # ═══════════════════════════════════════════════════════════════
-        use_v2 = PATCH_V2_AVAILABLE
+        # V2 (Vectorless-RAG + source patching) needs a source tree. On a
+        # live-URL-only scan self.source_dir is None; keep use_v2 off so we never
+        # construct CodeIndexer(None) (which raises), and URL findings fall through
+        # to the dynamic_only path instead of a misleading "requires Ollama" crash.
+        use_v2 = PATCH_V2_AVAILABLE and bool(self.source_dir)
         indexer = None
         manifest = None
         patch_memory = None
@@ -2710,20 +2741,32 @@ class CyphexEngine:
             try:
                 vuln_inputs = []
                 for p in patchable:
-                    # V2: Use full function context + KB recipe instead of blind window
-                    enriched_code = p.get("snippet_fn", p["snippet"])
-                    kb_recipe = ""
+                    # The applier overwrites EXACTLY the window [start_l+1, end_l]
+                    # (== p["snippet"]), so the model must rewrite that window and
+                    # nothing else. The enclosing function, imports, KB recipe and
+                    # repo secure-pattern go in a separate READ-ONLY `context` field
+                    # — never as the code-to-replace. (Feeding the full brace-
+                    # balanced function as the thing-to-replace, then splicing the
+                    # reply over the smaller window, is what broke brace balance ->
+                    # node --check failed -> auto-rollback -> "0 patches applied".)
+                    replace_window = p["snippet"]
+                    context_parts = []
                     if use_v2:
                         kb_recipe = format_for_prompt(p["cwe"], framework)
-                        if p.get("imports"):
-                            enriched_code = f"// FILE IMPORTS:\n{p['imports']}\n\n// VULNERABLE CODE ({p.get('ctx_quality','window')} extraction):\n{enriched_code}"
                         if kb_recipe:
-                            enriched_code = f"{kb_recipe}\n\n{enriched_code}"
-                        # Add repo's own secure pattern if available
+                            context_parts.append(kb_recipe)
+                        if p.get("imports"):
+                            context_parts.append(f"// FILE IMPORTS (read-only context):\n{p['imports']}")
+                        fn_ctx = p.get("snippet_fn")
+                        if fn_ctx and fn_ctx.strip() != replace_window.strip():
+                            context_parts.append(
+                                f"// ENCLOSING FUNCTION ({p.get('ctx_quality','window')} extraction, "
+                                f"read-only — do NOT return this whole block):\n{fn_ctx}")
                         if indexer:
                             repo_pattern = indexer.find_secure_pattern(p["cwe"])
                             if repo_pattern:
-                                enriched_code += f"\n\n// REPO'S OWN SECURE PATTERN (use this style):\n{repo_pattern[:300]}"
+                                context_parts.append(f"// REPO'S OWN SECURE PATTERN (match this style):\n{repo_pattern[:300]}")
+                    patch_context = "\n\n".join(context_parts)
 
                     memory_hint = ""
                     if COGNEE_AVAILABLE:
@@ -2738,9 +2781,10 @@ class CyphexEngine:
 
                     vuln_inputs.append({
                         "vuln_name": p["vuln_type"], "cwe": p["cwe"],
-                        "vulnerable_code": enriched_code, "file_path": p["rel_path"],
+                        "vulnerable_code": replace_window, "file_path": p["rel_path"],
                         "severity": p["vuln"].severity,
                         "memory_hint": memory_hint,
+                        "context": patch_context,
                     })
 
                 # Show context enrichment panel
@@ -2836,8 +2880,13 @@ class CyphexEngine:
                         vote_table.add_column("Verdict", justify="center", width=10)
                         vote_table.add_column("Reason", max_width=45)
                         for a in approvals:
-                            verdict_color = "green" if a.get("approved") else "red"
-                            verdict_text = "APPROVED" if a.get("approved") else "REJECTED"
+                            # Use the SAME guard the tally uses (is_approved_vote):
+                            # local models often emit the string "false", which is
+                            # truthy — raw `a.get("approved")` would print APPROVED
+                            # while the council counted it a rejection.
+                            _ok = is_approved_vote(a.get("approved")) if COUNCIL_AVAILABLE else bool(a.get("approved"))
+                            verdict_color = "green" if _ok else "red"
+                            verdict_text = "APPROVED" if _ok else "REJECTED"
                             vote_table.add_row(
                                 a.get("model", "unknown"),
                                 f"[{verdict_color}]{verdict_text}[/{verdict_color}]",
@@ -2864,6 +2913,19 @@ class CyphexEngine:
                 if isinstance(raw_safety, list): raw_safety = " ".join(str(x) for x in raw_safety)
                 llm_patch_safety = str(raw_safety).strip()
 
+                # ── Enforce the council verdict ──
+                # Previously llm_patch_safety was computed and displayed but never
+                # acted on, so a council-REJECTED patch was still shown as a normal
+                # proposal and applied (auto-applied in non-interactive mode). Gate
+                # it: a fully rejected patch is skipped, never written to disk.
+                if llm_patch_safety == "rejected":
+                    console.print(
+                        f"[bold red][BLOCKED][/bold red] AI Council rejected this patch "
+                        f"({justifications}) — not applying."
+                    )
+                    skipped += 1
+                    continue
+
                 console.print(Panel(
                     f"[bold red]Root Cause:[/bold red] {analysis}\n\n"
                     f"[bold green]Justifications:[/bold green] {justifications}",
@@ -2888,7 +2950,11 @@ class CyphexEngine:
             console.print(Panel(diff_text, title=f"Proposed Changes ({fix_source.upper()})", border_style="yellow"))
 
             # ── User approval ──
-            if self.non_interactive:
+            # Treat a non-TTY stdin (piped / CI) as non-interactive too — otherwise
+            # input() hits EOF, choice becomes "n", and every patch is silently
+            # skipped. apply_patch still backs up + node --check + rolls back, and
+            # verify_static gates the score, so auto-apply here is safe.
+            if self.non_interactive or not sys.stdin.isatty():
                 choice = "y"
                 console.print(f"[dim]non-interactive mode: auto applying patch[/dim]")
             else:
@@ -3303,11 +3369,15 @@ class CyphexEngine:
             elif "cors" in name_lower:
                 cwe = "CWE-942"
 
-        endpoint = getattr(vuln, "endpoint", "") or ""
-        file_hint = endpoint.split(":", 1)[0] if ":" in endpoint else ""
         try:
             from backend.patch import templates as patch_templates
-            return patch_templates.apply(cwe, file_hint, snippet)
+            # NB: the module exposes apply_template(cwe, code, framework), not
+            # apply(cwe, file_hint, snippet) — the old call raised AttributeError
+            # (swallowed below) so this deterministic fallback always returned None.
+            fixed = patch_templates.apply_template(cwe, snippet)
+            if not fixed:
+                return None
+            return {"fixed_code": fixed, "fix_source": "template"}
         except Exception:
             return None
 

@@ -324,6 +324,14 @@ class CodeIndexer:
             "CWE-78": [
                 r'execFile\s*\(|spawn\s*\(',                   # Safe subprocess
             ],
+            "CWE-200": [
+                # How this repo already avoids leaking sensitive data: auth/role
+                # guards, field redaction/selection, and env-var indirection.
+                r'req\.(user|isAuthenticated|session)',        # auth/role guard present
+                r'requireAuth|ensureAuth|authorize|isAdmin',
+                r'\bselect\s*\([^)]*\)|\.omit\s*\(|delete\s+\w+\.(password|token|secret)',
+                r'process\.env\.[A-Z_]+',                       # secrets via env, not literals
+            ],
         }
 
         search_patterns = patterns.get(cwe, [])
