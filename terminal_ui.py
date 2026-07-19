@@ -35,6 +35,8 @@ from rich.text import Text
 from rich.tree import Tree
 from rich.columns import Columns
 from rich.align import Align
+from rich.padding import Padding
+from rich.console import Group
 from rich.box import Box, ROUNDED, HEAVY, MINIMAL
 from rich.theme import Theme
 from rich.style import Style
@@ -741,23 +743,49 @@ def _glitch_frame(progress=1.0, seed=BOOT_SEED):
 #  MASTHEAD — the settled static header (persistent after boot)
 # ══════════════════════════════════════════════════════════════════════════
 def render_masthead(console=None, hint=True):
+    """Claude/Codex-style home screen: LEFT-aligned logo, then a bordered
+    workspace box (spanning the window) with a compact command reference and
+    the current directory. Not a centered splash."""
     c = console or soc
     c.print()
-    c.print(Align.center(_logo_static(c)))
+    # ── Left-aligned brand logo (1-col indent, not centered) ──
+    c.print(Padding(_logo_static(c), (0, 0, 0, 1)))
     c.print()
+    if not hint:
+        return
+
+    # ── Tagline + version ──
     tag = Text()
-    tag.append("⊹ ", style=REF)
     tag.append(TAGLINE, style=LABEL)
-    tag.append(f"  ·  v{CX_VERSION}", style=PHOS_DIM)
-    c.print(Align.center(tag))
-    if hint:
-        h = Text()
-        h.append("  Type ", style=LABEL)
-        h.append("/help", style=PHOS)
-        h.append(" for command deck  ·  ", style=LABEL)
-        h.append("Tab", style=PHOS)
-        h.append(" to acquire targets", style=LABEL)
-        c.print(Align.center(h))
+    tag.append(f"    v{CX_VERSION}", style=PHOS_DIM)
+
+    # ── Compact command reference (two command/description pairs per row) ──
+    grid = Table.grid(padding=(0, 3, 0, 0))
+    grid.add_column(no_wrap=True, style=f"bold {PHOS}")
+    grid.add_column(no_wrap=True, style=READOUT)
+    grid.add_column(no_wrap=True, style=f"bold {PHOS}")
+    grid.add_column(no_wrap=True, style=READOUT)
+    grid.add_row("/scan <target>", "Static + DAST scan", "/watch", "RASP auto-heal daemon")
+    grid.add_row("/deep <target>", "+ DeepAgents swarm", "/setup", "Install tools")
+    grid.add_row("/full <target>", "DeepAgents + network", "/doctor", "Health check")
+    grid.add_row("/net \\[host]", "Network map / audit", "/help", "All commands")
+
+    flags = Text()
+    flags.append("flags   ", style=LABEL)
+    flags.append("--network  --deepagents  --full  --no-patch", style=PHOS_DIM)
+
+    cwd = Text()
+    cwd.append("cwd     ", style=LABEL)
+    cwd.append(os.getcwd(), style=REF)
+
+    body = Group(tag, Text(), grid, Text(), flags, cwd)
+    c.print(Panel(
+        body,
+        title=Text("◈ WORKSPACE", style=f"bold {REF}"),
+        subtitle=Text("type a path or URL directly to scan it", style=LABEL),
+        title_align="left", subtitle_align="left",
+        border_style=PHOS_DIM, box=ROUNDED, padding=(1, 2),
+    ))
     c.print()
 
 

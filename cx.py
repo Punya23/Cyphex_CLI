@@ -55,13 +55,10 @@ CX_VERSION = ui.CX_VERSION if BOOT_UI else "4.3"
 
 
 def _boot_animation():
-    """Play the CYPHEX logo boot sequence. Silently skipped if rich UI is unavailable."""
-    if not BOOT_UI:
-        return
-    try:
-        ui.render_boot()
-    except Exception:
-        pass
+    """No-op. The workspace opens straight to the LEFT-aligned welcome box
+    (Claude/Codex style) — no centered boot splash. Kept as a hook so a future
+    opt-in animation can be re-enabled without touching the REPL."""
+    return
 
 
 def _show_header():
