@@ -338,12 +338,35 @@ def _install_nuclei_binary(system: str, machine: str, installed: list):
         print("    Install manually: https://github.com/projectdiscovery/nuclei/releases")
 
 
+def _launch_workspace():
+    """Drop into the interactive CYPHEX workspace (the slash-command REPL).
+
+    This is the default when `cyphex` is run with no subcommand — so, like
+    `claude` or `codex`, a single `cyphex` opens the workspace and everything
+    else (/scan, /deep, /net, /doctor, /watch …) happens inside it.
+    """
+    try:
+        import cx  # top-level module at the project root (on sys.path above)
+    except Exception as e:
+        print(f"Could not load the CYPHEX workspace: {e}")
+        print("Run from the project directory, or reinstall with: pip install -e .")
+        sys.exit(1)
+    cx.run_workspace()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="cyphex",
-        description="CYPHEX — AI Security Scanner with Adversarial Immune System",
+        description="CYPHEX — AI Security Scanner with Adversarial Immune System. "
+                    "Run `cyphex` with no arguments to open the interactive workspace.",
     )
     subparsers = parser.add_subparsers(dest="command")
+
+    # ── cyphex  (no subcommand) / cyphex repl ──
+    # Enter the interactive workspace. Registered as explicit subcommands too so
+    # `cyphex repl` / `cyphex workspace` / `cyphex shell` all work.
+    for _alias in ("repl", "workspace", "shell"):
+        subparsers.add_parser(_alias, help="Open the interactive CYPHEX workspace (default)")
 
     # ── cyphex scan ──
     scan_parser = subparsers.add_parser("scan", help="Run a security scan")
@@ -376,7 +399,11 @@ def main():
 
     args = parser.parse_args()
 
-    if args.command == "setup":
+    if args.command in (None, "repl", "workspace", "shell"):
+        # `cyphex` with no subcommand → open the interactive workspace.
+        _launch_workspace()
+
+    elif args.command == "setup":
         _setup_tools()
 
     elif args.command == "doctor":

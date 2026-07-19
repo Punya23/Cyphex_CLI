@@ -39,6 +39,12 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 [project.scripts]
 cyphex = "cyphex.cli:main"
 
+[tool.setuptools]
+# Top-level engine modules that live at the repo root (outside the cyphex/
+# package) but are imported by cyphex.cli. Declared so an editable install
+# (`pip install -e .`) exposes them and `cyphex` can open the workspace.
+py-modules = ["cli_engine", "cx", "terminal_ui", "cyphex_cli", "cyphex_benchmark"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cyphex*"]

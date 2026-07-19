@@ -44,14 +44,93 @@ _load_env()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 
 
-# ── Colours ───────────────────────────────────────────────────────────────────
+# ── Rich boot UI (optional — falls back to plain ANSI banner if unavailable) ──
+try:
+    import terminal_ui as ui
+    BOOT_UI = True
+except ImportError:
+    BOOT_UI = False
+
+CX_VERSION = ui.CX_VERSION if BOOT_UI else "4.3"
+
+
+def _boot_animation():
+    """Play the CYPHEX logo boot sequence. Silently skipped if rich UI is unavailable."""
+    if not BOOT_UI:
+        return
+    try:
+        ui.render_boot()
+    except Exception:
+        pass
+
+
+def _show_header():
+    """Repaint the persistent masthead — BORESIGHT canopy or ANSI fallback."""
+    _clear()
+    if BOOT_UI:
+        try:
+            ui.render_masthead()
+            return
+        except Exception:
+            pass
+    print(BANNER)
+
+
+def _deck():
+    """Print the persistent command-deck status rail (static snapshot per turn)."""
+    if BOOT_UI:
+        try:
+            ui.render_command_deck(_session)
+        except Exception:
+            pass
+
+
+def _repl_prompt():
+    """readline-safe armed caret (BORESIGHT) or the plain fallback prompt."""
+    if BOOT_UI:
+        try:
+            return ui.deck_prompt(_session)
+        except Exception:
+            pass
+    return f"{C.CYAN}cx{C.RST}{C.GREY}>{C.RST} "
+
+
+def _goodbye():
+    if BOOT_UI:
+        try:
+            ui.soc.print("\n  [#4FC5D6]◈[/] [#3BF7A7]CYPHEX offline · canopy dark.[/]\n")
+            return
+        except Exception:
+            pass
+    print(f"\n  {C.CYAN}Goodbye.{C.RST}\n")
+
+
+def _print_help():
+    if BOOT_UI:
+        try:
+            ui.render_help()
+            return
+        except Exception:
+            pass
+    print(QUICK_HELP)
+
+
+# ── Colours ── plain-ANSI fallback palette · MONO ELECTRIC BLUE brand ─────────
+# Only used when terminal_ui / rich is unavailable. Mirrors terminal_ui.py's
+# single-hue blue ramp so the degraded banner stays on-brand. RED/YEL are kept
+# as the alert channel for legible errors/warnings in the plain fallback path.
+def _tc(hex_):
+    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
+    return f"\033[38;2;{r};{g};{b}m"
+
 class C:
-    CYAN   = "\033[96m"
-    NEON   = "\033[92m"
-    RED    = "\033[91m"
-    YEL    = "\033[93m"
-    BLUE   = "\033[94m"
-    GREY   = "\033[90m"
+    CYAN   = _tc("#3B82F6")   # PRIMARY blue — wordmark / accents / active
+    NEON   = _tc("#7DABFF")   # bright blue — command names / high emphasis
+    RED    = _tc("#FF3141")   # error mark (plain-fallback alert channel)
+    YEL    = _tc("#FFB020")   # warning mark (plain-fallback alert channel)
+    BLUE   = _tc("#3B82F6")   # PRIMARY blue
+    GREY   = _tc("#5F7391")   # muted blue-grey — captions / timestamps
+    MAG    = _tc("#7DABFF")   # bright blue (legacy alias)
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     RST    = "\033[0m"
@@ -76,18 +155,19 @@ QUICK_HELP = f"""
 {C.CYAN}{C.BOLD}Available Commands{C.RST}
 {C.DIM}─────────────────────────────────────────────────────────────{C.RST}
 
-  {C.NEON}/scan{C.RST}              Scan a target (prompts for path/URL)
-  {C.NEON}/scan <path>{C.RST}       Scan a local directory
-  {C.NEON}/scan <github-url>{C.RST} Clone and scan a GitHub repo
-  {C.NEON}/deep{C.RST}              Full DeepAgents + network scan (recommended)
-  {C.NEON}/deep <path>{C.RST}       Full DeepAgents scan on a local path
-  {C.NEON}/net{C.RST}               Network discovery & vulnerability map
-  {C.NEON}/net <host>{C.RST}        Audit a specific host or CIDR range
-  {C.NEON}/watch{C.RST}             Start RASP auto-healing daemon
+  {C.NEON}/scan <target>{C.RST}     Scan a path or GitHub URL  (Static + DAST)
+  {C.NEON}/deep <target>{C.RST}     Add the full DeepAgents attack swarm
+  {C.NEON}/full <target>{C.RST}     DeepAgents + network sweep (everything)
+     {C.GREY}flags:{C.RST} {C.DIM}--network  --deepagents  --full  --no-patch{C.RST}
+     {C.GREY}e.g.  {C.RST}{C.DIM}/scan ./vibemart --network --deepagents{C.RST}
+  {C.NEON}/net [host]{C.RST}        Network discovery, or audit a specific host
+  {C.NEON}/watch{C.RST}             Start the RASP auto-healing daemon
+  {C.NEON}/setup{C.RST}             Install Semgrep, Nuclei; check Ollama & Docker
   {C.NEON}/doctor{C.RST}            Check all models, tools, and dependencies
+  {C.NEON}/benchmark{C.RST}         Score the Immune System (precision/recall/F1)
   {C.NEON}/models{C.RST}            List available local Ollama models
-  {C.NEON}/history{C.RST}           Show recent scans
-  {C.NEON}/clear{C.RST}             Clear the screen
+  {C.NEON}/history{C.RST}           Show recent scans this session
+  {C.NEON}/clear{C.RST}             Repaint the workspace
   {C.NEON}/exit{C.RST}  {C.NEON}/quit{C.RST}      Exit CYPHEX
 
 {C.DIM}─────────────────────────────────────────────────────────────
@@ -97,8 +177,9 @@ QUICK_HELP = f"""
 
 # ── Readline autocomplete ──────────────────────────────────────────────────────
 COMMANDS = [
-    "/scan", "/deep", "/net", "/netmap", "/netwatch", "/netaudit",
-    "/watch", "/doctor", "/models", "/history", "/clear", "/exit", "/quit", "/help",
+    "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
+    "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/doctor",
+    "/models", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
 def _completer(text, state):
@@ -128,7 +209,9 @@ _session = {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _clear():
-    os.system("cls" if os.name == "nt" else "clear")
+    # Never clear when piped/redirected — it would spam escape codes into logs.
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
 
 def _spinner(msg: str):
     """Print a status line."""
@@ -175,8 +258,35 @@ def _record_history(cmd: str, target: str):
 # ── Command handlers ───────────────────────────────────────────────────────────
 
 def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
-    """Run a scan — optionally full DeepAgents + network."""
-    target = arg.strip() if arg else ""
+    """Run a scan. Inline flags (any order, after the target):
+         --network / -n        add the network security sweep
+         --deep / --deepagents add the full DeepAgents attack swarm
+         --full / --all        both of the above
+         --no-patch            scan only, skip auto-patching
+    So `/scan ./app --network --deepagents` == the long cyphex_cli invocation.
+    """
+    import shlex
+    no_patch = False
+    positional = []
+    try:
+        tokens = shlex.split(arg) if arg else []
+    except ValueError:
+        tokens = arg.split() if arg else []
+    for t in tokens:
+        tl = t.lower()
+        if tl in ("--deep", "--deepagents", "--use-deepagents"):
+            deep = True
+        elif tl in ("--network", "--net", "-n"):
+            network = True
+        elif tl in ("--full", "--all"):
+            deep = network = True
+        elif tl in ("--no-patch", "--nopatch", "--scan-only"):
+            no_patch = True
+        elif t.startswith("-"):
+            _dim(f"(ignoring unknown flag {t})")
+        else:
+            positional.append(t)
+    target = " ".join(positional).strip()
 
     if not target:
         # Was anything scanned before? Offer it as default.
@@ -210,11 +320,17 @@ def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
         scan_args += ["--network"]
     if deep:
         scan_args += ["--use-deepagents"]
+    if no_patch:
+        scan_args += ["--no-patch"]
 
     scan_args += ["--non-interactive"]
 
-    mode = "DeepAgents + Network" if deep else ("Network" if network else "Static + DAST")
-    _dim(f"Mode: {mode}")
+    bits = ["DeepAgents" if deep else "Static + DAST"]
+    if network:
+        bits.append("Network")
+    if no_patch:
+        bits.append("scan-only")
+    _dim(f"Mode: {' + '.join(bits)}")
     print()
 
     _session["last_path"] = target
@@ -244,6 +360,88 @@ def _cmd_doctor():
 def _cmd_watch():
     _spinner("Starting RASP auto-healing daemon (Ctrl+C to stop)...")
     _run_cyphex(["watch"])
+
+
+def _cmd_setup():
+    """One-time setup — install/verify Semgrep, Nuclei, Ollama, Docker."""
+    _spinner("Running one-time setup — installing optional security tools...")
+    print()
+    try:
+        from cyphex.cli import _setup_tools
+        _setup_tools()
+    except Exception:
+        # Fall back to a subprocess so setup still works if the package layout
+        # differs (e.g. run straight from the repo without an editable install).
+        try:
+            subprocess.run([sys.executable, "-c",
+                            "from cyphex.cli import _setup_tools; _setup_tools()"],
+                           cwd=os.path.dirname(os.path.abspath(__file__)))
+        except Exception as e:
+            _err(f"Setup failed: {e}")
+            _dim("Install manually: pip install semgrep · brew install nuclei · https://ollama.ai")
+
+
+def _cmd_version():
+    """Show the CYPHEX masthead + version."""
+    _show_header()
+
+
+def _cmd_benchmark(arg: str):
+    """Benchmark the Immune System detector against a labelled corpus.
+
+    Usage:  /benchmark [corpus.json|.csv] [--threshold 0.5] [--json out.json]
+    Bundled corpus runs fully offline. Writes benchmark_report.json — the
+    'measurable result' artifact for the submission.
+    """
+    import shlex
+    data = threshold = json_out = None
+    threshold = 0.5
+    toks = shlex.split(arg) if arg else []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("--data", "-d") and i + 1 < len(toks):
+            data = toks[i + 1]; i += 2
+        elif t in ("--threshold", "-t") and i + 1 < len(toks):
+            try: threshold = float(toks[i + 1])
+            except ValueError: _warn(f"bad threshold '{toks[i+1]}', using 0.5")
+            i += 2
+        elif t in ("--json", "-o") and i + 1 < len(toks):
+            json_out = toks[i + 1]; i += 2
+        elif not t.startswith("-") and data is None:
+            data = t; i += 1
+        else:
+            i += 1
+
+    _spinner("Evaluating Immune System against labelled corpus...")
+    try:
+        import cyphex_benchmark as bench
+        report, _ = bench.run_benchmark(data, threshold=threshold)
+    except Exception as e:
+        _err(f"Benchmark failed: {e}")
+        return
+
+    rendered = False
+    if BOOT_UI:
+        try:
+            ui.render_benchmark(report); rendered = True
+        except Exception:
+            rendered = False
+    if not rendered:
+        try:
+            import cyphex_benchmark as bench
+            bench._print_plain(report)
+        except Exception:
+            pass
+
+    out = json_out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "benchmark_report.json")
+    try:
+        import json as _json
+        with open(out, "w") as f:
+            _json.dump(report, f, indent=2)
+        _dim(f"Report written → {out}")
+    except Exception:
+        pass
 
 
 def _cmd_models():
@@ -309,13 +507,16 @@ def _handle(line: str):
 
     match cmd:
         case "/help" | "help":
-            print(QUICK_HELP)
+            _print_help()
 
         case "/scan":
             _cmd_scan(arg)
 
-        case "/deep":
+        case "/deep" | "/deepagents":
             _cmd_scan(arg, deep=True)
+
+        case "/full":
+            _cmd_scan(arg, deep=True, network=True)
 
         case "/net" | "/netmap":
             _cmd_net(arg)
@@ -332,44 +533,61 @@ def _handle(line: str):
         case "/watch":
             _cmd_watch()
 
+        case "/setup":
+            _cmd_setup()
+
         case "/doctor":
             _cmd_doctor()
 
+        case "/version":
+            _cmd_version()
+
         case "/models":
             _cmd_models()
+
+        case "/benchmark" | "/bench":
+            _cmd_benchmark(arg)
 
         case "/history":
             _cmd_history()
 
         case "/clear" | "clear":
-            _clear()
-            print(BANNER)
+            _show_header()
 
         case "/exit" | "/quit" | "exit" | "quit":
-            print(f"\n  {C.CYAN}Goodbye.{C.RST}\n")
+            _goodbye()
             sys.exit(0)
 
         case _:
             _auto_scan(line)
 
 
-def _repl():
-    """Drop into the interactive REPL."""
-    _clear()
-    print(BANNER)
+def run_workspace():
+    """Public entry point — drop straight into the interactive CYPHEX workspace.
+    Called by the `cyphex` console-script (cyphex.cli) when no subcommand is
+    given, so `cyphex` alone opens the workspace like `claude` / `codex`."""
+    _repl()
 
-    prompt = f"{C.CYAN}cx{C.RST}{C.GREY}>{C.RST} "
+
+def _repl():
+    """Drop into the interactive REPL — BORESIGHT command deck."""
+    _boot_animation()
+    _show_header()
 
     while True:
+        # Persistent deck: repaint the status rail before each prompt so posture
+        # is always honest. Static snapshot per turn — the animated deck only
+        # runs inside rich.Live during operations, never against readline.
+        _deck()
         try:
-            line = input(prompt).strip()
+            line = input(_repl_prompt()).strip()
         except KeyboardInterrupt:
             # Ctrl+C → new line, don't quit
             print()
             continue
         except EOFError:
             # Ctrl+D → quit
-            print(f"\n  {C.CYAN}Goodbye.{C.RST}\n")
+            _goodbye()
             break
 
         _handle(line)
@@ -383,46 +601,50 @@ def main():
         raw_arg = " ".join(sys.argv[1:])
         first   = sys.argv[1].lower()
 
-        # cx scan [path]        → /scan
+        # cx --version / -v / version
+        if first in ("--version", "-v", "version", "/version"):
+            _boot_animation()
+            _show_header()
+            return
+
+        # cx scan [path]        → /scan  (cli_engine paints its own hero)
         if first in ("scan", "/scan"):
             _clear()
-            print(BANNER)
-            remainder = " ".join(sys.argv[2:])
-            _cmd_scan(remainder)
+            _cmd_scan(" ".join(sys.argv[2:]))
             return
 
         # cx deep [path]        → /deep
         if first in ("deep", "/deep"):
             _clear()
-            print(BANNER)
-            remainder = " ".join(sys.argv[2:])
-            _cmd_scan(remainder, deep=True)
+            _cmd_scan(" ".join(sys.argv[2:]), deep=True)
             return
 
         # cx net [host]
         if first in ("net", "/net", "netmap", "/netmap"):
-            _clear()
-            print(BANNER)
+            _show_header()
             _cmd_net(" ".join(sys.argv[2:]))
             return
 
         # cx doctor
         if first in ("doctor", "/doctor"):
-            _clear()
-            print(BANNER)
+            _show_header()
             _cmd_doctor()
             return
 
         # cx models
         if first in ("models", "/models"):
-            _clear()
-            print(BANNER)
+            _show_header()
             _cmd_models()
+            return
+
+        # cx benchmark [corpus] [--threshold x]
+        if first in ("benchmark", "/benchmark", "bench", "/bench"):
+            _show_header()
+            _cmd_benchmark(" ".join(sys.argv[2:]))
             return
 
         # cx <path/url> → auto-scan
         _clear()
-        print(BANNER)
         _cmd_scan(raw_arg)
         return
 
