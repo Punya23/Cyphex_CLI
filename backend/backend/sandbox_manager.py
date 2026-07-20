@@ -368,25 +368,41 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
     else:
         cmd = ["node", app_file]
 
+    # Stream the sandbox's stdout+stderr to a persistent log file instead of PIPE
+    # buffers that are never drained — undrained PIPEs both HIDE the logs (nothing
+    # reads them while the process runs) AND can DEADLOCK the child once the ~64 KB
+    # OS pipe buffer fills. A file lets us both surface logs and avoid the stall.
+    log_path = os.path.join(sandbox_dir, "_cyphex_sandbox.log")
+    log_fh = open(log_path, "wb")
     proc = subprocess.Popen(
         cmd, shell=False,
         cwd=sandbox_dir,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
         preexec_fn=_sandbox_preexec if os.name != 'nt' else None,
     )
+
+    def _read_log_tail(n=4000):
+        try:
+            log_fh.flush()
+        except Exception:
+            pass
+        try:
+            with open(log_path, "r", errors="replace") as _lf:
+                return _lf.read()[-n:]
+        except Exception:
+            return ""
 
     # Wait for the server to start (native modules like sqlite3 can be slow)
     await asyncio.sleep(5)
 
     # Check if process is still running
     if proc.poll() is not None:
-        stdout = proc.stdout.read().decode(errors='replace')[:500]
-        stderr = proc.stderr.read().decode(errors='replace')[:500]
         return {
-            "error": f"Sandbox process exited immediately. stdout: {stdout}, stderr: {stderr}",
+            "error": f"Sandbox process exited immediately. logs: {_read_log_tail(1000)}",
             "sandbox_id": sandbox_id,
+            "log_file": log_path,
         }
 
     # Verify the server is responding
@@ -402,6 +418,8 @@ async def deploy_sandbox(zip_path: str, sandbox_id: Optional[str] = None) -> dic
         "path": sandbox_dir,
         "started_at": datetime.now().isoformat(),
         "pid": proc.pid,
+        "log_file": log_path,
+        "logs": _read_log_tail(),
     }
 
     active_sandboxes[sandbox_id] = {

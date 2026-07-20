@@ -30,9 +30,13 @@ class CyphexConfig:
     COGNEE_LLM_MODEL: str = ""              # Falls back to OLLAMA_MODEL if unset
     COGNEE_EMBEDDING_MODEL: str = "nomic-embed-text"
     COGNEE_RECALL_TIMEOUT_S: float = 20.0    # CHUNKS retrieval + cold vector load
-    COGNEE_REMEMBER_TIMEOUT_S: float = 120.0  # cognify() runs an LLM extraction pass;
-                                              # too small a budget truncates it mid-way,
-                                              # leaving the fix stored-but-not-recallable.
+    COGNEE_REMEMBER_TIMEOUT_S: float = 300.0  # cognify() runs an LLM extraction pass;
+                                              # cognee's own Ollama structured-output retry
+                                              # floor is 240s (stop_after_delay), so a 120s
+                                              # budget ALWAYS cancelled cognify mid-pass →
+                                              # empty TimeoutError, nothing persisted. Must
+                                              # exceed 240s. Runs post-remediation, so a
+                                              # larger budget never delays the actual fix.
                                               # Runs after the patch is applied, so a
                                               # larger budget never delays remediation.
 

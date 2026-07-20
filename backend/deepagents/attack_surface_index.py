@@ -134,8 +134,15 @@ class AttackSurfaceIndex:
             "",
             "High-value endpoints:",
         ]
+        # Never present dead routes to the Oracle. An endpoint whose ONLY observed
+        # status is 404 does not exist — listing it as "high-value" makes the Oracle
+        # plan hypotheses against non-existent routes (the 404-storm waste).
+        _live_endpoints = {
+            u: p for u, p in self.endpoints.items()
+            if p.status_codes and p.status_codes != {404}
+        }
         for url, profile in sorted(
-            self.endpoints.items(),
+            _live_endpoints.items(),
             key=lambda x: x[1].interest_score(),
             reverse=True,
         )[:10]:

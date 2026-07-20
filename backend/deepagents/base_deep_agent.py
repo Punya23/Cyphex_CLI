@@ -193,6 +193,18 @@ class BaseDeepAgent:
         for attempt in range(self.MAX_ATTEMPTS_PER_HYPOTHESIS):
             status, body, elapsed, headers = await self._http_probe(current_request)
 
+            # Dead-route guard: a 404 means the route does not exist; a 0 means the
+            # request failed to connect. No amount of payload mutation makes a
+            # non-existent endpoint vulnerable, so abandon immediately instead of
+            # burning MAX_ATTEMPTS × (Oracle decide + mutate) slow local-LLM calls
+            # on it. This is what turned a handful of dead routes into ~39 minutes.
+            if status in (404, 0):
+                console.print(
+                    f"[dim]  [{hyp.id}] {current_request.path} → HTTP {status}: "
+                    f"dead route, abandoning (no Oracle call)[/dim]"
+                )
+                return HypothesisResult(False)
+
             # Update ASI with observation
             self.asi.ingest_response(
                 url=current_request.path,

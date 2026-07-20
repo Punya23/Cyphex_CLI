@@ -188,7 +188,14 @@ async def remember_fix(cwe: str, vulnerable_code: str, fixed_code: str, project_
     try:
         await cognee.add(content, dataset_name=DATASET_NAME)
         await cognee.cognify(datasets=[DATASET_NAME])
-    except Exception:
+    except Exception as e:
+        # Preserve the "never raises" contract, but do NOT swallow the real reason
+        # silently — otherwise a genuine cognify/embedding/LLM error is invisible and
+        # the caller only ever sees the outer wait_for TimeoutError (whose str() is "").
+        # asyncio.CancelledError is a BaseException, so a real timeout still propagates
+        # to wait_for correctly and is not masked here.
+        import sys
+        print(f"cognee remember_fix failed: {e!r}", file=sys.stderr)
         return
 
 

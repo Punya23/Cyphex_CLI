@@ -56,18 +56,22 @@ def run_semgrep(source_dir: str, config: str = "auto") -> list[StaticFinding]:
     Uses 'auto' config (5000+ rules across 30+ languages).
     """
     try:
-        cmd = ["semgrep", "--config", config, "--json", "--quiet", "--timeout", "120"]
+        # --metrics=off keeps this a local-first tool (no telemetry phone-home).
+        cmd = ["semgrep", "--config", config, "--json", "--quiet", "--timeout", "120", "--metrics=off"]
         if os.name == "nt":
             wsl_path = subprocess.run(["wsl", "wslpath", "-a", source_dir], capture_output=True, text=True).stdout.strip()
-            cmd = ["wsl", "semgrep", "--config", config, "--json", "--quiet", "--timeout", "120", wsl_path]
+            cmd = ["wsl", "semgrep", "--config", config, "--json", "--quiet", "--timeout", "120", "--metrics=off", wsl_path]
         else:
             cmd.append(source_dir)
-            
+
         result = subprocess.run(
             cmd,
             capture_output=True, text=True, timeout=300
         )
-        if result.returncode not in (0, 1):  # 1 = findings found
+        # Semgrep can exit 2 on partial/rule-fetch errors while STILL emitting valid
+        # results on stdout — parse whatever JSON is present rather than dropping
+        # every finding on any non-0/1 exit.
+        if not (result.stdout or "").strip():
             return []
 
         data = json.loads(result.stdout)
@@ -672,15 +676,22 @@ def run_builtin_scan(source_dir: str) -> list[StaticFinding]:
 def run_static_analysis(source_dir: str) -> list[StaticFinding]:
     """
     Run static analysis on source code.
-    Uses Semgrep if available, falls back to built-in regex scanner.
+    Runs BOTH Semgrep (when available) AND the built-in 20-language scanner and
+    returns the UNION (deduped) — the two were previously mutually exclusive, so
+    turning Semgrep on silently shrank coverage to just one ruleset.
     """
+    findings: list[StaticFinding] = []
     if semgrep_available():
         findings = run_semgrep(source_dir)
-        if findings:
-            return findings
-        # If Semgrep returned nothing (maybe config issue), fall through
 
-    return run_builtin_scan(source_dir)
+    builtin = run_builtin_scan(source_dir)
+    seen = {(f.file_path, f.line_number, f.rule_id) for f in findings}
+    for b in builtin:
+        key = (b.file_path, b.line_number, b.rule_id)
+        if key not in seen:
+            seen.add(key)
+            findings.append(b)
+    return findings
 
 
 def scan_single_file(file_path: str, source_dir: Optional[str] = None) -> list[StaticFinding]:

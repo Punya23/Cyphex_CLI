@@ -48,7 +48,7 @@ def nuclei_available() -> bool:
 
 async def run_nuclei(
     target_url: str,
-    severity: str = "critical,high,medium",
+    severity: str = "critical,high,medium,low,info",
     templates: Optional[list[str]] = None,
     rate_limit: int = 50,
     timeout: int = 300,
@@ -67,9 +67,12 @@ async def run_nuclei(
         "nuclei",
         "-u", target_url,
         "-severity", severity,
-        "-json-export", "/dev/stdout",  # JSON to stdout
-        "-silent",                       # No banner
+        "-jsonl",                        # stream JSONL results to stdout — reliable,
+                                         # unlike -json-export /dev/stdout which buffers
+                                         # to a file handle and often emits 0 bytes.
+        "-silent",                       # No banner on stdout
         "-duc",                          # Disable update check (prevents hanging prompt)
+        "-ni",                           # Disable interactsh OOB (avoids startup stalls offline)
         "-rate-limit", str(rate_limit),
         "-timeout", "10",               # Per-request timeout
         "-retries", "1",
@@ -81,8 +84,10 @@ async def run_nuclei(
         for t in templates:
             cmd.extend(["-t", t])
     else:
-        # Default: use built-in web vulnerability templates
-        cmd.extend(["-tags", "cve,sqli,xss,rce,lfi,ssrf,redirect,exposure"])
+        # Bespoke app deployed in the sandbox: generic detection tags only. The `cve`
+        # tag pulls in thousands of product-fingerprint templates that never match a
+        # custom app AND routinely blow past the scan timeout (→ silent empty result).
+        cmd.extend(["-tags", "exposure,misconfig,default-login,sqli,xss,lfi,ssrf,rce,redirect"])
 
     try:
         proc = await asyncio.to_thread(
@@ -121,6 +126,8 @@ async def run_nuclei(
         return findings
 
     except subprocess.TimeoutExpired:
+        # Distinguish a broken/timed-out run from a genuinely clean target.
+        print(f"  [DAST] Nuclei timed out after {timeout}s — no findings returned")
         return []
     except FileNotFoundError:
         return []

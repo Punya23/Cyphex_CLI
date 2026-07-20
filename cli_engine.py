@@ -73,7 +73,7 @@ except ImportError as e:
 # ── New Patching Infrastructure (vectorless RAG + grounded reasoning) ──
 try:
     from backend.patch.resolver import resolve as resolve_location, is_patchable
-    from backend.patch.context import extract_function, extract_imports, detect_language
+    from backend.patch.context import extract_function, extract_function_span, extract_imports, detect_language
     from backend.patch.applier import apply_patch, rollback
     from backend.patch.verifier import verify_static, VerifyResult
     from backend.patch.manifest import PatchManifest
@@ -340,6 +340,15 @@ class CyphexEngine:
         if self._static_proc:
             self._static_proc.terminate()
             print(f"\n  {C.G}[OK]{C.RST} Static server stopped.")
+        elif self.sandbox_info and self.sandbox_info.get("container_name"):
+            # A real Docker container (Priority 2) — the native stop_sandbox() can't
+            # touch it; route to stop_docker_sandbox so it doesn't leak.
+            try:
+                from cyphex.docker_sandbox import stop_docker_sandbox
+                stop_docker_sandbox(self.sandbox_info["container_name"])
+                print(f"\n  {C.G}[OK]{C.RST} Sandbox container stopped.")
+            except Exception:
+                pass
         elif self.sandbox_info and self.sandbox_info.get("type") != "docker-compose":
             stop_sandbox(self.sandbox_info.get("sandbox_id", ""))
             print(f"\n  {C.G}[OK]{C.RST} Sandbox stopped.")
@@ -915,25 +924,40 @@ class CyphexEngine:
             except Exception as e:
                 print(f"  {C.Y}[WARN]{C.RST} Docker error: {str(e)[:100]}")
 
-        # ── Priority 2: Dockerfile only ──
-        elif os.path.exists(os.path.join(source_dir, "Dockerfile")) and shutil.which("docker"):
-            print(f"  {C.G}[DOCKER]{C.RST} Found Dockerfile — building container...")
+        # ── Priority 2: Docker container (existing OR auto-generated Dockerfile) ──
+        # Docker is already confirmed available above (docker_available() returned
+        # True, else we'd have returned 'offline_mode'). Build+run a REAL container
+        # even when the target ships no Dockerfile — deploy_docker_sandbox() generates
+        # one on the fly. This is the actual image+container sandbox (with logs),
+        # instead of silently falling through to a bare native process.
+        elif shutil.which("docker"):
+            if os.path.exists(os.path.join(source_dir, "Dockerfile")):
+                print(f"  {C.G}[DOCKER]{C.RST} Found Dockerfile — building container...")
+            else:
+                print(f"  {C.G}[DOCKER]{C.RST} No Dockerfile — auto-generating one and building container...")
             try:
                 from cyphex.docker_sandbox import deploy_docker_sandbox
                 result = await deploy_docker_sandbox(source_dir, sandbox_id=self.scan_id)
                 if result and result.get("url") and not result.get("error"):
                     self.sandbox_info = result
                     url = result["url"]
-                    print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{C.RST}")
+                    _gen = " (auto-generated Dockerfile)" if result.get("generated_dockerfile") else ""
+                    print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{_gen}{C.RST}")
                     sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
                     print(f"  {sb}")
                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
+                    print(f"  {C.GHOST}  Container: {result.get('container_name')}  ·  {result.get('log_cmd','')}{C.RST}")
+                    _clogs = (result.get("logs") or "").strip()
+                    if _clogs:
+                        print(f"  {C.GHOST}  ── container logs (tail) ──{C.RST}")
+                        for _ln in _clogs.splitlines()[-15:]:
+                            print(f"  {C.GHOST}  │ {_ln[:200]}{C.RST}")
                     print(f"  {sb}")
                     return url
                 elif result and result.get("error"):
-                    print(f"  {C.Y}[WARN]{C.RST} Dockerfile deploy failed: {result['error'][:100]}")
+                    print(f"  {C.Y}[WARN]{C.RST} Docker deploy failed: {result['error'][:150]} — falling back to native")
             except Exception as e:
-                print(f"  {C.Y}[WARN]{C.RST} Dockerfile deploy failed: {str(e)[:100]}")
+                print(f"  {C.Y}[WARN]{C.RST} Docker deploy failed: {str(e)[:100]} — falling back to native")
 
         # ── Priority 3: Native npm install (original method) ──
         zip_path = os.path.join(tempfile.gettempdir(), f"{self.scan_id}.zip")
@@ -1025,6 +1049,14 @@ class CyphexEngine:
 
         print(f"  {C.NEON}✓{C.RST} {C.SLATE}Sandbox deployed successfully!{C.RST}")
         print(f"  {C.GHOST}PID: {self.sandbox_info.get('pid')}, Port: {port}{C.RST}")
+        _lf = self.sandbox_info.get("log_file") if isinstance(self.sandbox_info, dict) else None
+        if _lf:
+            print(f"  {C.GHOST}Logs: {_lf}{C.RST}")
+        _nlogs = (self.sandbox_info.get("logs") or "").strip() if isinstance(self.sandbox_info, dict) else ""
+        if _nlogs:
+            print(f"  {C.GHOST}── sandbox logs (tail) ──{C.RST}")
+            for _ln in _nlogs.splitlines()[-15:]:
+                print(f"  {C.GHOST}│ {_ln[:200]}{C.RST}")
         print()
         sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
         print(f"  {sb}")
@@ -1340,6 +1372,16 @@ class CyphexEngine:
                         print(f"  {C.DIM}[API] {method} {path} => {resp.status_code}{C.RST}")
                 context.all_forms = forms_found
                 print(f"\n  {C.G}[API Discovery][OK]{C.RST} live_apis={len(api_endpoints_found)} synthetic_forms={len(forms_found)}")
+
+                # ── Prune dead routes ──────────────────────────────────────
+                # Only keep source-discovered routes that actually responded
+                # (non-404). Routes that 404 on baseline do not exist and must
+                # never be handed to the attack agents — that is the 404-storm.
+                _live_paths = {p.split("?")[0] for (_m, p, _c, _t, _b) in api_endpoints_found}
+                _pre_prune = len(source_routes)
+                source_routes = [r for r in source_routes if r["path"] in _live_paths]
+                if _pre_prune != len(source_routes):
+                    print(f"  {C.DIM}[API Discovery] pruned {_pre_prune - len(source_routes)} dead (404) route(s){C.RST}")
 
                 # ══════════════════════════════════════════════════════════
                 # Build smart probe lists from discovered routes for agents
@@ -2593,6 +2635,7 @@ class CyphexEngine:
             "jwt": "CWE-287", "sensitive data": "CWE-200",
             "hardcoded": "CWE-798", "cors": "CWE-942",
             "lfi": "CWE-22", "path traversal": "CWE-22",
+            "csrf": "CWE-352", "cross-site request forgery": "CWE-352",
         }
 
         # ── Phase 1: Resolve locations using V2 resolver ──
@@ -2605,7 +2648,7 @@ class CyphexEngine:
                     content = open(loc.file, "r", encoding="utf-8", errors="ignore").read()
                     lines = content.split("\n")
                     lang = detect_language(loc.file)
-                    snippet_fn, ctx_quality = extract_function(content, loc.line, lang)
+                    snippet_fn, ctx_quality, fn_s, fn_e = extract_function_span(content, loc.line, lang)
                     imports_str = extract_imports(content, lang)
                     vuln_type = v.name.replace("[STATIC] ", "").replace("[DYNAMIC] ", "")
                     cwe = getattr(v, "cwe", "") or ""
@@ -2614,8 +2657,18 @@ class CyphexEngine:
                             if key in vuln_type.lower():
                                 cwe = val
                                 break
-                    start_l = max(0, loc.line - 3)
-                    end_l = min(len(lines), loc.line + 2)
+                    # Replace the WHOLE brace-balanced enclosing function when we have
+                    # one — splicing a balanced unit keeps the file's brace/paren
+                    # balance intact, which is what prevents the 'invalid syntax →
+                    # rolled back' failures caused by rewriting an arbitrary 5-line
+                    # window. Fall back to the ±window only when no clean function span
+                    # was found (ctx_quality == "window").
+                    if ctx_quality == "function" and fn_s and fn_e:
+                        start_l = fn_s - 1          # 0-indexed inclusive
+                        end_l = fn_e                # 0-indexed exclusive (== 1-indexed inclusive)
+                    else:
+                        start_l = max(0, loc.line - 3)
+                        end_l = min(len(lines), loc.line + 2)
                     raw_snippet = "\n".join(lines[start_l:end_l])
                     patchable.append({
                         "vuln": v, "rel_path": loc.rel, "line_num": loc.line,
@@ -2913,18 +2966,26 @@ class CyphexEngine:
                 if isinstance(raw_safety, list): raw_safety = " ".join(str(x) for x in raw_safety)
                 llm_patch_safety = str(raw_safety).strip()
 
-                # ── Enforce the council verdict ──
-                # Previously llm_patch_safety was computed and displayed but never
-                # acted on, so a council-REJECTED patch was still shown as a normal
-                # proposal and applied (auto-applied in non-interactive mode). Gate
-                # it: a fully rejected patch is skipped, never written to disk.
+                # ── Council verdict: advisory, not a hard gate ──
+                # A 0/2 vote from two small local reviewers is subjective and (per the
+                # reviewer-context asymmetry bug) over-rejects legitimate multi-line
+                # fixes. It must NOT pre-empt the DETERMINISTIC verify gate below
+                # (verify_static: re-scan finding-gone + node --check syntax + blast
+                # radius, with automatic rollback on FAIL). So: only hard-skip when
+                # there is literally no code to try; when a concrete fix exists, note
+                # the dissent and let the objective gate be the real arbiter.
                 if llm_patch_safety == "rejected":
+                    if not str(patch_pkg.get("fixed_code", "")).strip():
+                        console.print(
+                            f"[bold red][BLOCKED][/bold red] AI Council rejected and there is "
+                            f"no code to apply ({justifications})."
+                        )
+                        skipped += 1
+                        continue
                     console.print(
-                        f"[bold red][BLOCKED][/bold red] AI Council rejected this patch "
-                        f"({justifications}) — not applying."
+                        f"[yellow][COUNCIL-DISSENT][/yellow] {justifications} — deferring to the "
+                        f"objective verification gate (re-scan + syntax + rollback)."
                     )
-                    skipped += 1
-                    continue
 
                 console.print(Panel(
                     f"[bold red]Root Cause:[/bold red] {analysis}\n\n"
@@ -3086,8 +3147,16 @@ class CyphexEngine:
                                 ),
                                 timeout=cyphex_config.COGNEE_REMEMBER_TIMEOUT_S,
                             )
+                        except (asyncio.TimeoutError, TimeoutError):
+                            console.print(
+                                f"[dim]cognee remember skipped: timed out after "
+                                f"{cyphex_config.COGNEE_REMEMBER_TIMEOUT_S:.0f}s "
+                                f"(cognify LLM extraction too slow)[/dim]"
+                            )
                         except Exception as e:
-                            console.print(f"[dim]cognee remember skipped: {e}[/dim]")
+                            # str(e) is empty for many cognee/asyncio errors — show the
+                            # type so "remember skipped:" is never a blank, useless line.
+                            console.print(f"[dim]cognee remember skipped: {type(e).__name__}: {e}[/dim]")
 
                 # ── Record in session memory ──
                 if session and REASONING_AVAILABLE:
@@ -3234,6 +3303,11 @@ class CyphexEngine:
         # Save post-patch score for final banner
         self._post_patch_score = score_after
         self._post_patch_remaining = remaining
+        # Wire the REAL patch counts into the final INTERCEPT banner. Without this
+        # the banner reads getattr(self, '_patches_applied', 0) == 0/0 APPLIED even
+        # though patches were actually applied (contradicting the PATCH SUMMARY).
+        self._patches_applied = len(patched_files)
+        self._patches_total = len(patched_files) + skipped
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")

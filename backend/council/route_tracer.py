@@ -32,8 +32,27 @@ class RouteTracer:
         Takes a mixed list of static and dynamic Vulns.
         Attempts to resolve the endpoint of dynamic findings to a 'filepath:line_number' format.
         """
-        static_vulns = [v for v in vulns if ":" in v.endpoint and not v.endpoint.startswith("http")]
-        dynamic_vulns = [v for v in vulns if v.endpoint.startswith("http://") or v.endpoint.startswith("https://")]
+        import re as _re
+
+        def _is_file_line(ep: str) -> bool:
+            # A static SAST finding endpoint is a 'file:line' locator that ends with
+            # ':<digits>' — e.g. 'src/routes/orders.js:34' OR an absolute path like
+            # '/Users/.../index.js:16' (Semgrep emits absolute paths, so we must NOT
+            # exclude leading-'/' here — only the trailing ':<line>' distinguishes it).
+            ep = (ep or "").strip()
+            return (not ep.startswith(("http://", "https://"))) and bool(_re.search(r":\d+$", ep))
+
+        static_vulns = [v for v in vulns if _is_file_line(v.endpoint)]
+        # DAST/DeepAgent findings store a RELATIVE path (parsed.path, e.g.
+        # '/api/products?id=1') OR a full URL in .endpoint — both are dynamic
+        # findings that must be mapped back to source. Previously only http(s)://
+        # endpoints qualified, so every relative-path DeepAgent finding (the common
+        # case) was dropped as "unpatchable dynamic-only".
+        dynamic_vulns = [
+            v for v in vulns
+            if (not _is_file_line(v.endpoint))
+            and (v.endpoint or "").startswith(("http://", "https://", "/"))
+        ]
 
         for dv in dynamic_vulns:
             # Clean the path

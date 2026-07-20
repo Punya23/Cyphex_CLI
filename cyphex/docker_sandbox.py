@@ -194,6 +194,17 @@ async def deploy_docker_sandbox(
         )
         is_running = "Up" in ps.stdout
 
+        # Capture container stdout+stderr so the scan can surface real logs
+        # (the container runs detached, so nothing else drains them).
+        try:
+            logs_res = subprocess.run(
+                ["docker", "logs", "--tail", "200", container_name],
+                capture_output=True, text=True, timeout=10
+            )
+            container_logs = ((logs_res.stdout or "") + (logs_res.stderr or ""))[-4000:]
+        except Exception:
+            container_logs = ""
+
         return {
             "sandbox_id": sandbox_id,
             "port": port,
@@ -201,6 +212,9 @@ async def deploy_docker_sandbox(
             "container_name": container_name,
             "status": "running" if is_running else "failed",
             "app_type": app_info["type"],
+            "generated_dockerfile": generated,
+            "logs": container_logs,
+            "log_cmd": f"docker logs -f {container_name}",
         }
 
     finally:

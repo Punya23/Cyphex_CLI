@@ -400,7 +400,10 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 console.print(f"[yellow]⚠ {model} returned invalid JSON, retrying...[/yellow]")
                 continue
             except Exception as e:
-                raise CouncilCallError(f"{model} API error: {str(e)}")
+                # str() is empty for httpx.ReadTimeout and many KeyErrors — fall back
+                # to the type name so the message is never a bare "model API error:".
+                detail = str(e) or type(e).__name__
+                raise CouncilCallError(f"{model} API error: {detail}")
 
         raise CouncilCallError(f"{model} failed after 2 attempts")
 

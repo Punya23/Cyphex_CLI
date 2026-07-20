@@ -20,6 +20,20 @@ SKIP_DIRS = {
     "node_modules", ".git", "dist", "build", "__pycache__",
     ".venv", "venv", ".next", ".nuxt", "coverage", ".cache",
     "vendor", "bower_components", ".svn",
+    # CYPHEX's OWN scan artifacts. A prior scan writes .cyphex/ (knowledge_tree.json,
+    # patches.json, patch_memory.json, sessions/*.json) INTO the target tree. If we
+    # re-index it, that JSON gets parsed as "source" and emits garbage routes
+    # (e.g. /knowledge_tree/...), which the DeepAgents then attack — every one 404s.
+    ".cyphex",
+}
+
+# Only these extensions can define real HTTP routes. Route extraction must never
+# run over .json/.yaml/.html/.sql — those don't contain route definitions and
+# only produce noise (a serialized knowledge_tree.json full of path strings would
+# otherwise masquerade as an Express router file).
+ROUTE_SOURCE_EXTENSIONS = {
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx",
+    ".py", ".php", ".rb", ".go", ".java", ".rs",
 }
 
 SKIP_EXTENSIONS = {
@@ -165,8 +179,9 @@ class CodeIndexer:
         
         entry_files = [
             rel for rel in self.files
-            if os.path.basename(rel).replace(".js", "").replace(".ts", "")
+            if os.path.splitext(os.path.basename(rel))[0]
             in ("index", "app", "server", "main")
+            and os.path.splitext(rel)[1].lower() in ROUTE_SOURCE_EXTENSIONS
         ]
         
         for entry_rel in entry_files:
@@ -184,10 +199,16 @@ class CodeIndexer:
         # PASS 2: Extract routes from all files using discovered mounts
         # ══════════════════════════════════════════════════════════════
         for rel_path, meta in self.files.items():
+            # Only parse route definitions out of real code files. Skipping
+            # .json/.yaml/.html/.sql here is what prevents a serialized
+            # knowledge_tree.json (or any data file) from being mined for routes.
+            if os.path.splitext(rel_path)[1].lower() not in ROUTE_SOURCE_EXTENSIONS:
+                continue
+
             content = meta["content"]
 
             # Determine the mount prefix for this file
-            basename = os.path.basename(rel_path).replace(".js", "").replace(".ts", "")
+            basename = os.path.splitext(os.path.basename(rel_path))[0]
             
             # Priority: use mount_map from Pass 1, fallback to filename
             if basename.lower() in mount_map:

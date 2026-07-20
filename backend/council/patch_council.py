@@ -451,6 +451,7 @@ class PatchCouncil(CouncilOrchestrator):
             "CWE-22": "Use path.basename() to strip directory traversal, or path.resolve() + startsWith() check against allowed base directory.",
             "CWE-942": "Replace wildcard CORS origin ('*') with a specific allowlist of origins.",
             "CWE-287": "Add authentication middleware check before the route handler.",
+            "CWE-352": "Add anti-CSRF protection: require and validate a per-session CSRF token (e.g. csurf middleware or a double-submit cookie) on state-changing routes. Do NOT add, remove, or rename unrelated routes or handlers — only harden the existing one.",
         }
         patch_results = []
         for i, v in enumerate(vuln_list, 1):
@@ -512,7 +513,8 @@ class PatchCouncil(CouncilOrchestrator):
 
                     review_prompt = (
                         f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n\n"
-                        f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                        + (f"Surrounding code context (read-only — the patch integrates with this; do NOT flag symbols defined here as missing):\n```\n{v['context']}\n```\n\n" if v.get('context') else "")
+                        + f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
                         f"Proposed patch:\n```\n{fixed_code}\n```"
                     )
 
@@ -559,7 +561,8 @@ class PatchCouncil(CouncilOrchestrator):
 
                         review_prompt = (
                             f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n\n"
-                            f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                            + (f"Surrounding code context (read-only — the patch integrates with this; do NOT flag symbols defined here as missing):\n```\n{v['context']}\n```\n\n" if v.get('context') else "")
+                            + f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
                             f"Proposed patch:\n```\n{fixed_code}\n```"
                         )
                         try:
@@ -691,7 +694,8 @@ class PatchCouncil(CouncilOrchestrator):
                         await self.vram.unload(patch_model)
                         review_prompt = (
                             f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
-                            f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
+                            + (f"Surrounding code context (read-only — the patch integrates with this; do NOT flag symbols defined here as missing):\n```\n{v['context']}\n```\n\n" if v.get('context') else "")
+                            + f"Original vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
                             f"Proposed patch (attempt {retry_round + 1}):\n```\n{new_code}\n```\n\n"
                             f"Previous rejection reason: \"{critique}\"\n"
                             f"Has this new patch addressed the critique?"
