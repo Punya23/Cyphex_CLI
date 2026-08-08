@@ -118,7 +118,6 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        /* Custom scrollbar for info panel */
         #info-panel::-webkit-scrollbar {
             width: 8px;
         }
@@ -165,7 +164,6 @@
         const infoContent = document.getElementById('info-content');
         const loading = document.getElementById('loading');
 
-        // Define colors based on node type
         const typeColors = {
             'file': '#bb86fc', // Purple
             'class': '#03dac6', // Teal
@@ -176,7 +174,6 @@
             'default': '#a0a0a0'
         };
 
-        // File input handler
         document.getElementById('file-input').addEventListener('change', function(e) {
             const file = e.target.files[0];
             if (!file) return;
@@ -200,21 +197,32 @@
         function processGraphData(graphData) {
             document.getElementById('loading-text').innerText = 'Processing nodes...';
 
-            // Allow UI to update before heavy processing
             setTimeout(() => {
                 const nodes = new vis.DataSet();
                 const edges = new vis.DataSet();
+                let actualNodes = 0;
+                let actualEdges = 0;
 
-                // Graphify schema has nodes array and edges array
-                if (graphData.nodes && Array.isArray(graphData.nodes)) {
-                    graphData.nodes.forEach(n => {
-                        const type = n.type || 'default';
-                        const color = typeColors[type] || typeColors['default'];
+                // Handle nested graphify JSON structure
+                const graphRef = graphData.graph || graphData;
 
+                let sourceNodes = graphData.nodes || graphRef.nodes || [];
+                // Support dictionary-based node list if it happens to be exported that way
+                if (!Array.isArray(sourceNodes) && typeof sourceNodes === 'object') {
+                    sourceNodes = Object.values(sourceNodes);
+                }
+
+                sourceNodes.forEach(n => {
+                    const type = n.type || 'default';
+                    const color = typeColors[type] || typeColors['default'];
+                    // ID can sometimes be missing or in 'key' in older graphify versions
+                    const nodeId = n.id || n.key;
+
+                    if (nodeId) {
                         nodes.add({
-                            id: n.id,
-                            label: n.name || n.id.split('/').pop(),
-                            title: n.id, // Tooltip
+                            id: nodeId,
+                            label: n.name || n.label || nodeId.split('/').pop(),
+                            title: nodeId, // Tooltip
                             color: {
                                 background: color,
                                 border: darkenColor(color, 20),
@@ -223,36 +231,42 @@
                             font: { color: '#ffffff', strokeWidth: 0 },
                             shape: type === 'file' ? 'box' : 'dot',
                             size: type === 'file' ? 25 : 15,
-                            _rawData: n // Store raw data for info panel
+                            _rawData: n
                         });
-                    });
-                }
+                        actualNodes++;
+                    }
+                });
 
-                document.getElementById('loading-text').innerText = 'Processing edges...';
+                document.getElementById('loading-text').innerText = `Processing ${actualNodes} nodes and extracting edges...`;
 
                 setTimeout(() => {
-                    if (graphData.edges && Array.isArray(graphData.edges)) {
-                        graphData.edges.forEach(e => {
+                    // Look for both edges and links (graphify output uses links)
+                    let sourceEdges = graphData.edges || graphRef.edges || graphData.links || graphRef.links || [];
+
+                    sourceEdges.forEach(e => {
+                        const source = e.source || e.from;
+                        const target = e.target || e.to;
+                        if (source && target) {
                             edges.add({
-                                from: e.source,
-                                to: e.target,
-                                label: e.type || '',
+                                from: source,
+                                to: target,
+                                label: e.type || e.label || '',
                                 font: { size: 10, color: '#888', align: 'middle' },
                                 color: { color: '#555', highlight: '#bb86fc', hover: '#03dac6' },
                                 arrows: 'to',
                                 smooth: { type: 'continuous' }
                             });
-                        });
-                    }
+                            actualEdges++;
+                        }
+                    });
 
+                    document.getElementById('loading-text').innerText = `Rendering ${actualNodes} nodes and ${actualEdges} edges...`;
                     renderNetwork(nodes, edges);
                 }, 50);
             }, 50);
         }
 
         function renderNetwork(nodes, edges) {
-            document.getElementById('loading-text').innerText = 'Rendering (this may take a moment for large graphs)...';
-
             setTimeout(() => {
                 const data = { nodes: nodes, edges: edges };
                 const options = {
@@ -273,8 +287,8 @@
                         },
                         stabilization: {
                             enabled: true,
-                            iterations: 1000,
-                            updateInterval: 100,
+                            iterations: 500,
+                            updateInterval: 25,
                             onlyDynamicEdges: false,
                             fit: true
                         }
@@ -325,8 +339,9 @@
                          </div>`;
             };
 
-            renderField('ID', data.id);
-            renderField('Name', data.name);
+            const nodeId = data.id || data.key;
+            renderField('ID', nodeId);
+            renderField('Name', data.name || data.label);
             renderField('Type', `<span style="color: ${typeColors[data.type] || '#ccc'}">${data.type || 'unknown'}</span>`);
             renderField('File', data.file);
             renderField('Line', data.line);
@@ -338,10 +353,9 @@
                 renderField('Communities', data.communities.join(', '));
             }
 
-            // Raw JSON for developers
             html += `<div class="info-row" style="margin-top: 20px;">
                         <div class="info-label">Raw Data</div>
-                        <div class="info-value"><pre style="background: #111; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; border: 1px solid #333; margin:0;">${JSON.stringify(data, null, 2)}</pre></div>
+                        <div class="info-value"><pre style="background: #111; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; border: 1px solid #333; margin:0; max-height: 400px;">${JSON.stringify(data, null, 2)}</pre></div>
                      </div>`;
 
             infoContent.innerHTML = html;
@@ -351,7 +365,6 @@
             if (network) network.fit({ animation: true });
         });
 
-        // Helper color functions
         function darkenColor(color, percent) {
             var num = parseInt(color.replace("#",""),16),
             amt = Math.round(2.55 * percent),
@@ -369,7 +382,6 @@
             return "#" + (0x1000000 + (R<255?R<1?0:R:255)*0x10000 + (B<255?B<1?0:B:255)*0x100 + (G<255?G<1?0:G:255)).toString(16).slice(1);
         }
 
-        // Auto-load graph.json if possible (works if served via HTTP, fails on file://)
         window.onload = () => {
             loading.style.display = 'flex';
             document.getElementById('loading-text').innerText = 'Attempting to load graph.json automatically...';
@@ -384,8 +396,6 @@
                 })
                 .catch(err => {
                     loading.style.display = 'none';
-                    // Failed to load automatically, likely because of file:// protocol
-                    // User will have to click the Load button
                     console.log('Could not auto-load graph.json, user must load manually.', err);
                 });
         };
