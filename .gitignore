@@ -49,3 +49,4 @@ backend/.cyphex/
 .cognee_data/
 .graphify/
 graphify-studio-output/
+custom-viewer-bundle/
