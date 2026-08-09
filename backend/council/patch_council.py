@@ -107,6 +107,28 @@ RULES:
 
 
 
+# CWE-specific fix directives — the sharp, deterministic instruction that tells
+# the model EXACTLY what a real fix looks like ("eliminate execSync entirely",
+# "use parameterized queries", ...). Rendered by _build_patch_prompt from the
+# vuln's cwe, so EVERY generation path (batch + single) gets it. Previously this
+# lived inline in generate_and_validate_batch and was silently discarded when the
+# prompt was rebuilt via _build_patch_prompt — so the directive never reached the
+# model and patches were weaker than intended.
+CWE_DIRECTIVES = {
+    "CWE-78": "CRITICAL: You MUST replace execSync/exec with execFileSync or spawn using an arguments array, OR remove the shell call entirely and use safe string operations. Adding input validation alone is NOT sufficient — the shell call itself must be eliminated.",
+    "CWE-89": "Replace template literals/string concatenation with parameterized queries using ? placeholders and [value] arrays. Example: db.query('SELECT * FROM t WHERE id = ?', [userId])",
+    "CWE-79": "Remove dangerouslySetInnerHTML entirely and render as text content, OR apply DOMPurify.sanitize() before rendering.",
+    "CWE-798": "Replace ALL hardcoded secret values with process.env.VAR_NAME references.",
+    "CWE-918": "Add URL validation that blocks private IPs (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16) and cloud metadata endpoints.",
+    "CWE-22": "Use path.basename() to strip directory traversal, or path.resolve() + startsWith() check against allowed base directory.",
+    "CWE-942": "Replace wildcard CORS origin ('*') with a specific allowlist of origins.",
+    "CWE-287": "Add authentication middleware check before the route handler.",
+    "CWE-352": "Add anti-CSRF protection: require and validate a per-session CSRF token (e.g. csurf middleware or a double-submit cookie) on state-changing routes. Do NOT add, remove, or rename unrelated routes or handlers — only harden the existing one.",
+}
+_GENERIC_DIRECTIVE = ("Eliminate the vulnerability completely. The fix must remove the dangerous "
+                      "pattern, not just add a superficial validation.")
+
+
 def _build_patch_prompt(vuln_dict: dict) -> str:
     """
     Build the Stage-1 patch generation prompt from a vuln_dict.
@@ -123,6 +145,7 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
     context = vuln_dict.get("context", "")
     memory_hint = vuln_dict.get("memory_hint", "")
     oracle = vuln_dict.get("oracle_analysis")
+    directive = CWE_DIRECTIVES.get(cwe, _GENERIC_DIRECTIVE)
 
     parts = [
         f"Vulnerability: {vuln_name} ({cwe})",
@@ -144,6 +167,9 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
         "opens a brace and does not close it, your replacement must do the same):"
     )
     parts.append(f"```\n{vulnerable_code}\n```")
+    parts.append("")
+
+    parts.append(f"FIX REQUIREMENT: {directive}")
     parts.append("")
 
     if oracle:
@@ -441,32 +467,12 @@ class PatchCouncil(CouncilOrchestrator):
                          "unsafe_reason": "All models failed to load"} for _ in vuln_list]
 
         # ── PATCH CACHE: these results survive even if reviews crash ──
-        # CWE-specific fix directives — tell the model EXACTLY what to do
-        CWE_DIRECTIVES = {
-            "CWE-78": "CRITICAL: You MUST replace execSync/exec with execFileSync or spawn using an arguments array, OR remove the shell call entirely and use safe string operations. Adding input validation alone is NOT sufficient — the shell call itself must be eliminated.",
-            "CWE-89": "Replace template literals/string concatenation with parameterized queries using ? placeholders and [value] arrays. Example: db.query('SELECT * FROM t WHERE id = ?', [userId])",
-            "CWE-79": "Remove dangerouslySetInnerHTML entirely and render as text content, OR apply DOMPurify.sanitize() before rendering.",
-            "CWE-798": "Replace ALL hardcoded secret values with process.env.VAR_NAME references.",
-            "CWE-918": "Add URL validation that blocks private IPs (127.0.0.0/8, 10.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16) and cloud metadata endpoints.",
-            "CWE-22": "Use path.basename() to strip directory traversal, or path.resolve() + startsWith() check against allowed base directory.",
-            "CWE-942": "Replace wildcard CORS origin ('*') with a specific allowlist of origins.",
-            "CWE-287": "Add authentication middleware check before the route handler.",
-            "CWE-352": "Add anti-CSRF protection: require and validate a per-session CSRF token (e.g. csurf middleware or a double-submit cookie) on state-changing routes. Do NOT add, remove, or rename unrelated routes or handlers — only harden the existing one.",
-        }
+        # The full prompt (CWE directive + KB/context + memory hint + oracle
+        # analysis) is assembled by _build_patch_prompt below — the directive is
+        # derived from the vuln's cwe there, so it always reaches the model.
         patch_results = []
         for i, v in enumerate(vuln_list, 1):
             console.print(f"[dim]  [{i}/{len(vuln_list)}] Patching: {v['vuln_name']}[/dim]")
-            directive = CWE_DIRECTIVES.get(v['cwe'], "Eliminate the vulnerability completely. The fix must remove the dangerous pattern, not just add a superficial validation.")
-            memory_hint = v.get("memory_hint", "")
-            prompt = (
-                f"Vulnerability: {v['vuln_name']} ({v['cwe']})\n"
-                f"Severity: {v.get('severity', 'High')}\n"
-                f"File: {v['file_path']}\n\n"
-                f"Vulnerable code:\n```\n{v['vulnerable_code']}\n```\n\n"
-                f"FIX REQUIREMENT: {directive}\n\n"
-                + (f"{memory_hint}\n\n" if memory_hint else "")
-                + f"Generate the fixed version of this code. The fix must ELIMINATE the vulnerability, not just add a superficial check."
-            )
             # ── Oracle: decompose the problem before generating the patch ──
             oracle = await self._oracle_reason(patch_model, v)
             if oracle:

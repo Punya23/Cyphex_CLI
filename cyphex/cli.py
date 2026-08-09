@@ -381,6 +381,10 @@ def main():
                              help="Deterministic mode for benchmarking (SARIF output)")
     scan_parser.add_argument("--no-patch", action="store_true",
                              help="Skip patch generation step")
+    scan_parser.add_argument("--deepagents", "--deep", action="store_true", dest="deepagents",
+                             help="Enable the full DeepAgents Oracle-guided attack swarm (adaptive DAST)")
+    scan_parser.add_argument("--network", action="store_true",
+                             help="Also run the network security scan (host discovery + port scan)")
     scan_parser.add_argument("--mode", type=str,
                              choices=["full", "standard", "lite", "cloud"],
                              help="Override auto-detected hardware mode")
@@ -426,14 +430,24 @@ def main():
         is_url = target.startswith("http://") or target.startswith("https://")
         is_repo = target.endswith(".git") or (is_url and "github.com" in target)
 
+        # Forward the declared flags that were previously parsed and dropped:
+        # --no-patch now actually skips patching, and --deepagents/--network
+        # reach the engine so the DeepAgents swarm can be enabled from the CLI.
+        auto_patch = not args.no_patch
+        use_deepagents = getattr(args, "deepagents", False)
+        network_scan = getattr(args, "network", False)
+
         if is_repo or args.repo:
-            asyncio.run(engine.run(repo_url=target, judge=args.judge))
+            asyncio.run(engine.run(repo_url=target, judge=args.judge, auto_patch=auto_patch,
+                                   use_deepagents=use_deepagents, network_scan=network_scan))
         elif is_url:
             # Live URL scan — skip sandbox, go directly to dynamic scan
-            asyncio.run(engine.run(target_url=target, judge=args.judge))
+            asyncio.run(engine.run(target_url=target, judge=args.judge, auto_patch=auto_patch,
+                                   use_deepagents=use_deepagents))
         else:
             # Local source path
-            asyncio.run(engine.run(source_path=target, judge=args.judge))
+            asyncio.run(engine.run(source_path=target, judge=args.judge, auto_patch=auto_patch,
+                                   use_deepagents=use_deepagents, network_scan=network_scan))
 
     elif args.command == "council-doctor":
         sys.path.insert(0, _PROJECT_ROOT)

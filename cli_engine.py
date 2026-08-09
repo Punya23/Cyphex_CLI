@@ -195,6 +195,11 @@ class CyphexEngine:
         # Normalize: source_path is an alias for local_path
         if source_path and not local_path:
             local_path = source_path
+        # Keep self.local_path as the ORIGINAL user-supplied path (post-alias).
+        # Cross-scan memory (session + patch cache) keys on this stable path, not
+        # on the per-scan sandbox copy under WORK_DIR/<random scan_id> — otherwise
+        # every scan looks like a brand-new project and no memory is ever reused.
+        self.local_path = local_path
 
         if self.judge_mode:
             random.seed(1337)
@@ -808,11 +813,18 @@ class CyphexEngine:
         import zipfile, tempfile
         from cyphex.docker_sandbox import docker_available
 
-        if not docker_available():
+        # Docker being down must NOT kill the whole dynamic phase. When the
+        # daemon is unavailable we skip the container sandboxes (Priority 1 & 2)
+        # and fall through to the NATIVE process runner (Priority 3: npm
+        # install + node), which needs no Docker. That keeps the crawl + DAST +
+        # DeepAgents/Oracle phase alive on dev machines without Docker — the
+        # previous early `return "offline_mode"` here is exactly why "the deep
+        # agents don't run" when Docker isn't up.
+        docker_ok = docker_available()
+        if not docker_ok:
             print(f"  {C.Y}[WARN] Docker not found or not running.{C.RST}")
-            print(f"  {C.SLATE}  → Sandboxed dynamic execution testing is disabled.{C.RST}")
-            print(f"  {C.SLATE}  → Falling back to safe AI-driven static verification.{C.RST}")
-            return "offline_mode"
+            print(f"  {C.SLATE}  → Skipping container sandbox; deploying the target as a NATIVE process (npm/node).{C.RST}")
+            print(f"  {C.SLATE}  → The full dynamic + DeepAgents phase still runs against the live native app.{C.RST}")
 
 
         # ── Priority 1: Docker Compose (full stack with DB) ──
@@ -820,7 +832,7 @@ class CyphexEngine:
         if not os.path.exists(compose_file):
             compose_file = os.path.join(source_dir, "docker-compose.yaml")
 
-        if os.path.exists(compose_file) and shutil.which("docker"):
+        if docker_ok and os.path.exists(compose_file) and shutil.which("docker"):
             print(f"  {C.CYAN}▸ [DOCKER]{C.RST} {C.SLATE}Found docker-compose.yml — deploying full stack (app + DB)...{C.RST}")
             try:
                 # Strip obsolete 'version' key to prevent warnings
@@ -930,7 +942,7 @@ class CyphexEngine:
         # even when the target ships no Dockerfile — deploy_docker_sandbox() generates
         # one on the fly. This is the actual image+container sandbox (with logs),
         # instead of silently falling through to a bare native process.
-        elif shutil.which("docker"):
+        elif docker_ok and shutil.which("docker"):
             if os.path.exists(os.path.join(source_dir, "Dockerfile")):
                 print(f"  {C.G}[DOCKER]{C.RST} Found Dockerfile — building container...")
             else:
@@ -2454,6 +2466,11 @@ class CyphexEngine:
         manifest = None
         patch_memory = None
         framework = ""
+        # Prior-scan lessons block (session memory). Assigned from
+        # session.get_prior_context() below when reasoning is available; kept
+        # as "" otherwise so it can be injected unconditionally into every
+        # patch-generation prompt without a NameError.
+        prior_context = ""
 
         if use_v2:
             # ── Build Code Index (Vectorless RAG) ──
@@ -2491,11 +2508,18 @@ class CyphexEngine:
             if framework:
                 console.print(f"  [green]✓[/green] Detected framework: [bold]{framework}[/bold]")
 
-            # Init manifest + patch memory
+            # Init manifest + patch memory.
+            # patch_memory persists to <dir>/.cyphex/patch_memory.json. Point it
+            # at the STABLE original path (self.local_path) so verified fixes
+            # survive across scans and the exact-cache recall can hit on re-scan;
+            # keying it on the ephemeral sandbox copy (self.source_dir) made the
+            # cache empty on every run. Falls back to the sandbox dir for
+            # repo-clone scans (which carry cross-scan identity via repo_url).
+            _mem_dir = os.path.abspath(self.local_path) if getattr(self, "local_path", None) else self.source_dir
             manifest = PatchManifest(self.source_dir)
-            patch_memory = PatchMemory(self.source_dir)
+            patch_memory = PatchMemory(_mem_dir)
             console.print(f"  [green]✓[/green] Patch manifest: .cyphex/patches.json")
-            console.print(f"  [green]✓[/green] Patch memory: .cyphex/patch_memory.json")
+            console.print(f"  [green]✓[/green] Patch memory: {os.path.join(_mem_dir, '.cyphex', 'patch_memory.json')}")
 
         # ── Session Memory + Agent Reasoning ──
         session = None
@@ -2503,11 +2527,17 @@ class CyphexEngine:
         thread_id = ""
 
         if REASONING_AVAILABLE:
+            # Key the session on the STABLE original path, NOT the per-scan
+            # sandbox copy (WORK_DIR/<random>), so create_session re-finds the
+            # prior session for this repo and prior lessons actually carry over.
+            _stable_src = os.path.abspath(self.local_path) if getattr(self, "local_path", None) else self.source_dir
             session = create_session(
                 repo_url=getattr(self, "repo_url", "") or "",
-                source_dir=self.source_dir,
+                source_dir=_stable_src,
                 framework=framework if use_v2 else "",
-                file_count=indexer.build_index() if use_v2 and indexer else 0,
+                # Reuse the count from the index already built above — calling
+                # build_index() again just re-walks the whole tree for no reason.
+                file_count=file_count if use_v2 and indexer else 0,
             )
             thread_id = session.thread_id
             prior_context = session.get_prior_context()
@@ -2821,6 +2851,16 @@ class CyphexEngine:
                                 context_parts.append(f"// REPO'S OWN SECURE PATTERN (match this style):\n{repo_pattern[:300]}")
                     patch_context = "\n\n".join(context_parts)
 
+                    # Inject cross-scan session-memory lessons (get_prior_context)
+                    # into EVERY generation prompt — this is what the Session
+                    # Memory panel promises ("lessons are injected into every
+                    # model prompt"). Prepended as read-only context so the model
+                    # applies prior fixes/patterns to this codebase.
+                    if prior_context:
+                        patch_context = (
+                            f"{prior_context}\n\n{patch_context}" if patch_context else prior_context
+                        )
+
                     memory_hint = ""
                     if COGNEE_AVAILABLE:
                         try:
@@ -2874,6 +2914,11 @@ class CyphexEngine:
                 batch_results = None
 
 
+        # Verified fixes to persist into cross-project cognee memory. Collected
+        # during the loop and drained once afterwards (see the drain block below)
+        # so the slow cognify() never stalls interactive remediation.
+        cognee_jobs = []
+
         # ── Phase 3: Present each patch — template → council → verify → apply ──
         for i, p in enumerate(patchable):
             v = p["vuln"]
@@ -2898,10 +2943,28 @@ class CyphexEngine:
                 line_content = p["lines"][j].rstrip() if j < len(p["lines"]) else ""
                 console.print(f"  {marker} {ln:4} | {line_content[:120]}")
 
-            # ── Step A: Try deterministic template fix first (no model needed) ──
+            # ── Step A0: exact patch-memory cache (verified fix for
+            #    structurally-identical code) — the fastest path, no LLM and no
+            #    template regex needed. This is the READ side of the exact
+            #    cwe:hash cache that .store() populates on every verified PASS;
+            #    without it the cache was write-only and the model regenerated a
+            #    fix it had already produced+verified before. ──
             fixed = None
             fix_source = "council"
-            if use_v2:
+            if patch_memory:
+                cached = patch_memory.recall(p["cwe"], p.get("snippet_fn", p["snippet"]))
+                if cached and str(cached.get("patch", "")).strip():
+                    fixed = str(cached["patch"]).strip()
+                    fix_source = "memory"
+                    console.print(Panel(
+                        f"[bold green]✓ Reused a previously VERIFIED fix from patch memory (no AI needed)[/bold green]\n"
+                        f"[dim]CWE: {p['cwe']} | reuse #{cached.get('reuse_count', 0)} | "
+                        f"strategy: {cached.get('strategy', '?')}[/dim]",
+                        title="◈ PATCH MEMORY (exact cache hit)", border_style="green"
+                    ))
+
+            # ── Step A: Try deterministic template fix first (no model needed) ──
+            if not fixed and use_v2:
                 vuln_line = p["lines"][p["line_num"] - 1].rstrip() if p["line_num"] - 1 < len(p["lines"]) else ""
                 template_result = apply_template(p["cwe"], vuln_line, framework)
                 if template_result:
@@ -3116,6 +3179,23 @@ class CyphexEngine:
                     rollback(p["filepath"], original_content)
                     console.print(f"[bold red][ROLLED BACK][/bold red] Verification failed — patch reverted")
                     skipped += 1
+                    # Learn from the FAILURE too. The Session Memory panel promises
+                    # "Successful & failed patches are recorded as lessons", but the
+                    # `continue` here used to skip the recorder below — so
+                    # patches_failed stayed 0 and no "what NOT to do" lesson was ever
+                    # captured. Record it before bailing.
+                    if session and REASONING_AVAILABLE:
+                        session.add_entry(ReasoningEntry(
+                            vuln_id=f"vuln_{i:03d}", cwe=p["cwe"], file=p["rel_path"],
+                            line=p["line_num"], strategy_used=fix_source, verdict="FAIL",
+                            patch_hash=hashlib.sha256(fixed.encode()).hexdigest()[:12],
+                            fix_source=fix_source,
+                        ))
+                        _why = "finding still present" if not getattr(vr, "finding_gone", True) else "syntax/blast-radius check"
+                        session.add_lesson(
+                            f"{p['cwe']} in {os.path.basename(p['rel_path'])}: a {fix_source} fix FAILED "
+                            f"verification ({_why}) — try a different remediation approach"
+                        )
                     continue
 
                 verified_count += 1 if vr.verdict == "PASS" else 0
@@ -3136,27 +3216,20 @@ class CyphexEngine:
                 if patch_memory and vr.verdict == "PASS":
                     patch_memory.store(p["cwe"], p.get("snippet_fn", p["snippet"]), fixed, fix_source, verified=True)
                     if COGNEE_AVAILABLE:
-                        try:
-                            await asyncio.wait_for(
-                                cognee_memory.remember_fix(
-                                    cwe=p["cwe"],
-                                    vulnerable_code=p.get("snippet_fn", p["snippet"]),
-                                    fixed_code=fixed,
-                                    project_id=cognee_memory.project_id_for(getattr(self, "repo_url", "") or "", self.source_dir),
-                                    framework=framework,
-                                ),
-                                timeout=cyphex_config.COGNEE_REMEMBER_TIMEOUT_S,
-                            )
-                        except (asyncio.TimeoutError, TimeoutError):
-                            console.print(
-                                f"[dim]cognee remember skipped: timed out after "
-                                f"{cyphex_config.COGNEE_REMEMBER_TIMEOUT_S:.0f}s "
-                                f"(cognify LLM extraction too slow)[/dim]"
-                            )
-                        except Exception as e:
-                            # str(e) is empty for many cognee/asyncio errors — show the
-                            # type so "remember skipped:" is never a blank, useless line.
-                            console.print(f"[dim]cognee remember skipped: {type(e).__name__}: {e}[/dim]")
+                        # QUEUE the cross-project persist; drain it once AFTER the
+                        # patch loop. cognify() runs a multi-minute local-LLM
+                        # extraction, so awaiting it inline here froze remediation
+                        # of every remaining vuln for up to COGNEE_REMEMBER_TIMEOUT_S
+                        # each — the whole scan appeared to hang. Draining after the
+                        # loop keeps remediation interactive; the fixes are already
+                        # persisted to the fast patch_memory cache above regardless.
+                        cognee_jobs.append(dict(
+                            cwe=p["cwe"],
+                            vulnerable_code=p.get("snippet_fn", p["snippet"]),
+                            fixed_code=fixed,
+                            project_id=cognee_memory.project_id_for(getattr(self, "repo_url", "") or "", os.path.abspath(self.local_path) if getattr(self, "local_path", None) else self.source_dir),
+                            framework=framework,
+                        ))
 
                 # ── Record in session memory ──
                 if session and REASONING_AVAILABLE:
@@ -3176,6 +3249,11 @@ class CyphexEngine:
                     if vr.verdict == "PASS":
                         lesson = f"{p['cwe']} in {os.path.basename(p['rel_path'])} fixed via {fix_source}"
                         session.add_lesson(lesson)
+                        # Record the CWE→strategy pair as a reusable pattern.
+                        # add_pattern() previously had no callers, so
+                        # common_patterns (surfaced in get_prior_context) was
+                        # always empty; this feeds the cross-scan hint.
+                        session.add_pattern(f"{p['cwe']}:{fix_source}")
 
                     # Build reasoning tree for this patch
                     tree = create_tree(
@@ -3208,6 +3286,35 @@ class CyphexEngine:
             #     if os.path.exists(dst_orig):
             #         import shutil
             #         shutil.copy2(p["filepath"], dst_orig)
+
+        # ── Drain cross-project memory persists (deferred cognify) ──
+        # Serial, not concurrent: parallel cognify() calls contend on the same
+        # lancedb/graph dataset. This runs after all patches are shown/applied,
+        # so a slow local-LLM extraction never blocks remediation.
+        if cognee_jobs:
+            console.print(
+                f"[dim]Persisting {len(cognee_jobs)} verified fix(es) into cross-project memory "
+                f"(cognee) — this runs post-remediation…[/dim]"
+            )
+            _persisted = 0
+            for _job in cognee_jobs:
+                try:
+                    await asyncio.wait_for(
+                        cognee_memory.remember_fix(**_job),
+                        timeout=cyphex_config.COGNEE_REMEMBER_TIMEOUT_S,
+                    )
+                    _persisted += 1
+                except (asyncio.TimeoutError, TimeoutError):
+                    console.print(
+                        f"[dim]cognee remember skipped: timed out after "
+                        f"{cyphex_config.COGNEE_REMEMBER_TIMEOUT_S:.0f}s "
+                        f"(cognify LLM extraction too slow)[/dim]"
+                    )
+                except Exception as e:
+                    # str(e) is empty for many cognee/asyncio errors — show the
+                    # type so "remember skipped:" is never a blank, useless line.
+                    console.print(f"[dim]cognee remember skipped: {type(e).__name__}: {e}[/dim]")
+            console.print(f"[dim]cognee memory: {_persisted}/{len(cognee_jobs)} fix(es) persisted.[/dim]")
 
         # ── Summary Panel ──
         console.print(Panel(

@@ -234,9 +234,35 @@ async def recall_similar_fixes(cwe: str, vulnerable_code: str, limit: int = 3) -
 
         if not results:
             return []
-        if isinstance(results, list):
-            return results[:limit]
-        return [results]
+
+        # Unwrap cognee's search payloads down to the stored fix TEXT. With
+        # ENABLE_BACKEND_ACCESS_CONTROL=false (our config) search() returns a
+        # flat list of chunk-payload dicts; with it on, each item wraps a
+        # "search_result" list. Either way we must return the human-readable
+        # `text` — NOT the raw dict/node, whose repr() (UUIDs, chunk metadata,
+        # repr-escaped \n) is what format_hint would otherwise str() into the
+        # prompt, feeding the patcher model an unreadable MEMORY HINT block.
+        raw = results if isinstance(results, list) else [results]
+        payloads: list[str] = []
+        for r in raw:
+            if isinstance(r, dict) and "search_result" in r:
+                inner = r["search_result"]
+            else:
+                inner = getattr(r, "search_result", r)
+            for item in (inner if isinstance(inner, list) else [inner]):
+                if isinstance(item, dict):
+                    txt = item.get("text") or item.get("chunk_text") or ""
+                elif isinstance(item, str):
+                    txt = item
+                else:
+                    txt = getattr(item, "text", "") or ""
+                txt = txt.strip()
+                # Only keep chunks that actually carry a stored fix (they start
+                # with the _format_content header). Skips cognee index/graph
+                # nodes that have no readable fix text.
+                if txt and txt not in payloads:
+                    payloads.append(txt[:1200])
+        return payloads[:limit]
     except Exception:
         return []
 
