@@ -18,6 +18,60 @@
             flex-direction: column;
             height: 100vh;
         }
+
+        #tour-panel {
+            display: none;
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(30, 30, 30, 0.95);
+            border: 2px solid #bb86fc;
+            border-radius: 8px;
+            padding: 20px;
+            width: 450px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.7);
+            z-index: 50;
+            text-align: center;
+        }
+        #tour-title {
+            color: #03dac6;
+            margin-top: 0;
+            margin-bottom: 10px;
+            font-size: 1.2rem;
+            font-weight: bold;
+        }
+        #tour-desc {
+            margin-bottom: 20px;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+        #tour-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .tour-btn {
+            background-color: #bb86fc;
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .tour-btn:hover {
+            background-color: #9965f4;
+        }
+        .tour-btn:disabled {
+            background-color: #555;
+            color: #888;
+            cursor: not-allowed;
+        }
+        #tour-step-counter {
+            font-size: 0.85rem;
+            color: #aaa;
+        }
         #header {
             padding: 15px 20px;
             background-color: #1e1e1e;
@@ -138,9 +192,21 @@
     <div id="header">
         <h1>Codebase Knowledge Graph</h1>
         <div id="controls">
+            <button id="btn-tour" style="background-color: #03dac6; color: #000; font-weight: bold;">Start Tour</button>
             <button id="btn-fit">Fit to Screen</button>
             <input type="file" id="file-input" accept=".json" style="display: none;" />
             <button id="btn-load" onclick="document.getElementById('file-input').click()">Load graph.json</button>
+        </div>
+    </div>
+
+    <div id="tour-panel">
+        <div id="tour-title">Tour Step</div>
+        <div id="tour-desc">Description of the step goes here.</div>
+        <div id="tour-controls">
+            <button id="tour-prev" class="tour-btn">Previous</button>
+            <span id="tour-step-counter">1 / 10</span>
+            <button id="tour-next" class="tour-btn">Next</button>
+            <button id="tour-close" class="tour-btn" style="background-color: #cf6679; color: #fff;">End Tour</button>
         </div>
     </div>
 
@@ -166,11 +232,12 @@
 
         const typeColors = {
             'file': '#bb86fc', // Purple
-            'class': '#03dac6', // Teal
+            'code': '#03dac6', // Teal (most nodes are code)
+            'class': '#bb86fc',
             'function': '#cf6679', // Pink
             'method': '#ffb74d', // Orange
-            'variable': '#4dd0e1', // Cyan
-            'interface': '#81c784', // Light Green
+            'concept': '#e1bee7', // Light Purple
+            'rationale': '#757575', // Grey (though filtered out)
             'default': '#a0a0a0'
         };
 
@@ -212,13 +279,20 @@
                     sourceNodes = Object.values(sourceNodes);
                 }
 
+                // Create a set of kept node IDs to filter edges properly
+                const keptNodeIds = new Set();
+
                 sourceNodes.forEach(n => {
-                    const type = n.type || 'default';
+                    const type = n.file_type || n.type || 'default';
+                    // Filtering out "rationale" nodes to reduce clutter
+                    if (type === 'rationale') return;
+
                     const color = typeColors[type] || typeColors['default'];
                     // ID can sometimes be missing or in 'key' in older graphify versions
                     const nodeId = n.id || n.key;
 
                     if (nodeId) {
+                        keptNodeIds.add(nodeId);
                         nodes.add({
                             id: nodeId,
                             label: n.name || n.label || nodeId.split('/').pop(),
@@ -229,8 +303,8 @@
                                 highlight: { background: lightenColor(color, 20), border: '#fff' }
                             },
                             font: { color: '#ffffff', strokeWidth: 0 },
-                            shape: type === 'file' ? 'box' : 'dot',
-                            size: type === 'file' ? 25 : 15,
+                            shape: type === 'code' ? 'box' : 'dot',
+                            size: type === 'code' ? 25 : 15,
                             _rawData: n
                         });
                         actualNodes++;
@@ -246,7 +320,7 @@
                     sourceEdges.forEach(e => {
                         const source = e.source || e.from;
                         const target = e.target || e.to;
-                        if (source && target) {
+                        if (source && target && keptNodeIds.has(source) && keptNodeIds.has(target)) {
                             edges.add({
                                 from: source,
                                 to: target,
@@ -278,17 +352,17 @@
                     physics: {
                         enabled: true,
                         barnesHut: {
-                            gravitationalConstant: -2000,
-                            centralGravity: 0.3,
-                            springLength: 95,
+                            gravitationalConstant: -4000,
+                            centralGravity: 0.1,
+                            springLength: 150,
                             springConstant: 0.04,
                             damping: 0.09,
                             avoidOverlap: 0.1
                         },
                         stabilization: {
                             enabled: true,
-                            iterations: 500,
-                            updateInterval: 25,
+                            iterations: 200, // Reduced iterations for faster loading
+                            updateInterval: 50,
                             onlyDynamicEdges: false,
                             fit: true
                         }
@@ -310,6 +384,8 @@
 
                 network.on("stabilizationIterationsDone", function() {
                     loading.style.display = 'none';
+                    // Disable physics after stabilization for better performance
+                    network.setOptions({ physics: false });
                     network.fit();
                 });
 
@@ -323,8 +399,14 @@
                     }
                 });
 
-                // Fail-safe hide loading
-                setTimeout(() => { loading.style.display = 'none'; }, 10000);
+                // Fail-safe hide loading and disable physics
+                setTimeout(() => {
+                    loading.style.display = 'none';
+                    if(network) {
+                        network.setOptions({ physics: false });
+                        network.fit();
+                    }
+                }, 8000); // reduced from 10000
             }, 50);
         }
 
@@ -382,11 +464,141 @@
             return "#" + (0x1000000 + (R<255?R<1?0:R:255)*0x10000 + (B<255?B<1?0:B:255)*0x100 + (G<255?G<1?0:G:255)).toString(16).slice(1);
         }
 
+        // Disable physics immediately on start to show nodes faster
+        if (network) {
+            network.setOptions({ physics: false });
+        }
+
+        // --- Tour Logic ---
+        let currentTourStep = 0;
+        const tourSteps = [
+            {
+                title: "1. CLI Interaction",
+                desc: "The entry point of Cyphex. The user runs 'cyphex scan --path ./target', initializing the core orchestration pipeline inside cyphex_cli.py.",
+                targetNodes: ["cyphex_cli"] // Match part of ID
+            },
+            {
+                title: "2. Target Identification",
+                desc: "Cyphex identifies the target application context, reading files, parsing configs, and finding endpoints.",
+                targetNodes: ["agent_01_recon", "cyphex_cli_safe_extract_zip"]
+            },
+            {
+                title: "3. Sandbox Making",
+                desc: "Isolated deployment. Docker sandboxes are spun up to safely detonate exploits without risking the host.",
+                targetNodes: ["backend_sandbox_manager"]
+            },
+            {
+                title: "4. SAST (Static Analysis)",
+                desc: "Semgrep and the Custom Regex Engine scan the source code directly for vulnerabilities across 20+ languages.",
+                targetNodes: ["cyphex_scanner_run_semgrep"]
+            },
+            {
+                title: "5. DAST Agents",
+                desc: "Dynamic testing tools like Nuclei and ZAP interact with the running sandboxed application to find live vulnerabilities.",
+                targetNodes: ["cyphex_dynamic_scanner_run_nuclei", "cyphex_dynamic_scanner"]
+            },
+            {
+                title: "6. Red Team Deep Agents",
+                desc: "14 specialized autonomous agents (SQLi, XSS, SSRF, Auth) dynamically exploit the app in real-time.",
+                targetNodes: ["agents_agent_03_sqli", "deepagents_attack_graph"]
+            },
+            {
+                title: "7. Blue Team & Immune System",
+                desc: "The Isolation Forest ML builds a behavioral genome to detect anomalies, defending against the red team attacks.",
+                targetNodes: ["immune_behavioral_genome"]
+            },
+            {
+                title: "8. AI Simulation Attack",
+                desc: "The multi-model AI Council reviews the attacks, filters out false positives, and reaches a verdict on what is real.",
+                targetNodes: ["council_patch_council"] // using patch council as proxy for council
+            },
+            {
+                title: "9. Patching Phase",
+                desc: "The Patch Agent uses vectorless RAG and models like Qwen 2.5 Coder to generate deterministic fixes and apply them safely.",
+                targetNodes: ["agents_agent_10_patch"]
+            },
+            {
+                title: "10. Push to GitHub",
+                desc: "Finally, the verified patches are submitted directly as a Pull Request via GitHub webhooks.",
+                targetNodes: ["cyphex_github_hook"]
+            }
+        ];
+
+        function startTour() {
+            if (!network) {
+                alert("Please load a graph first.");
+                return;
+            }
+            currentTourStep = 0;
+            document.getElementById('tour-panel').style.display = 'block';
+            showTourStep();
+        }
+
+        function endTour() {
+            document.getElementById('tour-panel').style.display = 'none';
+            if (network) network.fit({ animation: true });
+            network.setSelection({ nodes: [] });
+        }
+
+        function showTourStep() {
+            const step = tourSteps[currentTourStep];
+            document.getElementById('tour-title').innerText = step.title;
+            document.getElementById('tour-desc').innerText = step.desc;
+            document.getElementById('tour-step-counter').innerText = `${currentTourStep + 1} / ${tourSteps.length}`;
+
+            document.getElementById('tour-prev').disabled = currentTourStep === 0;
+            document.getElementById('tour-next').disabled = currentTourStep === tourSteps.length - 1;
+
+            if (network && step.targetNodes) {
+                const nodesData = network.body.data.nodes.get();
+                let foundNodes = [];
+
+                step.targetNodes.forEach(target => {
+                    const matched = nodesData.find(n => n.id.includes(target) || (n.label && n.label.includes(target)));
+                    if (matched) foundNodes.push(matched.id);
+                });
+
+                if (foundNodes.length > 0) {
+                    network.setSelection({ nodes: foundNodes }, { unselectAll: true });
+                    network.focus(foundNodes[0], {
+                        scale: 1.2,
+                        animation: { duration: 1000, easingFunction: "easeInOutQuad" }
+                    });
+
+                    // Show details in info panel
+                    const nodeData = network.body.data.nodes.get(foundNodes[0])._rawData;
+                    updateInfoPanel(nodeData);
+                }
+            }
+        }
+
+        document.getElementById('btn-tour').addEventListener('click', startTour);
+        document.getElementById('tour-close').addEventListener('click', endTour);
+
+        document.getElementById('tour-prev').addEventListener('click', () => {
+            if (currentTourStep > 0) {
+                currentTourStep--;
+                showTourStep();
+            }
+        });
+
+        document.getElementById('tour-next').addEventListener('click', () => {
+            if (currentTourStep < tourSteps.length - 1) {
+                currentTourStep++;
+                showTourStep();
+            }
+        });
+
         window.onload = () => {
             loading.style.display = 'flex';
             document.getElementById('loading-text').innerText = 'Attempting to load graph.json automatically...';
 
-            fetch('.graphify/graph.json')
+            // Try multiple paths just in case
+            fetch('graph.json')
+                .then(response => {
+                    if (!response.ok) return fetch('.graphify/graph.json');
+                    return response;
+                })
                 .then(response => {
                     if (!response.ok) throw new Error('Not found');
                     return response.json();
