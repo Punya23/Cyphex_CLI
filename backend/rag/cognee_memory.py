@@ -73,6 +73,41 @@ def project_id_for(repo_url: str, source_dir: str) -> str:
     return _repo_hash(identifier)
 
 
+def _quiet_cognee_logging() -> None:
+    """
+    Silence cognee's own logging for the duration of a scan.
+
+    cognee configures a structlog renderer that writes straight to the
+    terminal, and its LLM structured-output step *retries by design* when a
+    local model returns a graph node without a `description` — which small
+    Ollama models do routinely. Left alone, a successful persist dumps
+    multi-screen pydantic validation tracebacks and raw ChatCompletion
+    objects into the middle of the scan report, which reads as a crash even
+    though the retry succeeds and the fix is stored.
+
+    Every failure that actually matters to the caller is already surfaced by
+    remember_fix()/recall_similar_fixes(), which report their own outcome.
+    """
+    import contextlib
+    import logging
+
+    try:
+        # cognee installs its structlog renderer at import time and greets
+        # the terminal on the way in, so the import itself has to happen
+        # under a redirect — by the time setup_logging() is reachable, those
+        # first lines are already out.
+        with open(os.devnull, "w") as devnull, contextlib.redirect_stderr(devnull):
+            from cognee.shared import logging_utils
+            logging_utils.setup_logging(logging.CRITICAL)
+    except Exception:
+        # cognee's logging internals are beta and move around — the stdlib
+        # levels below are the part that must not be skipped.
+        pass
+
+    for name in ("cognee", "cognee.shared", "LiteLLM", "litellm", "httpx"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
 def _ensure_configured() -> bool:
     """
     Lazily configure cognee for a fully local, Ollama-backed setup and import
@@ -118,6 +153,8 @@ def _ensure_configured() -> bool:
         os.environ.setdefault("EMBEDDING_MODEL", cyphex_config.COGNEE_EMBEDDING_MODEL)
         os.environ.setdefault("EMBEDDING_ENDPOINT", f"{cyphex_config.OLLAMA_URL}/api/embed")
         os.environ.setdefault("EMBEDDING_DIMENSIONS", "768")
+
+        _quiet_cognee_logging()
 
         import cognee
 
