@@ -54,11 +54,15 @@ class DeepRaceConditionAgent(BaseDeepAgent):
                 "[cyan]DeepRaceConditionAgent[/cyan] No obvious race targets — "
                 "probing generic POST endpoints..."
             )
-            # Probe any POST endpoints
+            # Probe any POST endpoints. asi.endpoints maps path -> EndpointProfile
+            # whose `.methods` is a set of observed verbs (not a dict).
+            def _has_post(ep: str) -> bool:
+                profile = self.asi.endpoints.get(ep)
+                return "POST" in (getattr(profile, "methods", None) or set())
+
             post_endpoints = [
                 ep for ep in list(self.asi.endpoints)
-                if self.asi.endpoints.get(ep, {}).get("method", "GET") == "POST"
-                or "create" in ep.lower() or "register" in ep.lower()
+                if _has_post(ep) or "create" in ep.lower() or "register" in ep.lower()
             ]
             for ep in post_endpoints[:2]:
                 await self._race_attack(ep, context)

@@ -32,6 +32,22 @@ ESCALATION_SIGNALS = [
 ]
 
 
+def _preferred_write_method(profile, default: str = "POST") -> str:
+    """
+    Pick a state-changing HTTP method from an ASI EndpointProfile.
+
+    `AttackSurfaceIndex.endpoints` maps path -> EndpointProfile, whose
+    `.methods` is a *set* of verbs actually observed — not a dict. Prefer a
+    write verb (POST/PUT/PATCH) since mass assignment only applies to those;
+    fall back to `default` when the profile is missing or GET-only.
+    """
+    methods = getattr(profile, "methods", None) or set()
+    for verb in ("POST", "PUT", "PATCH"):
+        if verb in methods:
+            return verb
+    return default
+
+
 class DeepMassAssignmentAgent(BaseDeepAgent):
     """
     Mass Assignment / Parameter Pollution DeepAgent (CWE-915).
@@ -59,7 +75,7 @@ class DeepMassAssignmentAgent(BaseDeepAgent):
         for path in list(self.asi.endpoints):
             path_lower = path.lower()
             if any(kw in path_lower for kw in ("register", "signup", "create", "update", "profile", "user")):
-                method = self.asi.endpoints.get(path, {}).get("method", "POST")
+                method = _preferred_write_method(self.asi.endpoints.get(path))
                 candidates.append((path, method))
         if not candidates:
             # Default targets for Express apps
