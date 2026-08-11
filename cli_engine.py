@@ -1454,6 +1454,8 @@ class CyphexEngine:
                     DeepSQLiAgent, DeepXSSAgent, DeepCMDiAgent, DeepAuthAgent,
                     DeepIDORAgent, DeepSSRFAgent, DeepSSTIAgent,
                     DeepPathTraversalAgent, DeepXXEAgent, DeepBusinessLogicAgent,
+                    DeepPromptInjectionAgent, DeepRaceConditionAgent,
+                    DeepMassAssignmentAgent,
                 )
                 agents_to_run = [
                     DeepSQLiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
@@ -1466,6 +1468,11 @@ class CyphexEngine:
                     DeepPathTraversalAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                     DeepXXEAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                     DeepBusinessLogicAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    # ── Merged from update_y1: LLM prompt injection (OWASP LLM01),
+                    #    TOCTOU race conditions, and mass assignment (CWE-915) ──
+                    DeepPromptInjectionAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepRaceConditionAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepMassAssignmentAgent(self.scan_id, target_url, attack_graph, asi, oracle),
                 ]
 
                 total = len(agents_to_run)
@@ -2482,6 +2489,24 @@ class CyphexEngine:
             indexer = CodeIndexer(self.source_dir)
             file_count = indexer.build_index()
 
+            # ── Additive: PageIndex-style Knowledge Tree navigator (merged from
+            #    update_y1). Fully optional and guarded — it only ENRICHES the
+            #    per-vuln prompt with CWE fix-recipes + repo knowledge; it never
+            #    replaces the CodeIndexer path above, and any failure here leaves
+            #    patching completely unaffected. build() is pure regex unless the
+            #    target ships a docs/ dir, and it caches to .cyphex/. ──
+            self._tree_navigator = None
+            try:
+                from backend.rag.knowledge_tree import KnowledgeTreeBuilder
+                from backend.rag.tree_navigator import get_navigator
+                _kt_builder = KnowledgeTreeBuilder(self.source_dir)
+                _kt = _kt_builder.build()
+                self._tree_navigator = get_navigator(_kt, getattr(_kt_builder, "cwe_index", None))
+                if self._tree_navigator:
+                    console.print("  [green]✓[/green] Knowledge Tree navigator ready (CWE fix-recipe enrichment)")
+            except Exception as _e:
+                console.print(f"[dim]Knowledge Tree navigator unavailable (non-fatal): {type(_e).__name__}[/dim]")
+
             # Show the code tree
             tree_lines = []
             for rel_path, meta in list(indexer.files.items())[:15]:
@@ -2849,6 +2874,20 @@ class CyphexEngine:
                             repo_pattern = indexer.find_secure_pattern(p["cwe"])
                             if repo_pattern:
                                 context_parts.append(f"// REPO'S OWN SECURE PATTERN (match this style):\n{repo_pattern[:300]}")
+                        # Additive Knowledge-Tree enrichment (merged from update_y1):
+                        # CWE fix-recipe + related repo knowledge. Fully guarded —
+                        # a failure here never affects patch generation.
+                        if getattr(self, "_tree_navigator", None):
+                            try:
+                                kt = self._tree_navigator.get_patch_context(
+                                    p["cwe"], p.get("rel_path", ""), p.get("line_num", 0), p["vuln_type"]
+                                )
+                                if kt.get("fix_recipe"):
+                                    context_parts.append(f"// KNOWLEDGE-TREE FIX RECIPE ({p['cwe']}):\n{kt['fix_recipe'][:400]}")
+                                if kt.get("related_knowledge"):
+                                    context_parts.append(f"// KNOWLEDGE-TREE KB:\n{kt['related_knowledge'][:400]}")
+                            except Exception:
+                                pass
                     patch_context = "\n\n".join(context_parts)
 
                     # Inject cross-scan session-memory lessons (get_prior_context)
