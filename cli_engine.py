@@ -1476,14 +1476,37 @@ class CyphexEngine:
                 ]
 
                 total = len(agents_to_run)
+                # Confirmed live: a `cx deep` run against a trivial dummy app
+                # hard-hung past 10 minutes inside a single agent's
+                # oracle-guided decide() loop (each local-LLM call can itself
+                # take up to ~90s, and the loop is internally bounded but
+                # still large — MAX_HYPOTHESES × MAX_ATTEMPTS_PER_HYPOTHESIS).
+                # Nothing here ever timed out or capped the phase, unlike the
+                # cognee persist step, which uses this exact
+                # wait_for-then-skip pattern. Bound both the phase and each
+                # individual agent so a slow/looping agent degrades the scan
+                # to partial results instead of hanging it indefinitely.
+                phase_deadline = time.time() + cyphex_config.DEEPAGENT_PHASE_BUDGET_S
                 for idx, agent in enumerate(agents_to_run, 1):
+                    if time.time() >= phase_deadline:
+                        skipped = total - idx + 1
+                        print(
+                            f"  {C.Y}[WARN]{C.RST} DeepAgents phase budget "
+                            f"({cyphex_config.DEEPAGENT_PHASE_BUDGET_S:.0f}s) exhausted after "
+                            f"{idx - 1}/{total} agents — skipping remaining {skipped} to keep "
+                            f"the scan bounded (tune via DEEPAGENT_PHASE_BUDGET_S)."
+                        )
+                        break
                     agent_header(
                         f"DeepAgent {idx}/{total}",
                         f"{agent.__class__.__name__} — {agent.PRIMARY_VULN_CLASS}",
                         "Oracle-Guided Hypothesis Testing",
                     )
                     try:
-                        res = await agent.run(context)
+                        res = await asyncio.wait_for(
+                            agent.run(context),
+                            timeout=cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S,
+                        )
                         context.confirmed_vulns.extend(res.vulns)
                         if res.vulns:
                             print(
@@ -1493,6 +1516,13 @@ class CyphexEngine:
                         # Display any new attack chains
                         if attack_graph.edges:
                             print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
+                    except (asyncio.TimeoutError, TimeoutError):
+                        print(
+                            f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} timed out after "
+                            f"{cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S:.0f}s (oracle-guided "
+                            f"loop too slow on this hardware) — skipping to the next agent."
+                        )
+                        continue
                     except Exception as e:
                         print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
                         continue
