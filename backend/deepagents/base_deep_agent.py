@@ -12,6 +12,7 @@ import time
 import asyncio
 import httpx
 from rich.console import Console
+from rich.markup import escape as _mkup
 
 from backend.backend.models.scan import ScanContext, Vuln, Evidence
 from backend.backend.models.agent_result import AgentResult
@@ -26,6 +27,32 @@ console = Console()
 _PARALLEL_BATCH = 3
 # Minimum confidence threshold to emit a confirmed finding
 _CONFIDENCE_THRESHOLD = 60
+
+# Oracle decision.action → display style. Every attempt was rendered in the
+# same flat [dim] regardless of outcome, so a confirmed hit and a rejected
+# guess looked identical scrolling by. Color now carries the verdict.
+_ACTION_STYLE = {
+    "confirmed": "bold green",
+    "adapt": "yellow",
+    "retry": "cyan",
+    "abandoned": "dim red",
+}
+
+
+def _action_style(action: str) -> str:
+    return _ACTION_STYLE.get(action, "white")
+
+
+def _confidence_style(confidence: int) -> str:
+    """Color the confidence number itself against the same 60% bar that
+    gates whether a finding is ever emitted (_CONFIDENCE_THRESHOLD)."""
+    if confidence >= 80:
+        return "bold green"
+    if confidence >= _CONFIDENCE_THRESHOLD:
+        return "green"
+    if confidence >= 40:
+        return "yellow"
+    return "dim red"
 
 
 class HypothesisResult:
@@ -72,7 +99,7 @@ class BaseDeepAgent:
 
         # Oracle generates attack plan
         surface_summary = self.asi.summarise_for_prompt()
-        console.print(f"[dim]DeepAgent {self.__class__.__name__} consulting Oracle...[/dim]")
+        console.print(f"[magenta]◈ DeepAgent {self.__class__.__name__} consulting Oracle...[/magenta]")
         try:
             plan = await self.oracle.plan(
                 target=self.target,
@@ -80,7 +107,7 @@ class BaseDeepAgent:
                 vuln_class=self.PRIMARY_VULN_CLASS,
             )
             console.print(
-                f"[cyan]Oracle[/cyan] generated {len(plan.hypotheses)} hypotheses "
+                f"[cyan]Oracle[/cyan] generated [bold cyan]{len(plan.hypotheses)}[/bold cyan] hypotheses "
                 f"for {self.__class__.__name__}."
             )
         except Exception as e:
@@ -200,8 +227,8 @@ class BaseDeepAgent:
             # on it. This is what turned a handful of dead routes into ~39 minutes.
             if status in (404, 0):
                 console.print(
-                    f"[dim]  [{hyp.id}] {current_request.path} → HTTP {status}: "
-                    f"dead route, abandoning (no Oracle call)[/dim]"
+                    f"[dim]  [{hyp.id}] {current_request.path} → HTTP {status}: [/dim]"
+                    f"[dim red]dead route, abandoning[/dim red][dim] (no Oracle call)[/dim]"
                 )
                 return HypothesisResult(False)
 
@@ -232,9 +259,14 @@ class BaseDeepAgent:
                 console.print(f"[red]Oracle decide failed: {e}[/red]")
                 break
 
+            # decision.thinking is free-text straight from the model — escape it
+            # so a literal '[' in its output (e.g. "header X-Test: [ok]") can't be
+            # parsed as a markup tag and silently swallowed from the printed line.
             console.print(
-                f"[dim]  [{hyp.id}] attempt {attempt+1} → {decision.action} "
-                f"(conf={decision.confidence}%) {decision.thinking}[/dim]"
+                f"[dim]  [{hyp.id}] attempt {attempt+1}[/dim] "
+                f"[{_action_style(decision.action)}]→ {decision.action}[/{_action_style(decision.action)}] "
+                f"[{_confidence_style(decision.confidence)}](conf={decision.confidence}%)[/{_confidence_style(decision.confidence)}] "
+                f"[dim]{_mkup(decision.thinking)}[/dim]"
             )
 
             if decision.action == "confirmed" and decision.vuln:

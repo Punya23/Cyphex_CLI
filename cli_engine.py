@@ -1503,7 +1503,7 @@ class CyphexEngine:
                             )
                         # Display any new attack chains
                         if attack_graph.edges:
-                            print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
+                            print(f"  {C.BOLD}{C.PURP2}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
                     except Exception as e:
                         print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
                         continue

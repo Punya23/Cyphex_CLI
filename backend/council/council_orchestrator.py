@@ -7,6 +7,7 @@ from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
+from rich.markup import escape as _mkup
 from backend.council.council_errors import CouncilCallError, ModelNotFoundError
 
 # Oracle agent-reasoning integration
@@ -416,7 +417,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                     if parsed is None:
                         raise json.JSONDecodeError("No JSON structure found", clean, 0)
                     else:
-                        console.print(f"[dim]  ⚠ {model} output was truncated/unbalanced — salvaged usable JSON[/dim]")
+                        console.print(f"[yellow]  ⚠ {model} output was truncated/unbalanced — salvaged usable JSON[/yellow]")
                 
                 # CYPHEX GLOBAL FIX: Recursively flatten lists of strings into multiline strings
                 # to prevent AttributeError: 'list' object has no attribute 'strip' downstream
@@ -432,7 +433,15 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 if isinstance(parsed, dict) and "thinking" in parsed:
                     thinking_content = str(parsed["thinking"]).strip()
                     if thinking_content:
-                        console.print(Panel(thinking_content, title=f"[{model}] Thinking Process", border_style="blue"))
+                        # thinking_content is raw model output — escape before
+                        # interpolating into markup, same reasoning as _mkup()
+                        # elsewhere: a literal '[' in the model's own text would
+                        # otherwise be parsed as a style tag and silently dropped.
+                        console.print(Panel(
+                            f"[dim]{_mkup(thinking_content)}[/dim]",
+                            title=f"[bold cyan]{_mkup(model)}[/bold cyan] [bold]Thinking Process[/bold]",
+                            border_style="blue",
+                        ))
                     
                 # Display the decision if applicable
                 if isinstance(parsed, dict):
