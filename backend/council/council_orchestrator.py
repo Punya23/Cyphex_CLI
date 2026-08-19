@@ -403,10 +403,20 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 try:
                     parsed = json.loads(clean)
                 except json.JSONDecodeError:
-                    # Fallback: bracket-balanced extraction (handles nested braces in strings)
+                    # Fallback 1: bracket-balanced extraction (nested braces in strings)
                     parsed = self._extract_json_robust(clean)
                     if parsed is None:
+                        # Fallback 2: salvage a truncated response. Small local models
+                        # routinely over-generate (e.g. an attack plan with 15+
+                        # hypotheses) and get cut off at num_predict mid-JSON, leaving
+                        # an unterminated object. Rather than discard everything and
+                        # regenerate — a second ~100s call that blows the per-agent
+                        # timeout — recover the complete elements already produced.
+                        parsed = self._salvage_truncated_json(clean)
+                    if parsed is None:
                         raise json.JSONDecodeError("No JSON structure found", clean, 0)
+                    else:
+                        console.print(f"[dim]  ⚠ {model} output was truncated/unbalanced — salvaged usable JSON[/dim]")
                 
                 # CYPHEX GLOBAL FIX: Recursively flatten lists of strings into multiline strings
                 # to prevent AttributeError: 'list' object has no attribute 'strip' downstream
@@ -480,4 +490,81 @@ ANTI-HALLUCINATION RULES — apply on every response:
                         except json.JSONDecodeError:
                             return None
             i += 1
+        return None
+
+    @staticmethod
+    def _salvage_truncated_json(text: str):
+        """
+        Recover a usable object from JSON that was cut off mid-generation
+        (num_predict limit), leaving unbalanced brackets / an unterminated
+        string. Strategy: walk to the last structural close ('}' or ']') that
+        sits outside a string, truncate there, re-append the closers implied by
+        the still-open bracket stack, and parse. Trailing incomplete elements
+        (a half-written final hypothesis) are dropped rather than guessed.
+
+        Returns a parsed dict, or None if nothing salvageable is found.
+        """
+        start = text.find('{')
+        if start == -1:
+            return None
+        s = text[start:]
+
+        # Collect the indices of every structural close that is not inside a string.
+        close_idxs = []
+        in_string = False
+        escape = False
+        for i, ch in enumerate(s):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                if in_string:
+                    escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch in '}]':
+                close_idxs.append(i)
+
+        def _needed_closers(fragment: str) -> str:
+            stack = []
+            in_str = False
+            esc = False
+            for ch in fragment:
+                if esc:
+                    esc = False
+                    continue
+                if ch == '\\':
+                    if in_str:
+                        esc = True
+                    continue
+                if ch == '"':
+                    in_str = not in_str
+                    continue
+                if in_str:
+                    continue
+                if ch in '{[':
+                    stack.append(ch)
+                elif ch == '}':
+                    if stack and stack[-1] == '{':
+                        stack.pop()
+                elif ch == ']':
+                    if stack and stack[-1] == '[':
+                        stack.pop()
+            return ''.join('}' if c == '{' else ']' for c in reversed(stack))
+
+        # Try each structural close from the end backwards: the last one that
+        # yields valid JSON once we re-append the open-bracket closers wins.
+        for pos in reversed(close_idxs):
+            candidate = s[:pos + 1].rstrip()
+            if candidate.endswith(','):
+                candidate = candidate[:-1].rstrip()
+            closers = _needed_closers(candidate)
+            try:
+                return json.loads(candidate + closers)
+            except json.JSONDecodeError:
+                continue
         return None
