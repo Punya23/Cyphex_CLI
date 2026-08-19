@@ -1259,13 +1259,36 @@ def _tally(vulns):
     return crit, high, med, low
 
 
-def _score_from_counts(crit, high, med, low):
+def score_from_counts(crit, high, med, low):
+    """Single source of truth for the 0-100 posture score.
+
+    Severity-weighted with diminishing returns: the first finding of a class
+    costs a flat base, every further doubling adds a fixed increment. Every
+    caller (report panel, before/after panel, final banner) must go through
+    this — the formula used to be hand-copied in four places, which is how the
+    before/after panel and the banner drifted apart.
+
+    Severity caps on top of the weighted penalty: with just the log2 curve, a
+    single open Critical only cost ~20 points (score 70, labelled "FAIR") no
+    matter how many Highs/Mediums also sat open — one unpatched SQLi could
+    hide behind a green-ish number. An open finding of a given severity now
+    hard-caps the score at that severity's ceiling, so "FAIR" or better is
+    unreachable while a Critical is still live.
+    """
     penalty = 0
     if crit: penalty += 20 + 10 * math.log2(1 + crit)
     if high: penalty += 10 + 8 * math.log2(1 + high)
     if med:  penalty += 3 + 4 * math.log2(1 + med)
     if low:  penalty += 1 + 2 * math.log2(1 + low)
-    return max(0, min(100, round(100 - penalty)))
+    score = max(0, min(100, round(100 - penalty)))
+    if crit: score = min(score, 39)   # POOR or worse
+    elif high: score = min(score, 59)  # AT RISK or worse
+    elif med: score = min(score, 79)   # FAIR or worse
+    return score
+
+
+# Back-compat alias for existing internal callers.
+_score_from_counts = score_from_counts
 
 
 def render_vulns(vulns, duration=0):
@@ -1582,7 +1605,8 @@ def _verdict(score):
 
 
 def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
-                        patches_applied=0, patches_total=0, endpoints=0, console=None):
+                        patches_applied=0, patches_total=0, endpoints=0,
+                        killed=None, unpatchable=0, console=None):
     c = console or soc
     label, color, lamp = _verdict(score)
     total = crit + high + med + low
@@ -1634,10 +1658,23 @@ def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
     t = Table(box=CANOPY, border_style=PHOS_DIM, show_header=False, padding=(0, 2))
     t.add_column(style=LABEL, width=14)
     t.add_column(style=READOUT)
-    t.add_row("KILLS", Text.assemble(("▲", WARN), (f"{crit:02d} ", WARN), ("●", WARN),
+    # crit/high/med/low are the findings STILL OPEN after remediation. Printing
+    # them under a "KILLS" label claimed the scan had killed them — the exact
+    # opposite. Kills are the verified-remediated tally, reported separately.
+    kc, kh, km, kl = killed or (0, 0, 0, 0)
+    t.add_row("KILLS", Text.assemble(("▲", PHOS if kc else LABEL), (f"{kc:02d} ", PHOS if kc else LABEL),
+              ("●", PHOS if kh else LABEL), (f"{kh:02d} ", PHOS if kh else LABEL),
+              ("◆", PHOS if km else LABEL), (f"{km:02d} ", PHOS if km else LABEL),
+              ("○", PHOS if kl else LABEL), (f"{kl:02d}", PHOS if kl else LABEL)))
+    t.add_row("REMAINING", Text.assemble(("▲", WARN), (f"{crit:02d} ", WARN if crit else LABEL), ("●", WARN),
               (f"{high:02d} ", WARN if high else LABEL), ("◆", CAUT), (f"{med:02d} ", CAUT if med else LABEL),
               ("○", LABEL), (f"{low:02d}", LABEL)))
-    t.add_row("PATCHES", Text.assemble((f"{patches_applied}", PHOS), (f"/{patches_total} APPLIED", LABEL)))
+    _patches = Text.assemble((f"{patches_applied}", PHOS), (f"/{patches_total} APPLIED", LABEL))
+    if unpatchable:
+        # Runtime-only findings never reach the patch loop; leaving them out of
+        # the denominator made "2/3 APPLIED" look like full coverage of 7 vulns.
+        _patches.append(f"  ·  {unpatchable} NO SOURCE", style=CAUT)
+    t.add_row("PATCHES", _patches)
     t.add_row("ENDPOINTS", Text(str(endpoints), style=READOUT))
     t.add_row("INTERCEPT", Text(f"{elapsed:.1f}s", style=REF))
     t.add_row("SCAN ID", Text(scan_id, style=PHOS))
@@ -1648,9 +1685,11 @@ def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
 
 
 def render_final_banner(score, crit, high, med, low, elapsed, scan_id,
-                        patches_applied=0, patches_total=0, endpoints=0):
+                        patches_applied=0, patches_total=0, endpoints=0,
+                        killed=None, unpatchable=0):
     render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
-                        patches_applied, patches_total, endpoints)
+                        patches_applied, patches_total, endpoints,
+                        killed=killed, unpatchable=unpatchable)
 
 
 # gradient bar kept for any legacy internal caller

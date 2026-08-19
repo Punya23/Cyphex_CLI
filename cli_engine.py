@@ -12,6 +12,7 @@ import json
 import hashlib
 import re
 import glob
+import math
 import random
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -37,6 +38,23 @@ try:
     SOC_UI = True
 except ImportError:
     SOC_UI = False
+
+
+def security_score(crit, high, med, low):
+    """0-100 posture score — the ONLY place cli_engine computes it.
+
+    Delegates to terminal_ui.score_from_counts so the report panel, the
+    before/after panel and the final banner can never disagree; keeps an
+    identical local copy for the no-SOC-UI fallback.
+    """
+    if SOC_UI:
+        return ui.score_from_counts(crit, high, med, low)
+    penalty = 0
+    if crit: penalty += 20 + 10 * math.log2(1 + crit)
+    if high: penalty += 10 + 8 * math.log2(1 + high)
+    if med:  penalty += 3 + 4 * math.log2(1 + med)
+    if low:  penalty += 1 + 2 * math.log2(1 + low)
+    return max(0, min(100, round(100 - penalty)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -2273,15 +2291,8 @@ class CyphexEngine:
         med = sum(1 for v in vulns if v.severity == "Medium")
         low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
         total = len(vulns)
-        score = max(0, 100 - crit * 25 - high * 10 - med * 5 - low)
         # Diminishing returns: duplicate findings of same severity don't stack fully
-        import math
-        penalty = 0
-        if crit: penalty += 20 + 10 * math.log2(1 + crit)  # ~20 first, +10 per doubling
-        if high: penalty += 10 + 8 * math.log2(1 + high)   # ~10 first, +8 per doubling
-        if med:  penalty += 3 + 4 * math.log2(1 + med)
-        if low:  penalty += 1 + 2 * math.log2(1 + low)
-        score = max(0, min(100, round(100 - penalty)))
+        score = security_score(crit, high, med, low)
 
         if score >= 80:
             sc_rich, sc_label = "green", "SECURE"
@@ -2479,17 +2490,11 @@ class CyphexEngine:
                 console.print(f"[dim]  Route tracer unavailable or failed: {str(e)}[/dim]")
 
         # Calculate BEFORE score
-        import math
         crit_b = sum(1 for v in vulns if v.severity == "Critical")
         high_b = sum(1 for v in vulns if v.severity == "High")
         med_b  = sum(1 for v in vulns if v.severity == "Medium")
         low_b  = sum(1 for v in vulns if v.severity in ("Low", "Info"))
-        penalty_b = 0
-        if crit_b: penalty_b += 20 + 10 * math.log2(1 + crit_b)
-        if high_b: penalty_b += 10 + 8 * math.log2(1 + high_b)
-        if med_b:  penalty_b += 3 + 4 * math.log2(1 + med_b)
-        if low_b:  penalty_b += 1 + 2 * math.log2(1 + low_b)
-        score_before = max(0, min(100, round(100 - penalty_b)))
+        score_before = security_score(crit_b, high_b, med_b, low_b)
 
         # ═══════════════════════════════════════════════════════════════
         # V2 PIPELINE: Vectorless RAG + Grounded Reasoning
@@ -2711,6 +2716,27 @@ class CyphexEngine:
         # the same object drawn from `vulns` below.
         remediated_vuln_ids = set()
 
+        def _record_patch_failure(p, idx, fix_source, fixed_code, why):
+            """Persist a FAILED patch attempt into session memory.
+
+            Both the apply gate and the verification gate call this, so
+            patches_failed and the "what NOT to do" lessons reflect every
+            rejection, not just the ones that survived long enough to be
+            verified.
+            """
+            if not (session and REASONING_AVAILABLE):
+                return
+            session.add_entry(ReasoningEntry(
+                vuln_id=f"vuln_{idx:03d}", cwe=p["cwe"], file=p["rel_path"],
+                line=p["line_num"], strategy_used=fix_source, verdict="FAIL",
+                patch_hash=hashlib.sha256(fixed_code.encode()).hexdigest()[:12],
+                fix_source=fix_source,
+            ))
+            session.add_lesson(
+                f"{p['cwe']} in {os.path.basename(p['rel_path'])}: a {fix_source} fix FAILED "
+                f"({why}) — try a different remediation approach"
+            )
+
 
 
         cwe_map = {
@@ -2817,14 +2843,22 @@ class CyphexEngine:
         # severity per location.
         _sev_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Info": 0}
         _deduped: dict[tuple, dict] = {}
+        # Every finding that shared a location, including the ones dropped here.
+        # A dropped sibling is fixed by the surviving patch, so it MUST clear
+        # from the score too — otherwise a patched line keeps being penalised
+        # forever by its own duplicate and score_after is permanently understated.
+        _loc_members: dict[tuple, list[int]] = {}
         for p in patchable:
             loc_key = (p["rel_path"], p["line_num"])
+            _loc_members.setdefault(loc_key, []).append(id(p["vuln"]))
             existing = _deduped.get(loc_key)
             if existing is None or _sev_rank.get(p["vuln"].severity, 0) > _sev_rank.get(existing["vuln"].severity, 0):
                 _deduped[loc_key] = p
         if len(_deduped) < len(patchable):
             console.print(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
         patchable = list(_deduped.values())
+        for loc_key, p in _deduped.items():
+            p["sibling_ids"] = _loc_members.get(loc_key, [id(p["vuln"])])
 
         if PATCH_V2_AVAILABLE and self.source_dir:
             try:
@@ -3172,14 +3206,33 @@ class CyphexEngine:
                 # otherwise the other lines in the displayed window are left untouched
                 # while `fixed` (which may span multiple lines) only replaces one line.
                 apply_result = apply_patch(p["filepath"], p["start_l"] + 1, p["end_l"], fixed)
-                if not apply_result.success:
-                    console.print(f"[bold red][REJECTED][/bold red] Apply failed: {apply_result.error}")
+                if not apply_result.success or not apply_result.parse_valid:
+                    if apply_result.success:
+                        console.print(f"[bold red][REJECTED][/bold red] Syntax error in patched file — rolling back")
+                        rollback(p["filepath"], original_content)
+                    else:
+                        console.print(f"[bold red][REJECTED][/bold red] Apply failed: {apply_result.error}")
                     skipped += 1
-                    continue
-                if not apply_result.parse_valid:
-                    console.print(f"[bold red][REJECTED][/bold red] Syntax error in patched file — rolling back")
-                    rollback(p["filepath"], original_content)
-                    skipped += 1
+                    # A patch rejected at APPLY time is a failure too. Only the
+                    # verification gate used to record one, so patches_failed
+                    # stayed 0 after a syntax rollback and the next scan learned
+                    # nothing from it.
+                    _record_patch_failure(
+                        p, i, fix_source, fixed,
+                        apply_result.error or "patch produced invalid syntax",
+                    )
+                    # A memory-sourced patch that just failed a hard, deterministic
+                    # gate (structural integrity, or syntax) is a POISONED cache
+                    # entry, not a one-off bad model output — it was stored once
+                    # under "verified" and would otherwise be replayed verbatim on
+                    # every future scan forever. Purge it so the next scan falls
+                    # back to real generation instead of repeating the same break.
+                    if fix_source == "memory" and patch_memory:
+                        patch_memory.invalidate(p["cwe"], p.get("snippet_fn", p["snippet"]))
+                        console.print(
+                            f"[dim]  ⚠ poisoned patch-memory entry for {p['cwe']} purged — "
+                            f"will regenerate next time[/dim]"
+                        )
                     continue
             else:
                 # Legacy apply
@@ -3240,6 +3293,7 @@ class CyphexEngine:
                     f"  {check(vr.builds)}  Syntax Valid    — Patched code {'compiles' if vr.builds else 'has SYNTAX ERRORS'}\n"
                     f"  {check(vr.no_suppression)}  No Suppression  — {'Clean fix (no noqa/eslint-disable)' if vr.no_suppression else 'Patch ADDED suppression comments'}\n"
                     f"  {check(vr.blast_ok)}  Blast Radius    — Diff {'within' if vr.blast_ok else 'EXCEEDS'} {sev_blast_cap}-line cap ({v.severity})\n"
+                    f"  {check(vr.structure_ok)}  Structure Preserved — {'No route/fn/class removed' if vr.structure_ok else 'A route/fn/class was DELETED'}\n"
                     + (f"\n[dim]Evidence: {vr.evidence}[/dim]" if vr.evidence else ""),
                     title="◈ VERIFICATION GATE", border_style=verdict_color
                 ))
@@ -3253,23 +3307,30 @@ class CyphexEngine:
                     # `continue` here used to skip the recorder below — so
                     # patches_failed stayed 0 and no "what NOT to do" lesson was ever
                     # captured. Record it before bailing.
-                    if session and REASONING_AVAILABLE:
-                        session.add_entry(ReasoningEntry(
-                            vuln_id=f"vuln_{i:03d}", cwe=p["cwe"], file=p["rel_path"],
-                            line=p["line_num"], strategy_used=fix_source, verdict="FAIL",
-                            patch_hash=hashlib.sha256(fixed.encode()).hexdigest()[:12],
-                            fix_source=fix_source,
-                        ))
-                        _why = "finding still present" if not getattr(vr, "finding_gone", True) else "syntax/blast-radius check"
-                        session.add_lesson(
-                            f"{p['cwe']} in {os.path.basename(p['rel_path'])}: a {fix_source} fix FAILED "
-                            f"verification ({_why}) — try a different remediation approach"
+                    _why = (
+                        "finding still present" if not getattr(vr, "finding_gone", True)
+                        else "route/function/class deleted" if not getattr(vr, "structure_ok", True)
+                        else "syntax/blast-radius check"
+                    )
+                    _record_patch_failure(p, i, fix_source, fixed, f"verification: {_why}")
+                    # Same poisoned-cache purge as the apply-time rejection above —
+                    # this branch is reached when the patch DID apply and DID pass
+                    # syntax, but verify_static's independent structure check (or
+                    # rescan) still caught it. Equally poisoned, equally must not
+                    # survive to the next scan.
+                    if fix_source == "memory" and patch_memory:
+                        patch_memory.invalidate(p["cwe"], p.get("snippet_fn", p["snippet"]))
+                        console.print(
+                            f"[dim]  ⚠ poisoned patch-memory entry for {p['cwe']} purged — "
+                            f"will regenerate next time[/dim]"
                         )
                     continue
 
                 verified_count += 1 if vr.verdict == "PASS" else 0
                 if vr.verdict == "PASS":
-                    remediated_vuln_ids.add(id(v))
+                    # Clear every finding that pointed at this exact line, not
+                    # only the highest-severity one we kept in Phase 1.3.
+                    remediated_vuln_ids.update(p.get("sibling_ids") or [id(v)])
 
                 # Record in manifest
                 if manifest:
@@ -3423,8 +3484,13 @@ class CyphexEngine:
             console.print(Panel(
                 f"[bold]Thread ID:[/bold]        [cyan]{thread_id}[/cyan]\n"
                 f"[bold]Session:[/bold]          {saved_path}\n"
-                f"[bold]Patches recorded:[/bold] {session.model_context.get('patches_applied', 0)}\n"
-                f"[bold]Verified:[/bold]         {session.model_context.get('patches_verified', 0)}\n"
+                f"[bold]This scan:[/bold]        {len(patched_files)} applied · {verified_count} verified · {skipped} skipped\n"
+                f"[bold]Lifetime:[/bold]        "
+                f"{session.model_context.get('patches_attempted', 0)} attempted · "
+                f"{session.model_context.get('patches_applied', 0)} applied "
+                f"[dim](all scans of this repo)[/dim]\n"
+                f"[bold]Lifetime verified:[/bold] {session.model_context.get('patches_verified', 0)}  "
+                f"[bold]failed:[/bold] {session.model_context.get('patches_failed', 0)}\n"
                 f"[bold]Lessons learned:[/bold]  {len(session.model_context.get('lessons', []))}"
                 + reasoning_stats +
                 f"\n\n[dim]Session persisted — will be loaded on next scan for continuity[/dim]",
@@ -3443,13 +3509,8 @@ class CyphexEngine:
         high_a = sum(1 for v in remaining if v.severity == "High")
         med_a  = sum(1 for v in remaining if v.severity == "Medium")
         low_a  = sum(1 for v in remaining if v.severity in ("Low", "Info"))
-        penalty_a = 0
-        # MUST use the SAME coefficients as score_before (20/10, 10/8, 3/4, 1/2)
-        if crit_a: penalty_a += 20 + 10 * math.log2(1 + crit_a)
-        if high_a: penalty_a += 10 + 8 * math.log2(1 + high_a)
-        if med_a:  penalty_a += 3 + 4 * math.log2(1 + med_a)
-        if low_a:  penalty_a += 1 + 2 * math.log2(1 + low_a)
-        score_after = max(0, min(100, round(100 - penalty_a)))
+        # Same function as score_before — not a hand-copied set of coefficients.
+        score_after = security_score(crit_a, high_a, med_a, low_a)
         # Final guard: 0 patches ⇒ 0 improvement
         if not patched_files:
             score_after = score_before
@@ -3460,14 +3521,19 @@ class CyphexEngine:
 
         bar_b = int(score_before / 100 * 25)
         bar_a = int(score_after / 100 * 25)
-        sc_b_color = "red" if score_before < 40 else "yellow" if score_before < 70 else "green"
-        sc_a_color = "red" if score_after < 40 else "yellow" if score_after < 70 else "green"
+        # Same thresholds as terminal_ui.score_color / _verdict, so a score is
+        # never yellow here and "FAIR" in the banner.
+        def _band(sc):
+            return "red" if sc < 40 else "yellow" if sc < 60 else "cyan" if sc < 80 else "green"
+        sc_b_color = _band(score_before)
+        sc_a_color = _band(score_after)
 
         console.print(Panel(
             f"  [bold]Before Patching:[/bold]  [{sc_b_color}]{'█' * bar_b}{'░' * (25 - bar_b)}  {score_before}/100[/{sc_b_color}]\n"
             f"  [bold]After Patching:[/bold]   [{sc_a_color}]{'█' * bar_a}{'░' * (25 - bar_a)}  {score_after}/100[/{sc_a_color}]\n\n"
             f"  [bold]Improvement:[/bold]  [{delta_color}]{delta_str} points[/{delta_color}]  │  "
-            f"Patched: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]\n\n"
+            f"Cleared: [green]{len(vulns) - len(remaining)}[/green]/{len(vulns)}  "
+            f"Applied: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]\n\n"
             f"  [bold]Remaining Vulnerabilities:[/bold]\n"
             f"    🔴 Critical: {crit_a}    🟠 High: {high_a}    🟡 Medium: {med_a}    🟢 Low: {low_a}\n\n"
             f"  [dim]Score = 100 − severity-weighted penalties (higher = safer)[/dim]\n"
@@ -3483,7 +3549,19 @@ class CyphexEngine:
         # the banner reads getattr(self, '_patches_applied', 0) == 0/0 APPLIED even
         # though patches were actually applied (contradicting the PATCH SUMMARY).
         self._patches_applied = len(patched_files)
-        self._patches_total = len(patched_files) + skipped
+        # Denominator = every finding that actually entered the patch loop.
+        # applied+skipped silently omitted findings that were never attempted
+        # (runtime-only, or collapsed into a sibling at the same line), so a
+        # scan that confirmed 7 vulnerabilities could report "2/3 APPLIED".
+        self._patches_total = len(patchable)
+        self._patches_unpatchable = len(dynamic_only)
+        _killed = [v for v in vulns if id(v) in remediated_vuln_ids]
+        self._killed_counts = (
+            sum(1 for v in _killed if v.severity == "Critical"),
+            sum(1 for v in _killed if v.severity == "High"),
+            sum(1 for v in _killed if v.severity == "Medium"),
+            sum(1 for v in _killed if v.severity in ("Low", "Info")),
+        )
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")
@@ -3772,13 +3850,7 @@ class CyphexEngine:
             high = sum(1 for v in vulns if v.severity == "High")
             med = sum(1 for v in vulns if v.severity == "Medium")
             low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
-            import math
-            penalty = 0
-            if crit: penalty += 20 + 10 * math.log2(1 + crit)
-            if high: penalty += 10 + 8 * math.log2(1 + high)
-            if med:  penalty += 3 + 4 * math.log2(1 + med)
-            if low:  penalty += 1 + 2 * math.log2(1 + low)
-            score = max(0, min(100, round(100 - penalty)))
+            score = security_score(crit, high, med, low)
 
         endpoints = len(self.context.all_endpoints) if self.context else 0
         pa = getattr(self, '_patches_applied', 0)
@@ -3786,7 +3858,9 @@ class CyphexEngine:
 
         if SOC_UI:
             ui.render_final_banner(score, crit, high, med, low, elapsed,
-                                   self.scan_id, pa, pt, endpoints)
+                                   self.scan_id, pa, pt, endpoints,
+                                   killed=getattr(self, "_killed_counts", None),
+                                   unpatchable=getattr(self, "_patches_unpatchable", 0))
             return
 
         # Fallback: original ANSI rendering
