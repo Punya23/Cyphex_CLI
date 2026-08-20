@@ -134,19 +134,37 @@ Measured run, 2026-08-11 — deliberately-vulnerable Express app (8 files), stan
 
 ### How the Security Posture Score is computed
 
-A log-scaled penalty per severity bucket, subtracted from 100 and clamped to `[0, 100]`:
+Single source of truth: [`scoring.py`](scoring.py) (`score_from_counts()`) — both
+`terminal_ui.py` and `cli_engine.py` import it rather than each keeping their
+own copy of the formula (a previous hand-copied fallback in `cli_engine.py`
+silently drifted from the real one; that's why there's now exactly one copy).
+
+Each severity's penalty is a finite geometric series — the first finding of a
+severity costs a flat weight, every further finding of that *same* severity
+costs a shrinking fraction of it, subtracted from 100 and clamped to `[0, 100]`:
 
 ```
-penalty = 0
-if critical: penalty += 20 + 10 · log₂(1 + n_critical)
-if high:     penalty += 10 +  8 · log₂(1 + n_high)
-if medium:   penalty +=  3 +  4 · log₂(1 + n_medium)
-if low/info: penalty +=  1 +  2 · log₂(1 + n_low)
+weight  = {critical: 62, high: 16, medium: 6, low: 2}
+decay   = {critical: 0.25, high: 0.30, medium: 0.55, low: 0.65}
 
-score = clamp(100 − penalty, 0, 100)
+penalty(severity, n) = weight[severity] * (1 - decay[severity]**n) / (1 - decay[severity])   # n >= 1, else 0
+
+score = clamp(100 − Σ penalty(severity, n_severity), 0, 100)
 ```
 
-Log scaling means the first Critical costs 30 points, the tenth costs a few — it distinguishes "has Criticals" from "has none", not a full ranking. The **after** score uses the same coefficients, with a hard guard: **zero applied patches ⇒ `score_after = score_before`**, so a no-op run never shows improvement.
+The first finding of a severity always costs exactly that severity's weight —
+`penalty(s, 1) == weight[s]` for any decay, by the geometric-series identity —
+so **a single open Critical always scores below 40 (POOR or worse)** purely
+because `weight[critical] = 62`, with no separate severity-band clamp bolted
+on afterward. That matters: an earlier version *did* clamp the score to a flat
+39/59/79 whenever a Critical/High/Medium was still open, which meant two
+different post-patch vuln counts (e.g. 8 remaining vs. 4 remaining, both still
+with one open Critical) could render the *identical* score — real remediation
+progress looked like zero improvement. The weighted-series formula above has
+no such clamp: fixing a vuln always strictly raises the score unless it's
+already at the ceiling for what remains open. The **after** score uses the
+exact same formula, with a hard guard: **zero applied patches ⇒
+`score_after = score_before`**, so a no-op run never shows improvement.
 
 ### Artifacts it leaves behind
 

@@ -19,6 +19,8 @@ Public render_* names + signatures are preserved for cli_engine.py / cx.py.
 """
 import sys, os, math, time, random, asyncio, base64, zlib
 
+from scoring import score_from_counts as _scoring_score_from_counts, score_band as _scoring_band
+
 # Force UTF-8 output on Windows to avoid encoding errors with Unicode chars
 if sys.platform == "win32":
     try:
@@ -112,12 +114,18 @@ def _ease_out(t):
     return 1 - (1 - t) ** 3
 
 
+_TIER_COLOR = {"warning": WARN, "caution": CAUT, "reference": REF, "phosphor": PHOS}
+
+
 def score_color(v):
-    """Thermal verdict colour — weapons-hot red cools to calm phosphor-green."""
-    if v < 40:  return WARN
-    if v < 60:  return CAUT
-    if v < 80:  return REF
-    return PHOS
+    """Thermal verdict colour — weapons-hot red cools to calm phosphor-green.
+
+    Band cutoffs come from scoring.score_band() (the single source of truth
+    for the 20/40/60/80 presentation thresholds) — this only maps that
+    band's tier key to this theme's colour constants.
+    """
+    _, tier = _scoring_band(v)
+    return _TIER_COLOR[tier]
 
 
 def _grad(text, stops):
@@ -1386,29 +1394,22 @@ def _tally(vulns):
 def score_from_counts(crit, high, med, low):
     """Single source of truth for the 0-100 posture score.
 
-    Severity-weighted with diminishing returns: the first finding of a class
-    costs a flat base, every further doubling adds a fixed increment. Every
-    caller (report panel, before/after panel, final banner) must go through
-    this — the formula used to be hand-copied in four places, which is how the
-    before/after panel and the banner drifted apart.
-
-    Severity caps on top of the weighted penalty: with just the log2 curve, a
-    single open Critical only cost ~20 points (score 70, labelled "FAIR") no
-    matter how many Highs/Mediums also sat open — one unpatched SQLi could
-    hide behind a green-ish number. An open finding of a given severity now
-    hard-caps the score at that severity's ceiling, so "FAIR" or better is
-    unreachable while a Critical is still live.
+    Thin re-export of scoring.score_from_counts() — the real implementation,
+    constants, and the algebraic proof that an open Critical can't score
+    SECURE/FAIR live in scoring.py, importable with zero third-party deps so
+    every caller (report panel, before/after panel, final banner, and the
+    ANSI no-rich fallback in cli_engine.py) can share this exact function
+    instead of hand-copying the formula. That hand-copying is how the
+    before/after panel and the banner drifted apart previously: a severity
+    band cap (`if crit: score = min(score, 39)`) got bolted onto this
+    function only, so two different post-patch vuln counts that both still
+    had one open Critical collapsed to the identical displayed score,
+    hiding real remediation progress. scoring.score_from_counts() replaces
+    that clamp with weight constants that guarantee the same "no Critical
+    can look SECURE/FAIR" property by construction, with no min()/if-based
+    override and no plateau.
     """
-    penalty = 0
-    if crit: penalty += 20 + 10 * math.log2(1 + crit)
-    if high: penalty += 10 + 8 * math.log2(1 + high)
-    if med:  penalty += 3 + 4 * math.log2(1 + med)
-    if low:  penalty += 1 + 2 * math.log2(1 + low)
-    score = max(0, min(100, round(100 - penalty)))
-    if crit: score = min(score, 39)   # POOR or worse
-    elif high: score = min(score, 59)  # AT RISK or worse
-    elif med: score = min(score, 79)   # FAIR or worse
-    return score
+    return _scoring_score_from_counts(crit, high, med, low)
 
 
 # Back-compat alias for existing internal callers.
@@ -1721,11 +1722,11 @@ def _score_tape(value, width=40):
 
 
 def _verdict(score):
-    if score >= 80:   return "SECURE", PHOS, "phosphor"
-    if score >= 60:   return "FAIR", REF, "reference"
-    if score >= 40:   return "AT RISK", CAUT, "caution"
-    if score >= 20:   return "POOR", WARN, "warning"
-    return "CRITICAL", WARN, "warning"
+    """Label + colour + tier for a score. Bands come from scoring.score_band()
+    (the single source of truth for the 20/40/60/80 cutoffs) — this only
+    attaches this theme's colour constant to the returned tier key."""
+    label, tier = _scoring_band(score)
+    return label, _TIER_COLOR[tier], tier
 
 
 def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,

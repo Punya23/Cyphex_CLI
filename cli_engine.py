@@ -32,29 +32,21 @@ from rich.box import ROUNDED, DOUBLE
 
 console = Console()
 
+# Security posture scoring — zero-dependency module, always importable
+# regardless of whether the rich-based SOC UI below is available. This is
+# the ONLY place the score formula and its 20/40/60/80 presentation bands
+# are defined; do not hand-copy them here or anywhere else — that hand-
+# copying previously let this exact fallback silently diverge from
+# terminal_ui's copy (this one was missing the severity-band cap the other
+# one had), producing wrong scores whenever SOC_UI was False.
+from scoring import score_from_counts as security_score, score_band as _score_band
+
 # SOC Terminal UI
 try:
     import terminal_ui as ui
     SOC_UI = True
 except ImportError:
     SOC_UI = False
-
-
-def security_score(crit, high, med, low):
-    """0-100 posture score — the ONLY place cli_engine computes it.
-
-    Delegates to terminal_ui.score_from_counts so the report panel, the
-    before/after panel and the final banner can never disagree; keeps an
-    identical local copy for the no-SOC-UI fallback.
-    """
-    if SOC_UI:
-        return ui.score_from_counts(crit, high, med, low)
-    penalty = 0
-    if crit: penalty += 20 + 10 * math.log2(1 + crit)
-    if high: penalty += 10 + 8 * math.log2(1 + high)
-    if med:  penalty += 3 + 4 * math.log2(1 + med)
-    if low:  penalty += 1 + 2 * math.log2(1 + low)
-    return max(0, min(100, round(100 - penalty)))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -2308,19 +2300,16 @@ class CyphexEngine:
         med = sum(1 for v in vulns if v.severity == "Medium")
         low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
         total = len(vulns)
-        # Diminishing returns: duplicate findings of same severity don't stack fully
         score = security_score(crit, high, med, low)
 
-        if score >= 80:
-            sc_rich, sc_label = "green", "SECURE"
-        elif score >= 60:
-            sc_rich, sc_label = "cyan", "FAIR"
-        elif score >= 40:
-            sc_rich, sc_label = "yellow", "AT RISK"
-        elif score >= 20:
-            sc_rich, sc_label = "red", "POOR"
-        else:
-            sc_rich, sc_label = "red bold", "CRITICAL"
+        # Label/band comes from scoring.score_band() — the single source of
+        # truth for the 20/40/60/80 cutoffs; only the rich colour per label
+        # is local to this render site.
+        sc_label, _tier = _score_band(score)
+        sc_rich = {
+            "SECURE": "green", "FAIR": "cyan", "AT RISK": "yellow",
+            "POOR": "red", "CRITICAL": "red bold",
+        }[sc_label]
 
         # Score panel
         bar_filled = int(score / 100 * 30)
@@ -3913,12 +3902,14 @@ class CyphexEngine:
                                    unpatchable=getattr(self, "_patches_unpatchable", 0))
             return
 
-        # Fallback: original ANSI rendering
-        if score >= 80:   sc, sc_label = C.NEON, "SECURE"
-        elif score >= 60: sc, sc_label = C.CYAN, "FAIR"
-        elif score >= 40: sc, sc_label = C.Y, "AT RISK"
-        elif score >= 20: sc, sc_label = C.R, "POOR"
-        else:             sc, sc_label = C.FLAME, "CRITICAL"
+        # Fallback: original ANSI rendering. Label/band from scoring.score_band()
+        # — the single source of truth for the 20/40/60/80 cutoffs; only the
+        # ANSI colour per label is local to this render site.
+        sc_label, _tier = _score_band(score)
+        sc = {
+            "SECURE": C.NEON, "FAIR": C.CYAN, "AT RISK": C.Y,
+            "POOR": C.R, "CRITICAL": C.FLAME,
+        }[sc_label]
         total = crit + high + med + low
         border = C.gradient("━" * 72, 138, 43, 226, 0, 255, 255)
         border2 = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)

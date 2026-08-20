@@ -525,9 +525,9 @@ CYPHEX has three complementary memories so it gets smarter over time:
 ### 11.23 Security Posture Score
 
 - **What:** the 0–100 headline number (higher = safer), computed before *and* after patching.
-- **How:** `penalty = Σ (severity: base + coeff·log₂(1+count))` with coefficients Critical 20/10, High 10/8, Medium 3/4, Low 1/2; `score = clamp(100 − penalty, 0, 100)`. The **after** score recomputes over only the vulnerabilities whose *verified* patches passed (matched by object identity, so fixing one finding never clears others in the same file, and `UNVERIFIABLE` never counts).
-- **Why:** one trackable number; the log curve gives diminishing returns (50 duplicate lows don't collapse the score), and only verified fixes move it.
-- **Where:** inline in `cli_engine.py`. *(A separate, richer `SecurityPostureCalculator` with letter grades/percentile exists in `backend/backend/security_posture_score.py` but is **not** the one used for the CLI banner.)*
+- **How:** `penalty = Σ weight_s·(1−decay_s**n_s)/(1−decay_s)` — a finite geometric series per severity (weights Critical 62, High 16, Medium 6, Low 2; decays 0.25/0.30/0.55/0.65) — `score = clamp(100 − penalty, 0, 100)`. The first finding of a severity always costs exactly that severity's weight (the series identity `P(1)=weight`), which is what guarantees a single open Critical always scores <40 — by construction, with no severity-band clamp layered on top. (An earlier version *did* clamp to a flat 39/59/79 whenever a Critical/High/Medium was open; that clamp collapsed genuinely different post-patch states to the same displayed score and was removed.) The **after** score recomputes over only the vulnerabilities whose *verified* patches passed (matched by object identity, so fixing one finding never clears others in the same file, and `UNVERIFIABLE` never counts).
+- **Why:** one trackable number; diminishing returns per severity (50 duplicate lows don't collapse the score) without an external clamp that could re-introduce the collapse bug; only verified fixes move it.
+- **Where:** `scoring.py` — the single source of truth, imported by both `terminal_ui.py` and `cli_engine.py` (never hand-copied). *(A separate, unrelated, unused `SecurityPostureCalculator` with letter grades/percentile exists in `backend/backend/security_posture_score.py` — dead code, not imported anywhere, and **not** the one used for the CLI banner.)*
 
 ### 11.24 Reporting Council & Judge Artifacts
 
