@@ -1262,24 +1262,32 @@ def _tally(vulns):
 def score_from_counts(crit, high, med, low):
     """Single source of truth for the 0-100 posture score.
 
-    Severity-weighted with diminishing returns: the first finding of a class
-    costs a flat base, every further doubling adds a fixed increment. Every
-    caller (report panel, before/after panel, final banner) must go through
-    this — the formula used to be hand-copied in four places, which is how the
+    Severity-weighted, LINEAR per finding — no log curve. Every caller
+    (report panel, before/after panel, final banner) must go through this —
+    the formula used to be hand-copied in four places, which is how the
     before/after panel and the banner drifted apart.
 
-    Severity caps on top of the weighted penalty: with just the log2 curve, a
-    single open Critical only cost ~20 points (score 70, labelled "FAIR") no
-    matter how many Highs/Mediums also sat open — one unpatched SQLi could
-    hide behind a green-ish number. An open finding of a given severity now
-    hard-caps the score at that severity's ceiling, so "FAIR" or better is
-    unreachable while a Critical is still live.
+    A previous version used a log2(1+n) diminishing-returns curve. It looked
+    reasonable on small demo counts (2-3 findings) but was nearly flat at
+    real full-scan counts: log2(19) vs log2(11) differ by only 0.79, so
+    clearing 8 of 18 open Criticals (44% of them) moved the score from 5 to
+    13 — barely visible progress despite real remediation. Linear weights
+    fix that: every fix is worth the same, so clearing 8 Criticals is worth
+    8x one Critical, always. Verified against that exact scenario: 11 -> 39
+    (still correctly capped at POOR while 10 Criticals remain open, but a
+    real, visible jump instead of +8).
+
+    Severity caps on top of the weighted penalty: a single open Critical
+    alone only costs 4.5 points (score ~95) — nowhere near enough to look
+    unsafe on its own. The cap is what actually enforces "can't look safe
+    with a Critical open": ANY open finding of a severity hard-caps the
+    score at that severity's ceiling, so "FAIR" or better is unreachable
+    while a Critical is live, and the raw weighted penalty only starts
+    driving the number once there are enough open findings to already be
+    below that ceiling on its own (e.g. crit >= ~11 alongside a couple of
+    lesser findings).
     """
-    penalty = 0
-    if crit: penalty += 20 + 10 * math.log2(1 + crit)
-    if high: penalty += 10 + 8 * math.log2(1 + high)
-    if med:  penalty += 3 + 4 * math.log2(1 + med)
-    if low:  penalty += 1 + 2 * math.log2(1 + low)
+    penalty = 4.5 * crit + 3.0 * high + 1.5 * med + 0.5 * low
     score = max(0, min(100, round(100 - penalty)))
     if crit: score = min(score, 39)   # POOR or worse
     elif high: score = min(score, 59)  # AT RISK or worse

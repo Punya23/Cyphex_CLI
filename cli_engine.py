@@ -45,16 +45,18 @@ def security_score(crit, high, med, low):
 
     Delegates to terminal_ui.score_from_counts so the report panel, the
     before/after panel and the final banner can never disagree; keeps an
-    identical local copy for the no-SOC-UI fallback.
+    identical local copy (linear weights + severity caps — see
+    terminal_ui.score_from_counts's docstring for why linear, not log) for
+    the no-SOC-UI fallback.
     """
     if SOC_UI:
         return ui.score_from_counts(crit, high, med, low)
-    penalty = 0
-    if crit: penalty += 20 + 10 * math.log2(1 + crit)
-    if high: penalty += 10 + 8 * math.log2(1 + high)
-    if med:  penalty += 3 + 4 * math.log2(1 + med)
-    if low:  penalty += 1 + 2 * math.log2(1 + low)
-    return max(0, min(100, round(100 - penalty)))
+    penalty = 4.5 * crit + 3.0 * high + 1.5 * med + 0.5 * low
+    score = max(0, min(100, round(100 - penalty)))
+    if crit: score = min(score, 39)
+    elif high: score = min(score, 59)
+    elif med: score = min(score, 79)
+    return score
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
 
