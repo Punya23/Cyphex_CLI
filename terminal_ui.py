@@ -1007,13 +1007,20 @@ def _route_rail(active, total):
 
 def render_step(step_num, total, title, elapsed=0.0, mode="SCAN"):
     import re as _re
-    done = int(_re.sub(r"[^0-9]", "", str(step_num)) or "0")
+    # step_num may carry a sub-step letter (e.g. "3b" for the optional network
+    # scan slotted after step 3). Strip it only for the numeric lookups (glyph,
+    # rail position) — keep it in the printed label so "3b" reads distinctly
+    # from "3" instead of both collapsing to an identical "WAYPOINT 03/09".
+    m = _re.match(r"(\d+)([a-zA-Z]*)", str(step_num))
+    num_part, suffix = (m.group(1), m.group(2)) if m else (str(step_num), "")
+    done = int(num_part or "0")
     total = int(total)
     glyph, _ = STEP_META.get(done, ("◈", title))
+    display_num = f"{done:02d}{suffix}"
 
     header = Text()
     header.append(f" {glyph} ", style=f"bold {REF}")
-    header.append(f"WAYPOINT {done:02d}/{total:02d}", style=f"bold {PHOS}")
+    header.append(f"WAYPOINT {display_num}/{total:02d}", style=f"bold {PHOS}")
     header.append(f"  {title}", style=f"bold {READOUT}")
     header.append(f"   [{mode} t={elapsed:.1f}s]", style=LABEL)
     sub = Text()
@@ -1246,6 +1253,123 @@ def render_endpoint_tree(target_url, endpoints, vuln_paths=None):
             branch.add(risk + Text(sub, style=READOUT))
     soc.print(Panel(tree, title=Text("ENDPOINT INTELLIGENCE MAP", style=f"bold {PHOS}"),
                     title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  ATTACK GRAPH — DeepAgents exploit-chain sequencing
+#  (backend.deepagents.attack_graph.AttackGraph — shared mutable state the
+#  swarm writes to in real time; edges are already in discovery order, i.e.
+#  the order one confirmed vuln unlocked the next.)
+# ══════════════════════════════════════════════════════════════════════════
+_CHAIN_PRIORITY = {
+    "critical": (WARN,  "▲"),
+    "high":     (WARN,  "●"),
+    "medium":   (CAUT,  "◆"),
+    "low":      (LABEL, "○"),
+}
+
+
+def render_attack_graph(attack_graph):
+    """Render the exploit chain as a numbered, priority-ranked sequence —
+    source ──action──▶ target — instead of a bare edge count."""
+    nodes = getattr(attack_graph, "nodes", {}) or {}
+    edges = getattr(attack_graph, "edges", []) or []
+    if not nodes and not edges:
+        return
+
+    if edges:
+        t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+                  title=Text(f"⇋ ATTACK GRAPH — {len(edges)} chain(s) across {len(nodes)} node(s)",
+                             style=f"bold {REF}"),
+                  title_justify="left")
+        t.add_column("#", style=LABEL, width=3)
+        t.add_column("PRI", width=4, justify="center")
+        t.add_column("EXPLOIT CHAIN (discovery order)", min_width=40, overflow="fold")
+        for i, e in enumerate(edges, 1):
+            col, pip = _CHAIN_PRIORITY.get(e.priority, (LABEL, "·"))
+            chain = Text()
+            chain.append(e.source or "?", style=READOUT)
+            chain.append(f"  ──{(e.action or '').replace('_', ' ')}──▶  ", style=TGT)
+            chain.append(e.target or "?", style=f"bold {REF}")
+            t.add_row(str(i), Text(pip, style=col), chain)
+        soc.print(t)
+    else:
+        soc.print(Text(f"  ⇋ {len(nodes)} node(s) touched — no chained exploitation discovered",
+                       style=LABEL))
+
+    creds = getattr(attack_graph, "confirmed_creds", []) or []
+    tokens = getattr(attack_graph, "confirmed_tokens", []) or []
+    priv = getattr(attack_graph, "privilege_level", "none") or "none"
+    priv_color = WARN if priv == "admin" else CAUT if priv == "user" else PHOS
+    line = Text("  PRIVILEGE ", style=LABEL)
+    line.append(f"{priv.upper()}", style=f"bold {priv_color}")
+    line.append("   │   ", style=PHOS_DIM)
+    line.append("CREDS HARVESTED ", style=LABEL)
+    line.append(f"{len(creds)}", style=WARN if creds else PHOS)
+    line.append("   │   ", style=PHOS_DIM)
+    line.append("TOKENS HARVESTED ", style=LABEL)
+    line.append(f"{len(tokens)}", style=WARN if tokens else PHOS)
+    soc.print(line)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  KNOWLEDGE GRAPH — PageIndex-style Knowledge Tree, CWE-centered view
+#  (backend.rag.knowledge_tree.KnowledgeTreeBuilder — code_tree + knowledge_tree
+#  + cwe_index. The cwe_index IS the graph: each CWE hub links code sinks found
+#  in THIS repo to the security-knowledge sections and fix strategies for it.)
+# ══════════════════════════════════════════════════════════════════════════
+def render_knowledge_graph(tree, cwe_index=None, max_hubs=10):
+    """Render the CWE index as a hub-and-spoke graph: CWE ─▶ code location(s),
+    CWE ─▶ knowledge-base section(s), CWE ─▶ fix strategy. This is the actual
+    graph structure the patch prompt queries at CWE + file + line lookup time."""
+    if not tree:
+        return
+    cwe_index = cwe_index or tree.get("_cwe_index") or {}
+    children = tree.get("children", []) or []
+    code_tree = next((c for c in children if c.get("type") == "code_tree"), {}) or {}
+    knowledge_tree = next((c for c in children if c.get("type") == "knowledge_tree"), {}) or {}
+
+    routes = [n for n in code_tree.get("children", []) if n.get("type") == "route"]
+    sinks = [n for n in code_tree.get("children", []) if n.get("type") == "sink"]
+    docs = knowledge_tree.get("children", []) or []
+
+    head = Text()
+    head.append("  ROUTES ", style=LABEL); head.append(f"{len(routes)}   ", style=READOUT)
+    head.append("SINKS ", style=LABEL); head.append(f"{len(sinks)}   ", style=READOUT)
+    head.append("KB DOCS ", style=LABEL); head.append(f"{len(docs)}   ", style=READOUT)
+    head.append("│  ", style=PHOS_DIM)
+    head.append("CWE HUBS ", style=LABEL); head.append(f"{len(cwe_index)}", style=f"bold {PHOS}")
+    soc.print(Panel(head, title=Text("◈ KNOWLEDGE GRAPH — CWE ⟷ code ⟷ security KB", style=f"bold {PHOS}"),
+                    title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+
+    if not cwe_index:
+        return
+
+    # Rank hubs by how connected they are (edges = code + knowledge + fix nodes)
+    # so the densest, most-actionable CWEs surface first — never a silent cap,
+    # the footer names how many were left out.
+    ranked = sorted(
+        cwe_index.items(),
+        key=lambda kv: len(kv[1].get("code_nodes", [])) + len(kv[1].get("knowledge_nodes", [])),
+        reverse=True,
+    )
+    tree_view = Tree(Text("Cyphex Knowledge Tree", style=f"bold {PHOS}"), guide_style=PHOS_DIM)
+    for cwe, idx in ranked[:max_hubs]:
+        c_nodes = idx.get("code_nodes", [])
+        k_nodes = idx.get("knowledge_nodes", [])
+        strategies = idx.get("fix_strategies", [])
+        hub = tree_view.add(Text(f"⊙ {cwe}", style=f"bold {REF}"))
+        for cn in c_nodes[:4]:
+            loc = f"{cn.get('file', '?')}:{cn.get('line', 0)}"
+            hub.add(Text(f"◈ code      ──▶  {loc}", style=READOUT))
+        for kn in k_nodes[:3]:
+            hub.add(Text(f"◈ knowledge ──▶  {kn.get('title', '')[:52]}", style=CAUT))
+        if strategies:
+            names = ", ".join(s.get("name", "fix") for s in strategies[:3])
+            hub.add(Text(f"◈ fix       ──▶  {names}", style=PHOS))
+    if len(ranked) > max_hubs:
+        tree_view.add(Text(f"… and {len(ranked) - max_hubs} more CWE hub(s)", style=LABEL))
+    soc.print(Panel(tree_view, border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
 
 
 # ══════════════════════════════════════════════════════════════════════════

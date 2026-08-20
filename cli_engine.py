@@ -1545,6 +1545,17 @@ class CyphexEngine:
                         print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
                         continue
 
+                # Keep the graph on the context so later steps (Security
+                # Report) can reference it without threading a new param
+                # through the whole scan() call chain.
+                context.attack_graph = attack_graph
+                if SOC_UI:
+                    ui.render_attack_graph(attack_graph)
+                elif attack_graph.edges:
+                    print(f"\n  {C.BOLD}{C.CYAN}◈ ATTACK GRAPH{C.RST} — {len(attack_graph.edges)} chain(s) across {len(attack_graph.nodes)} node(s)")
+                    for i, e in enumerate(attack_graph.edges, 1):
+                        print(f"  {i:>2}. [{e.priority}] {e.source}  ──{e.action}──▶  {e.target}")
+
                 return context
 
 
@@ -2365,6 +2376,18 @@ class CyphexEngine:
                 table.add_row(str(i), sev_display, vuln_type, cwe, endpoint)
             console.print(table)
 
+        # Tie the findings above back to the exploit sequence that chained
+        # them (full detail was already shown once at the end of the dynamic
+        # scan step — this is a compact cross-reference, not a re-render).
+        attack_graph = getattr(self.context, "attack_graph", None)
+        if attack_graph and getattr(attack_graph, "edges", None):
+            top = attack_graph.edges[0]
+            console.print(
+                f"  [dim]◈ Exploit sequence:[/dim] [cyan]{len(attack_graph.edges)} chain(s)[/cyan] "
+                f"[dim]discovered during the dynamic scan (top: {top.source} ──{top.action}──▶ {top.target}, "
+                f"privilege reached: {getattr(attack_graph, 'privilege_level', 'none')})[/dim]"
+            )
+
         if COUNCIL_AVAILABLE and vulns:
             try:
                 analyzer = AnalysisCouncil()
@@ -2410,6 +2433,25 @@ class CyphexEngine:
                     "confirmed": v.confirmed,
                 }
                 for v in vulns
+            ],
+            "attack_graph": self._attack_graph_summary(),
+        }
+
+    def _attack_graph_summary(self):
+        """Serialize the DeepAgents AttackGraph (if the swarm ran) into the
+        JSON report so downstream consumers (judge artifacts, dashboards) get
+        the exploit sequence as structured data, not just a printed table."""
+        attack_graph = getattr(self.context, "attack_graph", None) if self.context else None
+        if not attack_graph:
+            return None
+        return {
+            "privilege_level": getattr(attack_graph, "privilege_level", "none"),
+            "creds_harvested": len(getattr(attack_graph, "confirmed_creds", []) or []),
+            "tokens_harvested": len(getattr(attack_graph, "confirmed_tokens", []) or []),
+            "nodes_touched": list(getattr(attack_graph, "nodes", {}).keys()),
+            "chains": [
+                {"seq": i, "source": e.source, "action": e.action, "target": e.target, "priority": e.priority}
+                for i, e in enumerate(getattr(attack_graph, "edges", []) or [], 1)
             ],
         }
 
@@ -2539,6 +2581,8 @@ class CyphexEngine:
                 self._tree_navigator = get_navigator(_kt, getattr(_kt_builder, "cwe_index", None))
                 if self._tree_navigator:
                     console.print("  [green]✓[/green] Knowledge Tree navigator ready (CWE fix-recipe enrichment)")
+                    if SOC_UI:
+                        ui.render_knowledge_graph(_kt, getattr(_kt_builder, "cwe_index", None))
             except Exception as _e:
                 console.print(f"[dim]Knowledge Tree navigator unavailable (non-fatal): {type(_e).__name__}[/dim]")
 
