@@ -1594,7 +1594,7 @@ class CyphexEngine:
                     else:
                         print(f"  {C.G}  Decision: Payload not reflected \u2192 endpoint appears clean{C.RST}")
 
-            from backend.config.dast_constants import SQLI_PAYLOADS, SQL_ERRORS_BASIC
+            from backend.config.dast_constants import SQLI_PAYLOADS, SQL_ERROR_SIGS
             # Agent 03 - SQLi
             agent_header("Agent 03", "Injection (SQLi)", "Probe SQL injection indicators")
             seen_sqli = set()
@@ -1611,13 +1611,17 @@ class CyphexEngine:
                         resp = await client.post(form.action, data={inp: payload for inp in form.inputs})
 
                     lower = resp.text.lower()
-                    indicator = any(e in lower for e in SQL_ERRORS_BASIC) or payload.lower() in lower
+                    # A 401/403 means the request was blocked (WAF/RASP) before it could
+                    # reach app/DB logic \u2014 that's a defended endpoint, not exploitation
+                    # evidence, so don't run the error-signature check on blocked responses.
+                    blocked = resp.status_code in (401, 403)
+                    matched = [] if blocked else [e for e in SQL_ERROR_SIGS if re.search(e, lower, re.IGNORECASE)]
+                    indicator = bool(matched)
                     print(f"  {C.Y}[Agent 03 \u25b6 Reasoning]{C.RST} Injecting SQL tautology into {form.inputs} at {form.action}")
                     print(f"  {C.DIM}  Payload:  {payload}{C.RST}")
                     print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                     if indicator:
-                        matched = [e for e in SQL_ERRORS_BASIC if e in lower]
-                        print(f"  {C.R}  Decision: SQL error keywords found ({', '.join(matched[:3])}) \u2192 SQLi CONFIRMED \u2713{C.RST}")
+                        print(f"  {C.R}  Decision: SQL error signature matched ({', '.join(matched[:3])}) \u2192 SQLi CONFIRMED \u2713{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] SQL Injection",
                             severity="Critical",
@@ -1627,6 +1631,8 @@ class CyphexEngine:
                         ))
                         seen_sqli.add(form.action)
                         break
+                    elif blocked:
+                        print(f"  {C.G}  Decision: Request blocked (HTTP {resp.status_code}, WAF/RASP) \u2192 endpoint appears clean{C.RST}")
                     else:
                         print(f"  {C.G}  Decision: No SQL error indicators \u2192 endpoint appears clean{C.RST}")
 
