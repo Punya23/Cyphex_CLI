@@ -28,6 +28,22 @@ from backend.reasoning.session_memory import _CYPHEX_ROOT, _repo_hash
 # defense-in-depth (cheap, no reason to delay it).
 os.environ.setdefault("TELEMETRY_DISABLED", "1")
 
+# cognee's structlog console renderer is extremely verbose at its default
+# INFO level: every ontology near-miss ("No close match found for 'x' in
+# category 'y'") and every instructor structured-output retry — including a
+# full ChatCompletion repr dumped as an unstructured multi-KB blob on each
+# failed attempt — gets written straight to stdout, drowning CYPHEX's own
+# rich-formatted scan output. cognee here is purely a best-effort background
+# enrichment step (remember_fix/recall_similar_fixes below are always called
+# through a timeout + try/except, and the patch loop already prints its own
+# "cognee memory: N/M persisted" summary) — a real failure surfaces through
+# that path, so none of cognee's internal retry mechanics need to reach the
+# terminal. setdefault, not set: an operator who explicitly exports LOG_LEVEL
+# for their own cognee debugging still wins. Read by cognee's own
+# setup_logging() at `import cognee` time, so — like TELEMETRY_DISABLED —
+# this must be set before that happens anywhere in the process.
+os.environ.setdefault("LOG_LEVEL", "ERROR")
+
 # Cheap check only — no actual import. cognee's dependency footprint (~39
 # packages incl. fastapi/sqlalchemy/lancedb) is heavy enough that eagerly
 # importing it would tax every CLI invocation, not just patch runs.
