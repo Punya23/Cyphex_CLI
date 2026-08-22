@@ -155,13 +155,18 @@ QUICK_HELP = f"""
   {C.NEON}/scan <target>{C.RST}     Scan a path or GitHub URL  (Static + DAST)
   {C.NEON}/deep <target>{C.RST}     Add the full DeepAgents attack swarm
   {C.NEON}/full <target>{C.RST}     DeepAgents + network sweep (everything)
-     {C.GREY}flags:{C.RST} {C.DIM}--network  --deepagents  --full  --no-patch{C.RST}
+     {C.GREY}flags:{C.RST} {C.DIM}--network  --deepagents  --full  --no-patch  --verbose{C.RST}
      {C.GREY}e.g.  {C.RST}{C.DIM}/scan ./vibemart --network --deepagents{C.RST}
+     {C.GREY}      {C.RST}{C.DIM}--verbose shows full pipeline detail; default is concise phase summaries{C.RST}
   {C.NEON}/net [host]{C.RST}        Network discovery, or audit a specific host
   {C.NEON}/watch{C.RST}             Start the RASP auto-healing daemon
   {C.NEON}/setup{C.RST}             Install Semgrep, Nuclei; check Ollama & Docker
   {C.NEON}/doctor{C.RST}            Check all models, tools, and dependencies
   {C.NEON}/benchmark{C.RST}         Score the Immune System (precision/recall/F1)
+  {C.NEON}/verify [path]{C.RST}     Verify Gate maintainability panel (config/status/health)
+     {C.GREY}flags:{C.RST} {C.DIM}--selftest  --ci  --watch [secs]  --json out.json{C.RST}
+  {C.NEON}/status [path]{C.RST}     System Observability — event log, last scan, agent/cognee health
+     {C.GREY}flags:{C.RST} {C.DIM}--watch [secs]  --json out.json{C.RST}
   {C.NEON}/models{C.RST}            List available local Ollama models
   {C.NEON}/history{C.RST}           Show recent scans this session
   {C.NEON}/clear{C.RST}             Repaint the workspace
@@ -175,7 +180,7 @@ QUICK_HELP = f"""
 # ── Readline autocomplete ──────────────────────────────────────────────────────
 COMMANDS = [
     "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
-    "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/doctor",
+    "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/verify", "/status", "/doctor",
     "/models", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
@@ -260,10 +265,14 @@ def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
          --deep / --deepagents add the full DeepAgents attack swarm
          --full / --all        both of the above
          --no-patch            scan only, skip auto-patching
+         --verbose             show full pipeline detail (per-payload DAST
+                                narration, per-file SAST hits, patch-loop
+                                internals) instead of concise phase summaries
     So `/scan ./app --network --deepagents` == the long cyphex_cli invocation.
     """
     import shlex
     no_patch = False
+    verbose = False
     positional = []
     try:
         tokens = shlex.split(arg) if arg else []
@@ -279,6 +288,8 @@ def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
             deep = network = True
         elif tl in ("--no-patch", "--nopatch", "--scan-only"):
             no_patch = True
+        elif tl in ("--verbose", "-v"):
+            verbose = True
         elif t.startswith("-"):
             _dim(f"(ignoring unknown flag {t})")
         else:
@@ -319,6 +330,8 @@ def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
         scan_args += ["--use-deepagents"]
     if no_patch:
         scan_args += ["--no-patch"]
+    if verbose:
+        scan_args += ["--verbose"]
 
     scan_args += ["--non-interactive"]
 
@@ -327,6 +340,8 @@ def _cmd_scan(arg: str, deep: bool = False, network: bool = False):
         bits.append("Network")
     if no_patch:
         bits.append("scan-only")
+    if verbose:
+        bits.append("verbose")
     _dim(f"Mode: {' + '.join(bits)}")
     print()
 
@@ -441,6 +456,197 @@ def _cmd_benchmark(arg: str):
         pass
 
 
+def _render_verify_report(report):
+    rendered = False
+    if BOOT_UI:
+        try:
+            ui.render_verify_health(report); rendered = True
+        except Exception:
+            rendered = False
+    if not rendered:
+        from backend.patch.verify_health import print_plain
+        print_plain(report)
+
+
+def _cmd_verify(arg: str):
+    """Verify Gate maintainability panel — config, status, and next steps.
+
+    Usage:  /verify [path] [--json out.json] [--selftest] [--ci] [--watch [secs]]
+    No path: sweeps every scan manifest CYPHEX has ever written
+    (backend/sandboxes/*/.cyphex/patches.json). A path checks just that
+    one directory's .cyphex/patches.json.
+
+      --selftest   also live-drive each check (not just probe presence) —
+                   proves the build/rescan/replay checks actually work
+      --ci         print a machine-checkable PASS/DEGRADED/UNUSABLE verdict
+                   and return a process exit code (0/1/2) for CI gating
+      --watch [s]  keep re-reading and re-rendering every `s` seconds
+                   (default 5) until Ctrl+C — requires an interactive TTY
+
+    Returns the CI exit code (int) when --ci is passed, else None — callers
+    that need process exit semantics (main()'s bare-CLI dispatch) check for
+    an int return and sys.exit() on it themselves; the REPL ignores it.
+    """
+    import shlex
+    path = json_out = None
+    selftest = ci = watch = False
+    watch_interval = 5.0
+    toks = shlex.split(arg) if arg else []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("--json", "-o") and i + 1 < len(toks):
+            json_out = toks[i + 1]; i += 2
+        elif t == "--selftest":
+            selftest = True; i += 1
+        elif t == "--ci":
+            ci = True; i += 1
+        elif t == "--watch":
+            watch = True
+            if i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+                try:
+                    watch_interval = max(1.0, float(toks[i + 1]))
+                    i += 1
+                except ValueError:
+                    pass
+            i += 1
+        elif not t.startswith("-") and path is None:
+            path = t; i += 1
+        else:
+            i += 1
+
+    from backend.patch.verify_health import get_verify_health, compute_gate_exit_code
+
+    if watch:
+        if not sys.stdout.isatty():
+            _warn("--watch needs an interactive terminal; showing a single snapshot instead.")
+            watch = False
+        else:
+            try:
+                while True:
+                    _clear()
+                    report = get_verify_health(path, include_selftest=selftest)
+                    _render_verify_report(report)
+                    _dim(f"Watching — refreshing every {watch_interval:g}s (Ctrl+C to stop)")
+                    time.sleep(watch_interval)
+            except KeyboardInterrupt:
+                print()
+                return None
+
+    _spinner("Reading Verify Gate history..." + (" (live self-test...)" if selftest else ""))
+    try:
+        report = get_verify_health(path, include_selftest=selftest)
+    except Exception as e:
+        _err(f"Verify Gate panel failed: {e}")
+        return 2 if ci else None
+
+    _render_verify_report(report)
+
+    if json_out:
+        try:
+            import json as _json
+            with open(json_out, "w") as f:
+                _json.dump(report, f, indent=2, default=str)
+            _dim(f"Report written → {json_out}")
+        except Exception:
+            pass
+
+    if ci:
+        code = compute_gate_exit_code(report)
+        label = {0: "PASS — gate healthy", 1: "DEGRADED", 2: "UNUSABLE"}[code]
+        color = C.NEON if code == 0 else (C.YEL if code == 1 else C.RED)
+        print(f"\n  {color}{C.BOLD}[CI] Verify Gate: {label} (exit {code}){C.RST}")
+        return code
+    return None
+
+
+def _cmd_status(arg: str):
+    """System Observability dashboard — event log, last scan, agent/cognee health, errors.
+
+    Usage:  /status [path] [--json out.json] [--watch [secs]]
+    No path: sweeps every scan CYPHEX has instrumented
+    (backend/sandboxes/*/.cyphex/events.jsonl). A path checks just that one
+    sandbox's event log.
+    """
+    import shlex
+    path = json_out = None
+    watch = False
+    watch_interval = 5.0
+    toks = shlex.split(arg) if arg else []
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in ("--json", "-o") and i + 1 < len(toks):
+            json_out = toks[i + 1]; i += 2
+        elif t == "--watch":
+            watch = True
+            if i + 1 < len(toks) and not toks[i + 1].startswith("-"):
+                try:
+                    watch_interval = max(1.0, float(toks[i + 1]))
+                    i += 1
+                except ValueError:
+                    pass
+            i += 1
+        elif not t.startswith("-") and path is None:
+            path = t; i += 1
+        else:
+            i += 1
+
+    def _render(report):
+        rendered = False
+        if BOOT_UI:
+            try:
+                ui.render_observability(report); rendered = True
+            except Exception:
+                rendered = False
+        if not rendered:
+            print(f"\n  CYPHEX System Observability")
+            print(f"  {report['event_logs_found']} scan(s) instrumented, "
+                  f"{report['events_recorded']} event(s) recorded")
+            last = report.get("last_scan")
+            if last:
+                print(f"  last scan: {last['scan_id']}  completed={last['completed']}  "
+                      f"duration={last['duration_s']}s")
+            for step in report["next_steps"]:
+                print(f"    -> {step}")
+            print()
+
+    from backend.observability.health import get_system_health
+
+    if watch:
+        if not sys.stdout.isatty():
+            _warn("--watch needs an interactive terminal; showing a single snapshot instead.")
+            watch = False
+        else:
+            try:
+                while True:
+                    _clear()
+                    _render(get_system_health(path))
+                    _dim(f"Watching — refreshing every {watch_interval:g}s (Ctrl+C to stop)")
+                    time.sleep(watch_interval)
+            except KeyboardInterrupt:
+                print()
+                return
+
+    _spinner("Reading system observability...")
+    try:
+        report = get_system_health(path)
+    except Exception as e:
+        _err(f"Observability dashboard failed: {e}")
+        return
+
+    _render(report)
+
+    if json_out:
+        try:
+            import json as _json
+            with open(json_out, "w") as f:
+                _json.dump(report, f, indent=2, default=str)
+            _dim(f"Report written → {json_out}")
+        except Exception:
+            pass
+
+
 def _cmd_models():
     """List available Ollama models."""
     print()
@@ -545,6 +751,12 @@ def _handle(line: str):
         case "/benchmark" | "/bench":
             _cmd_benchmark(arg)
 
+        case "/verify":
+            _cmd_verify(arg)
+
+        case "/status":
+            _cmd_status(arg)
+
         case "/history":
             _cmd_history()
 
@@ -638,6 +850,20 @@ def main():
         if first in ("benchmark", "/benchmark", "bench", "/bench"):
             _show_header()
             _cmd_benchmark(" ".join(sys.argv[2:]))
+            return
+
+        # cx verify [path] [--json out.json] [--selftest] [--ci] [--watch [s]]
+        if first in ("verify", "/verify"):
+            _show_header()
+            code = _cmd_verify(" ".join(sys.argv[2:]))
+            if code is not None:
+                sys.exit(code)
+            return
+
+        # cx status [path] [--json out.json] [--watch [s]]
+        if first in ("status", "/status"):
+            _show_header()
+            _cmd_status(" ".join(sys.argv[2:]))
             return
 
         # cx <path/url> → auto-scan

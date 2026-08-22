@@ -804,12 +804,15 @@ def render_help(console=None):
         ("/scan", "<path|url>", "Acquire & scan a target (local dir or GitHub repo)"),
         ("/deep", "<path>", "Add the full DeepAgents attack swarm"),
         ("/full", "<path>", "DeepAgents + network sweep (everything)"),
-        ("", "flags", "--network  --deepagents  --full  --no-patch"),
+        ("", "flags", "--network  --deepagents  --full  --no-patch  --verbose"),
         ("/net", "[host]", "Network discovery, or audit a specific host"),
         ("/watch", "", "Arm the RASP auto-healing daemon"),
         ("/setup", "", "Install Semgrep, Nuclei; check Ollama & Docker"),
         ("/doctor", "", "Built-In-Test — models, tools & dependencies"),
         ("/benchmark", "[corpus]", "Score the Immune System — precision/recall/F1"),
+        ("/verify", "[path]", "Verify Gate maintainability panel — config/status/health"),
+        ("", "flags", "--selftest  --ci  --watch [s]  --json <file>"),
+        ("/status", "[path]", "System Observability — event log, last scan, errors"),
         ("/models", "", "List available local Ollama models"),
         ("/history", "", "Recent intercepts this session"),
         ("/clear", "", "Repaint the canopy"),
@@ -1631,6 +1634,16 @@ def _rate_bar(rate, width=16):
     return t
 
 
+def _sparkline(rates, width_per_point=4):
+    """Inline trend line: one colored block per value (0-100), score-tiered."""
+    t = Text()
+    for i, r in enumerate(rates):
+        if i:
+            t.append(" ", style=LABEL)
+        t.append(f"{r:>3.0f}", style=f"bold {score_color(r)}")
+    return t
+
+
 def render_benchmark(report, console=None):
     c = console or soc
     conf = report["confusion"]
@@ -1700,6 +1713,212 @@ def render_benchmark(report, console=None):
                 f"FPR ≤ {report['gates']['max_fpr']*100:.0f}%", style=LABEL)
 
     c.print(Panel(body, title=Text("◈ IMMUNE SYSTEM BENCHMARK", style=f"bold {v_col}"),
+                  title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  VERIFY GATE — maintainer health panel for backend/patch/verifier.py
+#  Consumes the report dict from backend.patch.verify_health.get_verify_health().
+#  Shows config (what it checks + what tooling that needs), status (how it has
+#  performed durably, across every scan), and next steps — the three things a
+#  maintainer needs to trust or fix the single most load-bearing guarantee in
+#  the codebase: a patch only counts as "fixed" if it was actually proven.
+# ══════════════════════════════════════════════════════════════════════════
+def render_verify_health(report, console=None):
+    c = console or soc
+    verdicts = report["verdicts"]
+    total = report["total_patches"]
+    rate = report["durability_rate"]
+    healthy = rate >= 70 and total > 0
+    v_col = PHOS if healthy else (WARN if total else LABEL)
+    v_lamp = "phosphor" if healthy else ("warning" if total else "reference")
+
+    body = Text()
+
+    # ── configuration ──
+    body.append("  CONFIGURATION\n", style=f"bold {PHOS}")
+    caps = report["config"]["blast_radius_caps"]
+    body.append("    blast-radius cap   ", style=LABEL)
+    body.append("  ".join(f"{sev} {n}" for sev, n in caps.items()), style=READOUT)
+    body.append("\n    suppression guards ", style=LABEL)
+    body.append(f"{report['config']['suppression_patterns_tracked']} patterns tracked "
+                 "(nosemgrep, eslint-disable, # noqa, @ts-ignore, ...)", style=READOUT)
+    body.append("\n\n    toolchain readiness — what each check depends on to run at all\n", style=LABEL)
+    for name, info in report["config"]["toolchain"].items():
+        lamp = PHOS if info["ok"] else WARN
+        mark = "✓" if info["ok"] else "✗"
+        body.append(f"      {mark} ", style=f"bold {lamp}")
+        body.append(f"{name:<15}", style=READOUT)
+        body.append(f"{info['version'][:40]:<42}", style=LABEL)
+        body.append(f"gates: {info['gates']}\n", style=LABEL)
+
+    if report.get("selftest"):
+        body.append("\n    live self-test — actually drove each check, not just presence\n", style=LABEL)
+        for name, info in report["selftest"].items():
+            if info["ok"] is None:
+                lamp, mark = LABEL, "·"
+            else:
+                lamp, mark = (PHOS, "✓") if info["ok"] else (WARN, "✗")
+            body.append(f"      {mark} ", style=f"bold {lamp}")
+            body.append(f"{name:<15}", style=READOUT)
+            body.append(f"{info['detail'][:52]:<54}", style=LABEL)
+            body.append(f"{info['duration_ms']}ms\n", style=LABEL)
+
+    # ── status / health ──
+    body.append("\n  STATUS\n", style=f"bold {PHOS}")
+    body.append(f"    {report['manifests_found']} scan manifest(s)  ·  ", style=LABEL)
+    body.append(f"{total} patch attempt(s) recorded\n", style=READOUT)
+    if total:
+        body.append("    ")
+        body.append_text(_rate_bar(rate / 100, width=32))
+        body.append(f"  {rate:5.1f}% durable-verified\n\n", style=f"bold {score_color(rate)}")
+
+        body.append("    PASS ", style=f"bold {PHOS}")
+        body.append(f"{verdicts.get('PASS', 0):>4}   ", style=READOUT)
+        body.append("FAIL ", style=f"bold {WARN}")
+        body.append(f"{verdicts.get('FAIL', 0):>4}   ", style=READOUT)
+        body.append("UNVERIFIABLE ", style=f"bold {CAUT}")
+        body.append(f"{verdicts.get('UNVERIFIABLE', 0):>4}\n", style=READOUT)
+
+        reasons = report["reason_tally"]
+        if reasons:
+            body.append("\n    why (evidence key → count)\n", style=LABEL)
+            for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:8]:
+                body.append(f"      {reason:<22}{n}\n", style=READOUT)
+
+        if report.get("cwe_breakdown"):
+            body.append("\n    by CWE\n", style=LABEL)
+            for row in report["cwe_breakdown"]:
+                body.append(f"      {row['cwe']:<10}", style=TGT)
+                body.append_text(_rate_bar(row["durability_rate"] / 100, width=16))
+                body.append(f"  {row['durability_rate']:5.1f}%  ", style=f"bold {score_color(row['durability_rate'])}")
+                body.append(f"(PASS {row['pass']} / FAIL {row['fail']} / UNVERIFIABLE {row['unverifiable']})\n",
+                             style=LABEL)
+
+        if report.get("trend") and len(report["trend"]) > 1:
+            body.append("\n    trend — durability rate, oldest → newest scan\n", style=LABEL)
+            body.append("      ")
+            body.append_text(_sparkline([r["durability_rate"] for r in report["trend"]]))
+            body.append("\n")
+
+        if report["recent"]:
+            body.append("\n    recent verifications\n", style=LABEL)
+            for e in report["recent"][:6]:
+                vd = e.get("verdict", "?")
+                vcol = PHOS if vd == "PASS" else (WARN if vd == "FAIL" else CAUT)
+                body.append(f"      {vd:<13}", style=f"bold {vcol}")
+                body.append(f"{e.get('cwe', '?'):<9}", style=TGT)
+                body.append(f"{e.get('file', '?')}:{e.get('line', '?')}\n", style=LABEL)
+    else:
+        body.append("    no patch history yet — run a scan with patching enabled\n", style=LABEL)
+
+    # ── next steps ──
+    body.append("\n  NEXT STEPS\n", style=f"bold {PHOS}")
+    for step in report["next_steps"]:
+        body.append("    → ", style=CAUT)
+        body.append(f"{step}\n", style=READOUT)
+
+    # ── verdict lamp ──
+    body.append("\n  ")
+    verdict_label = "GATE HEALTHY" if healthy else ("GATE DEGRADED" if total else "GATE UNUSED")
+    body.append_text(annunciator(verdict_label, v_lamp))
+
+    c.print(Panel(body, title=Text("⛨ VERIFY GATE — MAINTAINABILITY PANEL", style=f"bold {v_col}"),
+                  title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  SYSTEM OBSERVABILITY — unifies the event log (backend.observability) with
+#  the Verify Gate report into one "is the pipeline healthy right now, and
+#  what happened on the last scan" dashboard. Consumes the report dict from
+#  backend.observability.health.get_system_health().
+# ══════════════════════════════════════════════════════════════════════════
+def render_observability(report, console=None):
+    c = console or soc
+    last = report.get("last_scan")
+    errors = report.get("recent_errors") or []
+    has_history = report["event_logs_found"] > 0
+    healthy = has_history and last and last["completed"] and not errors
+    v_col = PHOS if healthy else (WARN if (has_history and (not last or not last["completed"] or errors)) else LABEL)
+    v_lamp = "phosphor" if healthy else ("warning" if has_history else "reference")
+
+    body = Text()
+
+    # ── event log ──
+    body.append("  EVENT LOG\n", style=f"bold {PHOS}")
+    body.append(f"    {report['event_logs_found']} scan(s) instrumented  ·  ", style=LABEL)
+    body.append(f"{report['events_recorded']} event(s) recorded\n", style=READOUT)
+
+    # ── last scan ──
+    body.append("\n  LAST SCAN\n", style=f"bold {PHOS}")
+    if last:
+        body.append("    scan_id  ", style=LABEL)
+        body.append(f"{last['scan_id']}\n", style=READOUT)
+        state_col = PHOS if last["completed"] else WARN
+        state = "COMPLETED" if last["completed"] else ("STARTED — no scan_end seen" if last["started"] else "UNKNOWN")
+        body.append("    status   ", style=LABEL)
+        body.append(f"{state}", style=f"bold {state_col}")
+        if last["duration_s"] is not None:
+            body.append(f"   ({last['duration_s']:.1f}s)", style=LABEL)
+        body.append("\n")
+
+        if last["phase_timings"]:
+            body.append("\n    phase timings\n", style=LABEL)
+            for p in last["phase_timings"]:
+                body.append(f"      {str(p['title'])[:38]:<40}", style=READOUT)
+                body.append(f"{p['duration_s']:>6.1f}s\n", style=LABEL)
+
+        ag = last["agents"]
+        ag_total = ag["succeeded"] + ag["timed_out"] + ag["errored"]
+        if ag_total:
+            body.append("\n    DeepAgents swarm   ", style=LABEL)
+            body.append(f"{ag['succeeded']} ok", style=f"bold {PHOS}")
+            body.append("  ·  ", style=LABEL)
+            body.append(f"{ag['timed_out']} timed out", style=f"bold {CAUT}" if ag["timed_out"] else LABEL)
+            body.append("  ·  ", style=LABEL)
+            body.append(f"{ag['errored']} errored\n", style=f"bold {WARN}" if ag["errored"] else LABEL)
+
+        cg = last["cognee"]
+        if cg["recall_total"] or cg["persist_total"]:
+            body.append("    cognee memory      ", style=LABEL)
+            body.append(f"recall {cg['recall_ok']}/{cg['recall_total']}", style=READOUT)
+            body.append("  ·  ", style=LABEL)
+            body.append(f"persist {cg['persist_ok']}/{cg['persist_total']}\n", style=READOUT)
+
+        if last["patch_verdicts"]:
+            body.append("    patch verdicts     ", style=LABEL)
+            body.append("  ".join(f"{k} {v}" for k, v in last["patch_verdicts"].items()), style=READOUT)
+            body.append("\n")
+    else:
+        body.append("    no scan has been instrumented yet\n", style=LABEL)
+
+    # ── recent errors ──
+    if errors:
+        body.append("\n  RECENT ERRORS\n", style=f"bold {WARN}")
+        for e in errors[:6]:
+            body.append(f"      {e.get('event', '?'):<24}", style=f"bold {WARN}")
+            detail = e.get("error") or e.get("reason") or e.get("agent") or ""
+            body.append(f"{str(detail)[:50]}\n", style=LABEL)
+
+    # ── verify gate summary (embedded, one line) ──
+    vg = report.get("verify_gate") or {}
+    if vg.get("total_patches"):
+        body.append("\n  VERIFY GATE   ", style=f"bold {PHOS}")
+        body.append(f"{vg['durability_rate']:.1f}% durable-verified across {vg['total_patches']} patch attempt(s) "
+                     "— see /verify for the full panel\n", style=READOUT)
+
+    # ── next steps ──
+    body.append("\n  NEXT STEPS\n", style=f"bold {PHOS}")
+    for step in report["next_steps"]:
+        body.append("    → ", style=CAUT)
+        body.append(f"{step}\n", style=READOUT)
+
+    # ── verdict lamp ──
+    body.append("\n  ")
+    verdict_label = "SYSTEM NOMINAL" if healthy else ("SYSTEM DEGRADED" if has_history else "NO TELEMETRY YET")
+    body.append_text(annunciator(verdict_label, v_lamp))
+
+    c.print(Panel(body, title=Text("◈ SYSTEM OBSERVABILITY", style=f"bold {v_col}"),
                   title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
 
 

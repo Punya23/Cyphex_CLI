@@ -112,6 +112,12 @@ def main():
         action="store_true",
         help="Use the new experimental DeepAgents for adaptive Oracle-guided DAST",
     )
+    scan_p.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show full pipeline detail (per-payload DAST narration, per-file SAST hits, "
+             "patch-loop internals) — default is concise phase-summary output only",
+    )
 
     sub.add_parser("doctor", help="Check local runtime/tooling readiness")
     sub.add_parser("council-doctor", help="Check all 4 council models are available in Ollama")
@@ -286,6 +292,7 @@ def main():
             non_interactive=args.non_interactive,
             network_scan=args.network,
             use_deepagents=args.use_deepagents,
+            verbose=args.verbose,
         ))
 
 
