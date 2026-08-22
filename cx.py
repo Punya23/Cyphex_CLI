@@ -150,10 +150,13 @@ def _print_help():
     print(QUICK_HELP)
 
 
-# ── Colours ── plain-ANSI fallback palette · MONO ELECTRIC BLUE brand ─────────
+# ── Colours ── plain-ANSI fallback palette · MONO SIGNAL RED brand ───────────
 # Only used when terminal_ui / rich is unavailable. Mirrors terminal_ui.py's
-# single-hue blue ramp so the degraded banner stays on-brand. RED/YEL are kept
-# as the alert channel for legible errors/warnings in the plain fallback path.
+# single-hue red ramp so the degraded banner stays on-brand. RED/YEL keep their
+# names as the alert channel, but their VALUES now sit inside the red ramp —
+# a literal red error mark on a red theme reads as body text, so severity is
+# carried by brightness here exactly as it is in terminal_ui.py (peak = error,
+# mid = warning).
 #
 # These are raw 24-bit truecolor escapes with no Rich/colorama translation —
 # this class exists specifically for the case where rich itself failed to
@@ -173,13 +176,13 @@ def _tc(hex_):
     return f"\033[38;2;{r};{g};{b}m"
 
 class C:
-    CYAN   = _tc("#3B82F6")   # PRIMARY blue — wordmark / accents / active
-    NEON   = _tc("#7DABFF")   # bright blue — command names / high emphasis
-    RED    = _tc("#FF3141")   # error mark (plain-fallback alert channel)
-    YEL    = _tc("#FFB020")   # warning mark (plain-fallback alert channel)
-    BLUE   = _tc("#3B82F6")   # PRIMARY blue
-    GREY   = _tc("#5F7391")   # muted blue-grey — captions / timestamps
-    MAG    = _tc("#7DABFF")   # bright blue (legacy alias)
+    CYAN   = _tc("#FF3B3B")   # PRIMARY red — wordmark / accents / active
+    NEON   = _tc("#FF6B6B")   # bright red — command names / high emphasis
+    RED    = _tc("#FF6B6B")   # bright — error mark (alert channel)
+    YEL    = _tc("#D63447")   # mid — warning mark (alert channel)
+    BLUE   = _tc("#FF3B3B")   # PRIMARY red
+    GREY   = _tc("#8A6A6A")   # muted red-grey — captions / timestamps
+    MAG    = _tc("#FF6B6B")   # bright red (legacy alias)
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     RST    = "\033[0m"

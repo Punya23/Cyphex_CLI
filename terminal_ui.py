@@ -1,16 +1,16 @@
 """
-CYPHEX Terminal UI — MONO ELECTRIC BLUE
+CYPHEX Terminal UI — MONO SIGNAL RED
 ════════════════════════════════════════════════════════════════════════════
 A monochromatic system: the entire interface lives in ONE hue's light→dark
-ramp (corporate, trustworthy electric blue). Hierarchy and severity are carried
-by BRIGHTNESS within the ramp, not by competing hues.
+ramp (alert, high-signal red). Hierarchy and severity are carried by
+BRIGHTNESS within the ramp, not by competing hues.
 
-    #7dabff  bright   — high emphasis / active / critical-high findings
-    #3b82f6  PRIMARY  — the wordmark, structure, "safe/engaged"
-    #2563c6  mid      — medium findings / secondary
-    #1a4890  dim      — borders, rails, low findings
-    #5f7391  muted    — captions, timestamps, comments
-    #c2d0e6  readout  — primary readable prose / numerics
+    #ff6b6b  bright   — high emphasis / active / critical-high findings
+    #ff3b3b  PRIMARY  — the wordmark, structure, "safe/engaged"
+    #d63447  mid      — medium findings / secondary
+    #7a1010  dim      — borders, rails, low findings
+    #8a6a6a  muted    — captions, timestamps, comments
+    #e8cfcf  readout  — primary readable prose / numerics
 
 Everything degrades to a single clean static frame when stdout is not a TTY
 (CI / pipes) — no escape spam, no alt-screen, no cursor games.
@@ -59,21 +59,21 @@ from rich.progress import Progress, BarColumn, TextColumn
 CX_VERSION = "4.4"
 
 # ══════════════════════════════════════════════════════════════════════════
-#  MONO ELECTRIC BLUE  (one hue's ramp — hierarchy & severity by brightness)
+#  MONO SIGNAL RED  (one hue's ramp — hierarchy & severity by brightness)
 #  Names kept (PHOS/REF/TGT…) so every renderer recolours by value change.
 # ══════════════════════════════════════════════════════════════════════════
-VOID      = "#0a0f18"   # near-black navy — background / negative space
-PANEL     = "#111b2e"   # raised panel fill (navy)
-PHOS      = "#3b82f6"   # PRIMARY blue — wordmark, structure, "safe/engaged"
-PHOS_DIM  = "#1a4890"   # dim blue — borders, rails, low emphasis
-REF       = "#7dabff"   # bright blue — high emphasis / active / highlights
-TGT       = "#7dabff"   # bright blue — commanded target (mono: = accent)
-CAUT      = "#2563c6"   # mid blue — caution / medium findings
-WARN      = "#7dabff"   # bright blue — critical / high (brightest = most urgent)
-WARN_HOT  = "#a9c9ff"   # extra-bright blue — peak emphasis
-APEX      = "#d6e6ff"   # near-white blue — rare apex flash
-LABEL     = "#5f7391"   # muted blue-grey — captions, timestamps, comments
-READOUT   = "#c2d0e6"   # light blue-grey — primary readable prose / numerics
+VOID      = "#0a0707"   # near-black — background / negative space
+PANEL     = "#1a0e0e"   # raised panel fill
+PHOS      = "#ff3b3b"   # PRIMARY red — wordmark, structure, "safe/engaged"
+PHOS_DIM  = "#7a1010"   # dim red — borders, rails, low emphasis
+REF       = "#ff6b6b"   # bright red — high emphasis / active / highlights
+TGT       = "#ff6b6b"   # bright red — commanded target (mono: = accent)
+CAUT      = "#d63447"   # mid red — caution / medium findings
+WARN      = "#ff6b6b"   # bright red — critical / high (brightest = most urgent)
+WARN_HOT  = "#ffb0a9"   # extra-bright red — peak emphasis
+APEX      = "#ffe0dc"   # near-white red — rare apex flash
+LABEL     = "#8a6a6a"   # muted red-grey — captions, timestamps, comments
+READOUT   = "#e8cfcf"   # light red-grey — primary readable prose / numerics
 
 HUD_THEME = Theme({
     "hud.void": VOID, "hud.panel": PANEL,
@@ -363,7 +363,7 @@ class HUDCanvas:
 
 
 def sweep_trail_color(distance, length):
-    """boresight_sweep colour law: cyan head → phosphor → dim → void by age."""
+    """boresight_sweep colour law: bright head → phosphor → dim → void by age."""
     if distance <= 0:
         return REF
     t = min(distance / max(length, 1), 1.0)
@@ -374,9 +374,9 @@ def sweep_trail_color(distance, length):
 
 # ══════════════════════════════════════════════════════════════════════════
 #  CYPHEX LOCKMARK — the padlock brand glyph, drawn procedurally in Braille
-#  (violet body with a lavender top-highlight, magenta shackle, carved keyhole)
+#  (body lit in PRIMARY with a hot top-highlight, bright shackle, carved keyhole)
 # ══════════════════════════════════════════════════════════════════════════
-_LAV = "#C9A0FF"   # lavender highlight
+_LAV = "#ffb0a9"   # hot top-highlight (in-ramp — WARN_HOT)
 
 
 def _padlock_canvas(cw=24, ch=16, shackle_open=1.0, lit=PHOS, ring=REF):
@@ -855,11 +855,33 @@ def _glitch_frame(progress=1.0, seed=BOOT_SEED):
 # ══════════════════════════════════════════════════════════════════════════
 #  MASTHEAD — the settled static header (persistent after boot)
 # ══════════════════════════════════════════════════════════════════════════
+def render_status_chip(state="idle", console=None):
+    """The persistent top-of-screen status chip:  CYPHEX   v4.4   ● idle
+
+    Literal text, never baked into the logo art — it stays legible at any
+    terminal width and needs no redraw when the palette changes. `state` is
+    free-form (idle / scanning / patching / offline …); the dot colour is
+    picked from the ramp by severity, brightest = most urgent.
+    """
+    c = console or soc
+    dot_style = {"idle": PHOS, "scanning": REF, "patching": REF,
+                 "blocked": WARN, "offline": LABEL}.get(state, PHOS)
+    dot = "*" if _ascii_mode(c) else "\u25cf"
+    chip = Text("  ")
+    chip.append("CYPHEX", style=f"bold {PHOS}")
+    chip.append(f"   v{CX_VERSION}   ", style=LABEL)
+    chip.append(dot + " ", style=dot_style)
+    chip.append(state, style=LABEL)
+    c.print(chip)
+
+
 def render_masthead(console=None, hint=True):
     """Claude/Codex-style home screen: LEFT-aligned logo, then a bordered
     workspace box (spanning the window) with a compact command reference and
     the current directory. Not a centered splash."""
     c = console or soc
+    c.print()
+    render_status_chip("idle", c)
     c.print()
     # ── Left-aligned brand logo (1-col indent, not centered) ──
     c.print(Padding(_logo_static(c), (0, 0, 0, 1)))
