@@ -1677,13 +1677,29 @@ class CyphexEngine:
                         if attack_graph.edges:
                             print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
                     except (asyncio.TimeoutError, TimeoutError):
-                        self._emit("deepagent_timeout", agent=agent.__class__.__name__)
+                        # wait_for cancels agent.run() mid-flight, so its return
+                        # value (and any attack-graph edges it was about to emit)
+                        # are lost. But an agent's confirmed findings accumulate
+                        # live on agent.vulns — including anything its fast
+                        # preflight already nailed down before the slow oracle
+                        # loop hung. Salvage those instead of discarding a real,
+                        # confirmed vuln just because the deeper phase ran long.
+                        salvaged = list(getattr(agent, "vulns", []) or [])
+                        if salvaged:
+                            context.confirmed_vulns.extend(salvaged)
+                        self._emit("deepagent_timeout", agent=agent.__class__.__name__,
+                                   salvaged=len(salvaged))
                         self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
-                                        "timed out", _T_WARN)
+                                        f"timed out ({len(salvaged)} salvaged)" if salvaged else "timed out",
+                                        _T_WARN, {"salvaged": len(salvaged)})
+                        salvage_note = (
+                            f" (kept {len(salvaged)} confirmed vuln(s) found before the hang)"
+                            if salvaged else ""
+                        )
                         print(
                             f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} timed out after "
                             f"{cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S:.0f}s (oracle-guided "
-                            f"loop too slow on this hardware) — skipping to the next agent."
+                            f"loop too slow on this hardware) — skipping to the next agent{salvage_note}."
                         )
                         continue
                     except Exception as e:
@@ -3184,6 +3200,10 @@ class CyphexEngine:
         if patch_council and len(patchable) > 0:
             try:
                 vuln_inputs = []
+                # The first cognee recall of a scan also pays the one-time cold
+                # vector-DB load; give only that call the larger cold budget so
+                # it stops timing out and logging a spurious error every scan.
+                _cognee_cold = True
                 for p in patchable:
                     # The applier overwrites EXACTLY the window [start_l+1, end_l]
                     # (== p["snippet"]), so the model must rewrite that window and
@@ -3238,16 +3258,37 @@ class CyphexEngine:
 
                     memory_hint = ""
                     if COGNEE_AVAILABLE:
+                        # Only the first recall of the scan gets the cold budget;
+                        # flip the flag before the await so exactly one call pays it.
+                        _recall_budget = (cyphex_config.COGNEE_RECALL_COLD_TIMEOUT_S
+                                          if _cognee_cold
+                                          else cyphex_config.COGNEE_RECALL_TIMEOUT_S)
+                        _was_cold = _cognee_cold
+                        _cognee_cold = False
                         try:
                             hits = await asyncio.wait_for(
                                 cognee_memory.recall_similar_fixes(p["cwe"], p.get("snippet_fn", p["snippet"])),
-                                timeout=cyphex_config.COGNEE_RECALL_TIMEOUT_S,
+                                timeout=_recall_budget,
                             )
                             memory_hint = cognee_memory.format_hint(hits)
                             self._emit("cognee_recall_result", ok=True, hits=len(hits))
                         except Exception as _e:
                             memory_hint = ""
-                            self._emit("cognee_recall_result", ok=False, error=str(_e)[:200])
+                            # recall_similar_fixes() never raises — it returns []
+                            # on any internal failure — so the only exception that
+                            # reaches here is asyncio.TimeoutError from wait_for,
+                            # whose str() is empty and rendered a blank line in the
+                            # health panel's RECENT ERRORS. Record the exception
+                            # TYPE and which budget was hit so a maintainer can
+                            # tell a (now rare) cold-start timeout apart from a
+                            # real warm-path failure.
+                            if isinstance(_e, (asyncio.TimeoutError, TimeoutError)):
+                                detail = (f"TimeoutError: recall exceeded "
+                                          f"{_recall_budget:.0f}s "
+                                          f"({'cold' if _was_cold else 'warm'} vector-load budget)")
+                            else:
+                                detail = f"{type(_e).__name__}: {str(_e)[:180]}"
+                            self._emit("cognee_recall_result", ok=False, error=detail)
 
                     vuln_inputs.append({
                         "vuln_name": p["vuln_type"], "cwe": p["cwe"],
