@@ -1373,43 +1373,88 @@ def _fg(hex):
 _ANSI_RST = "\033[0m"
 
 
+BOX_ROUND = {"tl": "╭", "tr": "╮", "bl": "╰", "br": "╯",
+             "h": "─", "v": "│"}
+BOX_ASCII = {"tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "-", "v": "|"}
+
+
+def deck_box_glyphs(console=None):
+    """Border glyphs for the input field — rounded box-drawing, or the ASCII
+    substitution when the terminal can’t render them. One source of truth so
+    the top wall (here), the bottom wall (here) and the right wall painted by
+    deck_input.py’s raw-mode editor can never disagree."""
+    return dict(BOX_ASCII if _ascii_mode(console) else BOX_ROUND)
+
+
+def deck_box_width(console=None):
+    """Wall width of the input field. Shared by both walls and by the raw-mode
+    editor, which needs it to place the right wall at a fixed column."""
+    return max(_cols(console), 20)
+
+
+def deck_caret(session=None):
+    """(glyph, colour) of the armed caret for the current session posture.
+
+    Single source of truth: deck_prompt() (readline path) and deck_input.py
+    (raw-mode path) both read the caret from here, so the two input paths
+    cannot drift into showing different carets for the same state.
+    """
+    s = session or {}
+    return {"idle": ("⊕", PHOS), "executing": ("⌖", REF),
+            "locked": ("◈", TGT)}.get(s.get("caret", "idle"), ("⊕", PHOS))
+
+
+def deck_prompt_segments(session=None):
+    """The armed-caret prompt as [(text, hex_colour)] segments — including the
+    LEFT wall of the input field, since the prompt is what paints it.
+
+    deck_prompt() wraps each segment in readline’s \\001..\\002 markers;
+    deck_input.read_line() measures the segments to place the right wall and
+    paints them raw (those markers are meaningless outside readline). Callers
+    own the not-a-tty / ASCII-mode decision — see deck_prompt().
+    """
+    caret, ccol = deck_caret(session)
+    return [(deck_box_glyphs()["v"] + " ", PHOS_DIM), (caret + " ", ccol),
+            ("cx ", READOUT), ("▸ ", PHOS)]
+
+
 def deck_prompt(session=None):
     """readline-safe armed-caret prompt (line 2). ANSI wrapped in \\001..\\002
     so cursor/column math stays correct on long input. Prefixed with the
     left wall of the input field opened by deck_input_box_top()."""
-    s = session or {}
-    caret, ccol = {"idle": ("⊕", PHOS), "executing": ("⌖", REF),
-                   "locked": ("◈", TGT)}.get(s.get("caret", "idle"), ("⊕", PHOS))
-
     def rl(seq):
         return "\001" + seq + "\002"
 
     # _tty() alone only covers the non-interactive case (piped/redirected).
-    # This prompt is hand-built raw 24-bit-truecolor ANSI (bypassing Rich's
-    # own colorama-backed Windows-compat layer entirely, since it's fed
+    # This prompt is hand-built raw 24-bit-truecolor ANSI (bypassing Rich’s
+    # own colorama-backed Windows-compat layer entirely, since it’s fed
     # straight to readline/input() rather than printed through a Console)
     # — on an interactive but legacy Windows terminal (isatty() True, no
     # native VT processing), those escapes render as literal garbage
     # instead of a colored caret. _ascii_mode() catches that case too.
     if not _tty() or _ascii_mode():
         return "cx > "
-    return (rl(_fg(PHOS_DIM)) + "│ " + rl(_ANSI_RST)
-            + rl(_fg(ccol)) + caret + " " + rl(_fg(READOUT)) + "cx "
-            + rl(_fg(PHOS)) + "▸ " + rl(_ANSI_RST))
+    return "".join(rl(_fg(col)) + txt
+                   for txt, col in deck_prompt_segments(session)) + rl(_ANSI_RST)
 
 
 def deck_input_box_top(console=None):
     """Top wall of the boxed input field — printed just above the prompt so
-    typing happens visually 'inside' a field, not bare on the rail. Paired
-    with deck_input_box_bottom() after the line is submitted; the right
-    wall is intentionally not drawn on the input line itself since plain
-    readline can't keep a fixed-column border in sync with live typing."""
+    typing happens visually ‘inside’ a field, not bare on the rail. Paired
+    with deck_input_box_bottom() after the line is submitted.
+
+    This pair is the READLINE path, which leaves the field open on the right:
+    readline redraws the input line on every edit and clears to end-of-line,
+    wiping anything painted at a fixed right column. deck_input.read_line()
+    is the raw-mode path that owns line editing and therefore *can* keep all
+    four walls up while typing; when it is driving, it paints these walls
+    itself and cx.py suppresses this pair (see deck_input.input_box_top()).
+    """
     c = console or soc
     if not _tty(c):
         return
-    width = max(_cols(c), 20)
-    l, mid, r = ("+", "-", "+") if _ascii_mode(c) else ("╭", "─", "╮")
-    c.print(Text(l + mid * (width - 2) + r, style=PHOS_DIM))
+    g, width = deck_box_glyphs(c), deck_box_width(c)
+    c.print(Text(g["tl"] + g["h"] * (width - 2) + g["tr"], style=PHOS_DIM))
 
 
 def deck_input_box_bottom(console=None):
@@ -1419,9 +1464,8 @@ def deck_input_box_bottom(console=None):
     c = console or soc
     if not _tty(c):
         return
-    width = max(_cols(c), 20)
-    l, mid, r = ("+", "-", "+") if _ascii_mode(c) else ("╰", "─", "╯")
-    c.print(Text(l + mid * (width - 2) + r, style=PHOS_DIM))
+    g, width = deck_box_glyphs(c), deck_box_width(c)
+    c.print(Text(g["bl"] + g["h"] * (width - 2) + g["br"], style=PHOS_DIM))
 
 
 # ══════════════════════════════════════════════════════════════════════════
