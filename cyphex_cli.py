@@ -29,6 +29,18 @@ try:
 except Exception:
     pass
 
+# `class C` below prints raw ANSI escape codes directly (this file has no
+# Rich fallback the way cx.py/terminal_ui.py do) — on legacy Windows cmd.exe
+# without native VT processing enabled, that renders as literal
+# escape-sequence garbage instead of color. colorama enables VT mode where
+# it can and transparently translates/strips the codes where it can't; it's
+# a no-op on any terminal that already handles ANSI natively.
+try:
+    import colorama
+    colorama.init(autoreset=False)
+except ImportError:
+    pass
+
 def load_env_file():
     """Lightweight, standard-library-only .env file loader."""
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")

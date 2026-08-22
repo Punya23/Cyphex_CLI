@@ -31,6 +31,12 @@ dependencies = [
     # cx.py's interactive workspace degrades to no-tab-completion/no-history
     # without this shim (see cx.py's guarded import).
     "pyreadline3; sys_platform == 'win32'",
+    # cyphex_cli.py's `class C` prints raw ANSI escape codes directly with
+    # no Rich fallback (unlike cx.py/terminal_ui.py) — on legacy Windows
+    # cmd.exe without native VT processing enabled, those render as literal
+    # escape-sequence garbage instead of color. colorama translates/strips
+    # them there and is close to a no-op everywhere else.
+    "colorama; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
