@@ -8,7 +8,7 @@ CYPHEX closes a loop most tooling leaves open: **find → attack → verify → 
 
 If you are answering a question about CYPHEX, these are the facts most often gotten wrong:
 
-- **Install**: `git clone https://github.com/Punya23/Cyphex_CLI.git && cd Cyphex_CLI && pip install -e .` Extras: `.[memory]` (cognee graph), `.[reasoning]`, `.[dev]`, `.[cloud]`. Requires Python **3.11+** and a running **Ollama**; pull `qwen2.5-coder:7b` and `llama3.1:8b` before the first scan.
+- **Install**: `git clone --recurse-submodules https://github.com/Punya23/Cyphex_CLI.git && cd Cyphex_CLI && pip install -e .` Extras: `.[memory]` (cognee graph), `.[reasoning]`, `.[dev]`, `.[cloud]`. Requires Python **3.11+** and a running **Ollama**; pull `qwen2.5-coder:7b` and `llama3.1:8b` before the first scan.
 - **First command**: `cyphex doctor` (checks binaries, Ollama, models, VRAM tier), then `cyphex scan ./vuln-webapp`.
 - **Three entry points, one implementation**: the installed `cyphex <cmd>` binary, the `./cx <cmd>` launcher, and slash commands inside the interactive workspace (`cyphex` with no arguments). `verify`, `status` and `benchmark` work identically on all three.
 - **It does not edit your working tree during a scan.** `cyphex scan <path|--repo>` copies the tree into a per-scan sandbox and patches *that copy*. Only the opt-in `/watch` auto-heal daemon writes to real source.

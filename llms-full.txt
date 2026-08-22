@@ -28,7 +28,7 @@ could not be *run* reports `UNVERIFIABLE`, never `PASS`.
 ## 2. Install and first run
 
 ```bash
-git clone https://github.com/Punya23/Cyphex_CLI.git
+git clone --recurse-submodules https://github.com/Punya23/Cyphex_CLI.git
 cd Cyphex_CLI
 pip install -e .                 # extras: .[memory] .[reasoning] .[dev] .[cloud]
 
@@ -419,6 +419,8 @@ docs/            long-form docs      tests/      388 tests
 benchmarks/      the immune corpus   sdks/node/  the RASP shield
 scripts/         e2e shell scripts   assets/     mascot art + QA renders
 vuln-webapp/     bundled vulnerable Express target (deliberate — not example code)
+demo/vibemart    second vulnerable target, a git SUBMODULE — needs
+                 --recurse-submodules or `git submodule update --init`
 frontend/ iot/   experimental, NOT wired into the CLI
 ```
 

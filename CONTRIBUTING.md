@@ -11,9 +11,10 @@ the same material, structured for acting rather than reading.
 ## Setup
 
 ```bash
-git clone https://github.com/Punya23/Cyphex_CLI.git
+git clone --recurse-submodules https://github.com/Punya23/Cyphex_CLI.git
 cd Cyphex_CLI
 pip install -e ".[dev]"
+# Already cloned without the flag? git submodule update --init
 
 ollama pull qwen2.5-coder:7b
 ollama pull llama3.1:8b

@@ -71,8 +71,11 @@ It refuses to overclaim: an unverifiable patch reports UNVERIFIABLE, not success
 
 ```bash
 # 1. Clone
-git clone https://github.com/Punya23/Cyphex_CLI.git
+git clone --recurse-submodules https://github.com/Punya23/Cyphex_CLI.git
 cd Cyphex_CLI
+# --recurse-submodules pulls demo/vibemart, a second scan target. Optional —
+# leave it off and everything except that one demo still works. Already cloned?
+# git submodule update --init
 
 # 2. Install (extras: '.[memory]' cognee graph · '.[reasoning]' · '.[dev]')
 pip install -e .
