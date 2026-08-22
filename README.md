@@ -4,7 +4,8 @@
   <img src="https://img.shields.io/badge/Docker-Sandbox-2496ED?style=for-the-badge&logo=docker&logoColor=white" />
   <img src="https://img.shields.io/badge/DeepAgents-13_Oracle--Guided-D64545?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Genome-91.3%25_Recall-6D28D9?style=for-the-badge" />
-  <img src="https://img.shields.io/badge/tests-136_passing-2ea44f?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/tests-320_passing-2ea44f?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Verify_Gate-maintainability_panel-3b82f6?style=for-the-badge" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
 </p>
 
@@ -21,7 +22,8 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> · <a href="#what-a-scan-actually-does">Sample Run</a> ·
-  <a href="#the-verify-gate">Verify Gate</a> · <a href="#how-it-works--the-8-step-pipeline">Pipeline</a> ·
+  <a href="#the-verify-gate">Verify Gate</a> · <a href="#the-maintainability-panel">Maintainability Panel</a> ·
+  <a href="#how-it-works--the-8-step-pipeline">Pipeline</a> ·
   <a href="#usage">Usage</a> · <a href="#configuration">Config</a> ·
   <a href="#troubleshooting">Troubleshooting</a> · <a href="#what-cyphex-cant-do-yet">Limitations</a>
 </p>
@@ -36,6 +38,7 @@
 | **[Quick Start](#quick-start)** · [Prerequisites](#prerequisites) · [Hardware tiers](#hardware-tiers) | Getting running |
 | **[What a scan actually does](#what-a-scan-actually-does)** · [Artifacts](#artifacts-it-leaves-behind) | Measured output |
 | **[The Verify Gate](#the-verify-gate)** | The honesty guarantee |
+| **[The Maintainability Panel](#the-maintainability-panel)** · [full docs](docs/VERIFICATION_MAINTAINABILITY_PANEL.md) | Is that guarantee still working? |
 | **[The 8-step pipeline](#how-it-works--the-8-step-pipeline)** · [FP scoring](#false-positive-scoring) | End-to-end mechanics |
 | **[DeepAgents](#1-deepagents--an-oracle-guided-attack-swarm)** · [Oracle](#2-the-oracle--local-model-reasoning-spent-where-it-pays) · [RAG](#3-vectorless-rag--knowledge-tree--context-without-a-vector-db) · [Council](#4-the-council--multi-model-validation) | The four subsystems |
 | **[Immune system](#the-behavioural-immune-system)** · [Benchmark](#benchmarked-quality) | Anomaly detection |
@@ -220,6 +223,45 @@ Every candidate must clear all of:
 Ordinary scans ignore a regex match inside a code comment — a commented-out query isn't a vulnerability. If verification did the same, a patch that simply **comments the vulnerable line out** would read as "finding gone" and PASS.
 
 So the re-scan flips comment-matching back on: commenting-out still fails and rolls back. Meanwhile *parameterised-SQL* suppression stays active both ways, because adding placeholders genuinely is a fix and must verify as one. Deliberate asymmetry, covered by tests.
+
+---
+
+## The Maintainability Panel
+
+*A gate that can degrade silently is a gate you can't trust.* The Verify Gate above is correct — but correctness without visibility has a failure mode: if `tsc` goes missing, every TypeScript patch verifies as UNVERIFIABLE forever, the score stops improving, and **nothing anywhere says why**.
+
+`cyphex verify` closes that loop. It aggregates every verdict the gate has ever written — scattered one `patches.json` per scan — into one maintainer-facing answer.
+
+```mermaid
+flowchart LR
+    SCAN["cyphex scan"] -->|"PASS / FAIL / UNVERIFIABLE"| MAN[("patches.json<br/>per scan")]
+    SCAN -->|"emit() · never raises"| EV[("events.jsonl<br/>per scan")]
+    MAN --> VH["verify_health.py"]
+    EV --> OH["observability/health.py"]
+    VH --> V["/verify<br/>config · status · next steps"]
+    VH --> CI["--ci<br/>exit 0/1/2"]
+    OH --> S["/status<br/>last scan · agents · errors"]
+```
+
+| | Shows | Verdict lamp |
+|---|---|---|
+| **`cyphex verify`** | **Configuration** — blast-radius caps, suppression patterns, per-check toolchain readiness · **Status** — durability rate, PASS/FAIL/UNVERIFIABLE, per-CWE breakdown, scan-over-scan trend · **Next steps** | `GATE HEALTHY` · `GATE DEGRADED` · `GATE UNUSED` |
+| **`cyphex status`** | Last scan's phase timings, DeepAgents swarm outcomes, cognee memory rates, recent-errors tail | `SYSTEM NOMINAL` · `SYSTEM DEGRADED` · `NO TELEMETRY YET` |
+
+```bash
+cyphex verify              # config + status + next steps
+cyphex verify --selftest   # live self-test: drive each check, don't just probe for a binary
+cyphex verify --ci         # exit 0 healthy / 1 degraded / 2 unusable
+cyphex status              # what actually happened on the last scan
+```
+
+**Presence ≠ works.** `--selftest` drives each real check path against a synthetic fixture — compiles a deliberately broken file to prove the syntax check *rejects*, runs the scanner over a known-vulnerable fixture to prove re-scan matching still fires, exercises `httpx`'s connection-error path. A tool can report *installed* and still be broken for the check it gates; this is the only thing that catches that.
+
+**Next steps are derived, never templated.** Each entry appears only when its condition holds and names the specific action — *"Install TypeScript (`npm install -g typescript`) — TS/TSX patches currently verify as UNVERIFIABLE, not PASS, because the build check can't run."*
+
+Both panels are read-only, degrade to plain text without Rich, and degrade again to pure ASCII on terminals that can't render box-drawing glyphs.
+
+→ **[Full documentation: docs/VERIFICATION_MAINTAINABILITY_PANEL.md](docs/VERIFICATION_MAINTAINABILITY_PANEL.md)**
 
 ---
 
@@ -633,6 +675,14 @@ The Verify Gate tests are worth reading to understand the system's guarantees �
 ---
 
 ## Full Documentation
+
+| Document | What it covers |
+|---|---|
+| **[docs/VERIFICATION_MAINTAINABILITY_PANEL.md](docs/VERIFICATION_MAINTAINABILITY_PANEL.md)** | The verification surface in depth — architecture, verdict states, event taxonomy, CI gating, design rationale |
+| **[AGENTS.md](AGENTS.md)** | Repository orientation for coding agents — layout, invariants, where to change what |
+| **[llms.txt](llms.txt)** | Condensed machine-readable project summary ([llmstxt.org](https://llmstxt.org)) |
+| **[CYPHEX_PRD.md](CYPHEX_PRD.md)** | Living specification — see the section index below |
+| **[CYPHEX_BUILD_GUIDE.md](CYPHEX_BUILD_GUIDE.md)** | Implementation walkthrough and file tree |
 
 Everything below lives in **[CYPHEX_PRD.md](CYPHEX_PRD.md)**:
 

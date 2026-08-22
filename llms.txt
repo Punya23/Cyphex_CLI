@@ -1,0 +1,52 @@
+# CYPHEX
+
+> A local-first autonomous security scanner. Point it at a repository: it deploys the app in a sandbox, attacks it with local-LLM agents, patches what it confirms, and re-scans to prove the fix. No cloud LLM, no API keys, no telemetry — all inference hits `127.0.0.1:11434` (Ollama). MIT licensed, Python 3.11+.
+
+CYPHEX closes a loop most tooling leaves open: **find → attack → verify → fix → prove**. SAST flags a line but can't tell you it's reachable. DAST proves exploitability but not which line to fix. Neither writes the patch. Cloud AI tools write it — after uploading your source. CYPHEX does all of it on your own machine, and refuses to claim a fix it cannot demonstrate.
+
+## The claim that matters
+
+**A patch counts as "fixed" only if a re-scan proves it.** Every candidate patch must clear five independent checks (finding gone on re-scan, file still compiles, no scanner-suppression comments added, diff inside a severity-scaled blast radius, enclosing route/function/class still intact). The result is a tri-state verdict:
+
+- `PASS` — every check ran and passed. Counts toward the security score.
+- `FAIL` — a check ran and failed. Patch is **rolled back** to the original bytes.
+- `UNVERIFIABLE` — a check could not be run at all. Patch stays applied but **never counts toward the score**.
+
+`finding_gone` and `builds` are tri-state (`True`/`False`/`None`); `None` means *unmeasured* and is never coerced into a PASS. A check that ran and failed always outranks one that never ran.
+
+## Verification: Maintainability Panel (flagship)
+
+Two commands expose the health of that verification machinery to a maintainer, because a gate can degrade silently — if `tsc` goes missing, every TypeScript patch reads UNVERIFIABLE forever and nothing says why.
+
+- `cyphex verify` / `/verify` — **Verify Gate Maintainability Panel.** Configuration (blast-radius caps, suppression patterns, per-check toolchain readiness), status (durability rate, PASS/FAIL/UNVERIFIABLE counts, per-CWE breakdown, scan-over-scan trend), and concrete next steps. Verdict lamp: `GATE HEALTHY` / `GATE DEGRADED` / `GATE UNUSED`.
+  - `--selftest` — live functional self-test. Actually drives each check against a synthetic fixture rather than probing for a binary's presence, because "installed" and "works" are different claims.
+  - `--ci` — machine-checkable verdict and process exit code (`0` healthy / `1` degraded / `2` unusable).
+  - `--watch [secs]`, `--json <file>`.
+- `cyphex status` / `/status` — **System Observability.** Reads the append-only JSONL event log every scan writes: phase timings, DeepAgents swarm outcomes, cognee memory recall/persist rates, a recent-errors tail. Verdict lamp: `SYSTEM NOMINAL` / `SYSTEM DEGRADED` / `NO TELEMETRY YET`.
+
+Both degrade to plain text when Rich is unavailable, and to pure ASCII on terminals that cannot render box-drawing glyphs.
+
+## Docs
+
+- [README](README.md): Full project reference — quick start, measured sample run, the eight-step pipeline, the four subsystems, configuration, CI usage, troubleshooting, and an explicit limitations section.
+- [Verification Maintainability Panel](docs/VERIFICATION_MAINTAINABILITY_PANEL.md): Deep dive on the flagship deliverable — architecture diagrams, the full report schema, every verdict state and its exact triggering condition, the event taxonomy, and the design rationale.
+- [AGENTS.md](AGENTS.md): Repository orientation for coding agents — layout, invariants, where to change what, and what not to break.
+- [Product Requirements](CYPHEX_PRD.md): Living specification — data model, functional and non-functional requirements, ethics posture, known gaps, roadmap.
+- [Build Guide](CYPHEX_BUILD_GUIDE.md): Implementation walkthrough and file tree.
+
+## Architecture
+
+- [cli_engine.py](cli_engine.py): The scan pipeline driver (`CyphexEngine.run()`), nine phases from source acquisition through patch-and-verify.
+- [backend/patch/verifier.py](backend/patch/verifier.py): The Verify Gate itself — the five checks and the tri-state verdict algebra.
+- [backend/patch/verify_health.py](backend/patch/verify_health.py): Aggregates every scan's patch manifest into the maintainability report; live self-test; CI exit code.
+- [backend/observability/](backend/observability/): Append-only JSONL event log (`events.py`, contractually never raises) and its aggregator (`health.py`).
+- [scoring.py](scoring.py): Sole source of truth for the 0-100 posture score. Exponential saturation over a severity-weighted geometric penalty — strictly monotonic across its entire domain, so remediation can never display as zero improvement.
+- [terminal_ui.py](terminal_ui.py): Rich-based terminal UI with ASCII fallback for legacy/dumb terminals.
+- [backend/platform_compat.py](backend/platform_compat.py): Cross-platform binary and shell resolution.
+
+## Optional
+
+- [Immune system](README.md#the-behavioural-immune-system): Per-endpoint behavioural anomaly detector, adversarially co-evolved against its own AI-generated attacks. Benchmarked at 91.3% recall / 97.7% precision / 3.3% false-positive rate on a 76-sample corpus (directional, not certified).
+- [DeepAgents](README.md#1-deepagents--an-oracle-guided-attack-swarm): 13 Oracle-guided attack agents that run no fixed script — each asks a local model what to try next, tests it live, mutates on failure, and chains confirmed exploits into multi-step attack paths.
+- [Network scanning](README.md#network-scanning-optional): Host discovery, port scan, and behavioural flow monitoring.
+- [RASP + auto-heal daemon](README.md#rasp--auto-heal-daemon): Runtime protection that reports attacks back and can patch live source.

@@ -1,0 +1,101 @@
+# robots.txt — CYPHEX
+# https://github.com/Punya23/Cyphex_CLI
+#
+# CYPHEX is an open-source (MIT) local-first security scanner. Documentation
+# here is intended to be read, indexed, and cited — by people, by search
+# engines, and by LLM/agent crawlers alike. Everything published in this
+# repository is public by design; nothing here is a paywalled or private
+# corpus, so this file opts IN rather than out.
+#
+# Machine-readable entry point for LLMs:  /llms.txt   (see https://llmstxt.org)
+# Machine-readable entry point for agents: /AGENTS.md  (see https://agents.md)
+
+# ─── Search engines ──────────────────────────────────────────────────────────
+User-agent: Googlebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: DuckDuckBot
+Allow: /
+
+# ─── LLM / AI crawlers — explicitly permitted ────────────────────────────────
+# Training and retrieval crawlers are both welcome. Attribution appreciated:
+# cite as "CYPHEX — https://github.com/Punya23/Cyphex_CLI (MIT)".
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-User
+Allow: /
+
+User-agent: Claude-SearchBot
+Allow: /
+
+User-agent: anthropic-ai
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Perplexity-User
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+User-agent: meta-externalagent
+Allow: /
+
+User-agent: Amazonbot
+Allow: /
+
+User-agent: Bytespider
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: cohere-ai
+Allow: /
+
+User-agent: Diffbot
+Allow: /
+
+User-agent: omgili
+Allow: /
+
+# ─── Everything else ─────────────────────────────────────────────────────────
+User-agent: *
+Allow: /
+
+# ─── Generated / vendored paths worth skipping ───────────────────────────────
+# Not secrets — just noise that carries no documentation value: per-scan
+# sandbox working copies (throwaway clones of scanned targets, plus their
+# node_modules), Python/pytest caches, and virtualenvs.
+Disallow: /backend/sandboxes/
+Disallow: /.venv/
+Disallow: /.pytest_cache/
+Disallow: /__pycache__/
+Disallow: /node_modules/
+Disallow: /.cognee_data/
+
+# ─── Canonical documents ─────────────────────────────────────────────────────
+# Sitemap: (none — this project is distributed as a git repository, not a
+# hosted site. Start at /README.md, /llms.txt, or /docs/.)
