@@ -42,16 +42,19 @@ if _BACKEND_DIR not in sys.path:
 
 def _setup_tools():
     """Auto-install optional security tools for enhanced scanning."""
-    # Cyber palette
-    CY = "\033[38;2;0;255;255m"
-    P2 = "\033[38;2;161;100;255m"
-    GH = "\033[38;2;100;100;120m"
-    SL = "\033[38;2;140;150;170m"
-    NE = "\033[38;2;57;255;20m"
-    FL = "\033[38;2;255;69;0m"
+    # MONO SIGNAL RED — mirrors terminal_ui.py's ramp. Names kept; severity
+    # and hierarchy are carried by BRIGHTNESS inside the one hue.
+    CY = "\033[38;2;255;59;59m"     # PRIMARY — wordmark / accents
+    P2 = "\033[38;2;255;107;107m"   # bright — high emphasis / active
+    GH = "\033[38;2;138;106;106m"   # muted — captions / dim text
+    SL = "\033[38;2;232;207;207m"   # readout — secondary prose
+    NE = "\033[38;2;255;59;59m"     # PRIMARY — success
+    FL = "\033[38;2;255;176;169m"   # peak — critical (brightest = urgent)
     BD = "\033[1m"
     RS = "\033[0m"
-    YL = "\033[93m"
+    YL = "\033[38;2;214;52;71m"     # mid — warning / medium
+    RAMP_HI = (255, 59, 59)          # PRIMARY — gradient rule endpoint
+    RAMP_LO = (122, 16, 16)          # dim — gradient rule endpoint
 
     def _grad(text, r1, g1, b1, r2, g2, b2):
         out = []
@@ -64,7 +67,7 @@ def _setup_tools():
         out.append(RS)
         return "".join(out)
 
-    border = _grad("━" * 56, 0, 255, 255, 138, 43, 226)
+    border = _grad("━" * 56, *RAMP_HI, *RAMP_LO)
     print(f"\n{border}")
     print(f"  {CY}{BD}◈ CYPHEX{RS} {SL}— One-Time Setup{RS}")
     print(f"{border}\n")
@@ -241,7 +244,7 @@ def _setup_tools():
         print(f"  {YL}⚠{RS} {SL}Docker not found — needed for full-stack scanning{RS}")
         print("    Install from: https://www.docker.com/products/docker-desktop/")
 
-    border = _grad("━" * 56, 138, 43, 226, 0, 255, 255)
+    border = _grad("━" * 56, *RAMP_LO, *RAMP_HI)
     print(f"\n{border}")
     print(f"  {NE}✓{RS} {BD}Setup complete:{RS} {CY}{len(installed)} installed{RS}, {SL}{len(skipped)} already present{RS}")
     print(f"  {GH}Run '{CY}cyphex doctor{GH}' to verify everything{RS}")

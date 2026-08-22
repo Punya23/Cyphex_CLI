@@ -166,28 +166,33 @@ class C:
     DIM    = "\033[2m"
     ITALIC = "\033[3m"
     ULINE  = "\033[4m"
-    # Standard colors
-    R  = "\033[91m"
-    G  = "\033[92m"
-    Y  = "\033[93m"
-    B  = "\033[94m"
-    M  = "\033[95m"
-    CY = "\033[96m"
-    W  = "\033[97m"
-    # ── True-color cyber palette ──
-    CYAN   = "\033[38;2;0;255;255m"      # Turquoise/cyan primary
-    CYAN2  = "\033[38;2;72;209;204m"     # Muted teal
-    PURPLE = "\033[38;2;138;43;226m"     # Vivid purple
-    PURP2  = "\033[38;2;161;100;255m"    # Soft purple
-    NEON   = "\033[38;2;57;255;20m"      # Neon green (success)
-    FLAME  = "\033[38;2;255;69;0m"       # Orange-red (critical)
-    GHOST  = "\033[38;2;100;100;120m"    # Ghost gray (dim text)
-    SLATE  = "\033[38;2;140;150;170m"    # Slate (secondary text)
+    # ── MONO SIGNAL RED — names kept, values mirror terminal_ui.py's ramp ──
+    # One hue; severity/hierarchy carried by BRIGHTNESS, never by a second hue.
+    R  = "\033[38;2;255;107;107m"   # bright — error / high
+    G  = "\033[38;2;255;59;59m"     # PRIMARY — success / engaged
+    Y  = "\033[38;2;214;52;71m"     # mid — warning / medium
+    B  = "\033[38;2;138;106;106m"   # muted — info / low
+    M  = "\033[38;2;255;107;107m"   # bright (legacy alias)
+    CY = "\033[38;2;255;59;59m"     # PRIMARY (legacy alias)
+    W  = "\033[38;2;232;207;207m"   # readout — primary prose
+    # ── True-color ramp ──
+    CYAN   = "\033[38;2;255;59;59m"      # PRIMARY — wordmark / structure
+    CYAN2  = "\033[38;2;214;52;71m"      # mid — caution / secondary
+    PURPLE = "\033[38;2;122;16;16m"      # dim — borders, rails, low emphasis
+    PURP2  = "\033[38;2;255;107;107m"    # bright — high emphasis / active
+    NEON   = "\033[38;2;255;59;59m"      # PRIMARY — success
+    FLAME  = "\033[38;2;255;176;169m"    # peak — critical (brightest = urgent)
+    GHOST  = "\033[38;2;138;106;106m"    # muted — captions / dim text
+    SLATE  = "\033[38;2;232;207;207m"    # readout — secondary prose
     # Backgrounds
-    BG_DARK   = "\033[48;2;15;15;25m"    # Near-black bg
-    BG_PURPLE = "\033[48;2;30;20;50m"    # Dark purple bg
-    BG_CYAN   = "\033[48;2;0;50;60m"     # Dark cyan bg
-    BG_RED    = "\033[48;2;60;10;10m"    # Dark red bg
+    BG_DARK   = "\033[48;2;10;7;7m"      # VOID — negative space
+    BG_PURPLE = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
+    BG_CYAN   = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
+    BG_RED    = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
+    # Gradient endpoints for the brand rules/dividers below. Kept as RGB
+    # triples (not escapes) because C.gradient() interpolates on the numbers.
+    RAMP_HI = (255, 59, 59)               # PRIMARY
+    RAMP_LO = (122, 16, 16)               # dim
 
     @staticmethod
     def gradient(text, r1, g1, b1, r2, g2, b2):
@@ -556,7 +561,7 @@ class CyphexEngine:
         icon = step_icons.get(step_num, "◆")
         filled = int(done / total * 20)
         progress = f"{'█' * filled}{'░' * (20 - filled)}"
-        border = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+        border = C.gradient("━" * 72, *C.RAMP_HI, *C.RAMP_LO)
         print(f"\n{border}")
         pill = f"{C.BG_CYAN}{C.BOLD} {icon} STEP {step_num}/{step_total} {C.RST}"
         title_text = f"{C.CYAN}{C.BOLD}{title}{C.RST}"
@@ -575,14 +580,14 @@ class CyphexEngine:
 
         # Fallback: original ANSI rendering
         banner = f"""
-{C.CYAN}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
-{C.CYAN}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
-{C.CYAN2}  ██║      ╚████╔╝ ██████╔╝███████║█████╗   ╚███╔╝{C.RST}
-{C.PURP2}  ██║       ╚██╔╝  ██╔═══╝ ██╔══██║██╔══╝   ██╔██╗{C.RST}
-{C.PURPLE}  ╚██████╗   ██║   ██║     ██║  ██║███████╗██╔╝ ██╗{C.RST}
-{C.PURPLE}   ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C.RST}
+{C.FLAME}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
+{C.PURP2}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
+{C.CYAN}  ██║      ╚████╔╝ ██████╔╝███████║█████╗   ╚███╔╝{C.RST}
+{C.CYAN}  ██║       ╚██╔╝  ██╔═══╝ ██╔══██║██╔══╝   ██╔██╗{C.RST}
+{C.CYAN2}  ╚██████╗   ██║   ██║     ██║  ██║███████╗██╔╝ ██╗{C.RST}
+{C.CYAN2}   ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C.RST}
 """
-        divider = C.gradient("━" * 60, 0, 255, 255, 138, 43, 226)
+        divider = C.gradient("━" * 60, *C.RAMP_HI, *C.RAMP_LO)
         print(banner)
         print(f"  {divider}")
         print(f"  {C.SLATE}Multi-Agent Security Pipeline{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}v2.0{C.RST}  {C.GHOST}│{C.RST}  {C.PURP2}AI-Powered  │  OFFLINE-FIRST{C.RST}")
@@ -1063,7 +1068,7 @@ class CyphexEngine:
                                     if MASCOT:
                                         mascot.success(f"Docker stack ready (attempt {attempt + 1})")
                                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker stack ready (attempt {attempt + 1}){C.RST}")
-                                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                                    sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
                                     print(f"  {sb}")
                                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
                                     print(f"  {C.GHOST}  Full stack: app + database + all services{C.RST}")
@@ -1103,7 +1108,7 @@ class CyphexEngine:
                     url = result["url"]
                     _gen = " (auto-generated Dockerfile)" if result.get("generated_dockerfile") else ""
                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{_gen}{C.RST}")
-                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                    sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
                     print(f"  {sb}")
                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
                     print(f"  {C.GHOST}  Container: {result.get('container_name')}  ·  {result.get('log_cmd','')}{C.RST}")
@@ -1218,7 +1223,7 @@ class CyphexEngine:
             for _ln in _nlogs.splitlines()[-15:]:
                 self._vprint(f"  {C.GHOST}│ {_ln[:200]}{C.RST}")
         print()
-        sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+        sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
         print(f"  {sb}")
         print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
         print(f"  {C.GHOST}  Open in browser to see the target app{C.RST}")
@@ -1354,7 +1359,7 @@ class CyphexEngine:
             if SOC_UI:
                 ui.render_agent_header(agent_id, name, objective)
                 return
-            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
+            border = C.gradient("─" * 68, *C.RAMP_HI, *C.RAMP_LO)
             print(f"\n  {border}")
             print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
             print(f"  {C.GHOST}{objective}{C.RST}")
@@ -1382,7 +1387,7 @@ class CyphexEngine:
             if SOC_UI:
                 ui.render_agent_header(agent_id, name, objective)
                 return
-            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
+            border = C.gradient("─" * 68, *C.RAMP_HI, *C.RAMP_LO)
             print(f"\n  {border}")
             print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
             print(f"  {C.GHOST}{objective}{C.RST}")
@@ -2269,7 +2274,7 @@ class CyphexEngine:
 
             # ── Print summary table ─────────────────────────────────────────────
             _SEV_COL = {
-                "Critical": C.R, "High": "\033[91m", "Medium": C.Y,
+                "Critical": C.FLAME, "High": C.R, "Medium": C.Y,
                 "Low": C.B, "Info": C.DIM,
             }
             print(f"\n  {'HOST':<18} {'HOSTNAME':<20} {'RISK':<8} PORTS")
@@ -4237,8 +4242,8 @@ class CyphexEngine:
             "POOR": C.R, "CRITICAL": C.FLAME,
         }[sc_label]
         total = crit + high + med + low
-        border = C.gradient("━" * 72, 138, 43, 226, 0, 255, 255)
-        border2 = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+        border = C.gradient("━" * 72, *C.RAMP_LO, *C.RAMP_HI)
+        border2 = C.gradient("━" * 72, *C.RAMP_HI, *C.RAMP_LO)
         print(f"\n{border}")
         print(f"  {C.NEON}✓{C.RST} {C.BOLD}{C.CYAN}CYPHEX SCAN COMPLETE{C.RST}")
         print(f"{border2}\n")

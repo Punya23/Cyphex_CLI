@@ -73,8 +73,17 @@ load_env_file()
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 
 class C:
-    R="\033[91m"; G="\033[92m"; Y="\033[93m"; B="\033[94m"
-    M="\033[95m"; CY="\033[96m"; W="\033[97m"; BOLD="\033[1m"
+    # MONO SIGNAL RED — names kept, values moved into terminal_ui.py's ramp.
+    # Severity is carried by BRIGHTNESS in one hue, not by competing colours.
+    R="\033[38;2;255;107;107m"   # bright — error / high
+    G="\033[38;2;255;59;59m"     # PRIMARY — success / engaged
+    Y="\033[38;2;214;52;71m"     # mid — warning / medium
+    B="\033[38;2;138;106;106m"   # muted — info / low
+    M="\033[38;2;255;107;107m"   # bright (legacy alias)
+    CY="\033[38;2;255;59;59m"    # PRIMARY (legacy alias)
+    W="\033[38;2;232;207;207m"   # readout — primary prose
+    BOLD="\033[1m"
+    CRIT="\033[38;2;255;176;169m" # peak — critical (brightest = most urgent)
     DIM="\033[2m"; RST="\033[0m"
 
 BANNER = f"""
@@ -396,7 +405,7 @@ async def _cmd_netmap(args):
 
     # ── Print results ──────────────────────────────────────────────────────────
     _SEV_COLORS = {
-        "Critical": C.R, "High": "\033[91m", "Medium": C.Y, "Low": C.B
+        "Critical": C.CRIT, "High": C.R, "Medium": C.Y, "Low": C.B
     }
 
     print(f"\n  {C.BOLD}{'HOST':<18} {'HOSTNAME':<22} {'OS':<16} {'RISK':<8} PORTS{C.RST}")
@@ -551,7 +560,7 @@ async def _cmd_netaudit(args):
     mapper = NetworkVulnMapper()
     vulns = await mapper.map(nmap, active_checks=True)
 
-    _SEV_COLORS = {"Critical": C.R, "High": "\033[91m", "Medium": C.Y, "Low": C.B}
+    _SEV_COLORS = {"Critical": C.CRIT, "High": C.R, "Medium": C.Y, "Low": C.B}
 
     if vulns:
         print(f"  {C.BOLD}◈ FINDINGS ({len(vulns)}){C.RST}")
