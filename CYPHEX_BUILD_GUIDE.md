@@ -96,7 +96,6 @@ CYPHEX is a **multi-agent autonomous security scanner** with an **adversarial co
 cyphex_v3/
 ├── cyphex_cli.py                  # CLI entrypoint (argparse, banner, launches engine)
 ├── cli_engine.py                  # Core 8-step pipeline (CyphexEngine class)
-├── run_cyphex.bat                 # Windows batch launcher
 │
 ├── backend/
 │   └── backend/

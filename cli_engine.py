@@ -565,8 +565,18 @@ class CyphexEngine:
                         subprocess.run(["open", "-a", "Docker"], capture_output=True)
                         time.sleep(3)
                     elif sys.platform == "win32":
-                        docker_exe = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-                        if os.path.exists(docker_exe):
+                        # A single hardcoded path missed non-default installs
+                        # (per-user %LOCALAPPDATA% installs, a non-C: drive,
+                        # Program Files (x86)) — check the common locations
+                        # before giving up on auto-start. Fails silently
+                        # either way (os.path.exists guard), same as before.
+                        _candidates = [
+                            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+                            r"C:\Program Files (x86)\Docker\Docker\Docker Desktop.exe",
+                            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Docker\Docker\Docker Desktop.exe"),
+                        ]
+                        docker_exe = next((p for p in _candidates if os.path.exists(p)), None)
+                        if docker_exe:
                             print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Docker Desktop offline — auto-starting...{C.RST}")
                             subprocess.Popen([docker_exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             time.sleep(5)
@@ -595,9 +605,21 @@ class CyphexEngine:
             if sys.platform == "darwin":
                 subprocess.run(["open", "-a", "Ollama"], capture_output=True)
             elif sys.platform == "win32":
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+                # CREATE_NO_WINDOW (0x08000000) alone hides the console but
+                # doesn't stop Ctrl+C from reaching this child — need
+                # CREATE_NEW_PROCESS_GROUP (0x00000200) too so
+                # GenerateConsoleCtrlEvent from a Ctrl+C during the scan
+                # doesn't kill the Ollama server this just launched.
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  creationflags=0x08000000 | 0x00000200)
             else:
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # start_new_session=True (== os.setsid()) takes this process
+                # out of the terminal's foreground process group — without
+                # it, Ctrl+C during the scan sends SIGINT to this freshly
+                # launched Ollama server too, defeating the point of having
+                # auto-started a persistent local model server.
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
             time.sleep(3)  # Give server a moment to bind to port
             
         try:
@@ -735,7 +757,7 @@ class CyphexEngine:
 
         if os.path.exists(os.path.join(path, "package.json")):
             try:
-                with open(os.path.join(path, "package.json")) as f:
+                with open(os.path.join(path, "package.json"), encoding="utf-8") as f:
                     pkg = json.load(f)
                 deps = {**pkg.get("dependencies",{}), **pkg.get("devDependencies",{})}
                 if "express" in deps: info["name"] = "Node.js (Express)"
@@ -1153,7 +1175,7 @@ class CyphexEngine:
             pass
 
         try:
-            with open(compose_file) as f:
+            with open(compose_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Look for port mappings like "3000:3000" or "- 3000:3000"
@@ -1174,12 +1196,12 @@ class CyphexEngine:
     def _strip_compose_version(self, compose_file):
         """Remove obsolete 'version' key from docker-compose.yml to prevent warnings."""
         try:
-            with open(compose_file, 'r') as f:
+            with open(compose_file, 'r', encoding="utf-8") as f:
                 lines = f.readlines()
             # Remove lines that start with 'version:' (top-level only)
             cleaned = [l for l in lines if not re.match(r'^version\s*:', l)]
             if len(cleaned) < len(lines):
-                with open(compose_file, 'w') as f:
+                with open(compose_file, 'w', encoding="utf-8") as f:
                     f.writelines(cleaned)
         except Exception:
             pass
@@ -1188,7 +1210,7 @@ class CyphexEngine:
         """Find services that have valid Dockerfiles or use pre-built images."""
         import re
         try:
-            with open(compose_file) as f:
+            with open(compose_file, encoding="utf-8") as f:
                 content = f.read()
 
             buildable = []
@@ -2698,7 +2720,15 @@ class CyphexEngine:
 
             # ── Session Memory Panel ──
             is_returning = prior_scans > 0 or prior_lessons > 0
-            repo_name = (getattr(self, "repo_url", "") or self.source_dir or "unknown").split("/")[-1].replace(".git", "")
+            # os.path.basename, not .split("/")[-1] — repo_url is always
+            # forward-slash (a URL) so both work there, but a local Windows
+            # scan's source_dir is backslash-separated, and split("/") finds
+            # no "/" at all in that case, so it fell back to the ENTIRE
+            # absolute path instead of just the folder name. basename()
+            # handles both separators correctly on every platform.
+            repo_name = os.path.basename(
+                (getattr(self, "repo_url", "") or self.source_dir or "unknown").rstrip("/\\")
+            ).replace(".git", "")
             session_status = "[bold green]🔄 RETURNING SESSION[/bold green] — prior context loaded" if is_returning else "[yellow]🆕 NEW SESSION[/yellow] — building context from scratch"
             
             session_info = (

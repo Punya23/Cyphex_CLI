@@ -41,6 +41,18 @@ try:
 except ImportError:
     pass
 
+
+def _clear():
+    """cls/clear, but only when stdout is a real terminal. The ~10 call
+    sites below used to fire this unconditionally — harmless interactively,
+    but it spammed escape codes into anything piped/redirected (e.g.
+    `cyphex scan ... > out.log`, or CI), and did it 10 separate times
+    instead of once. Mirrors cx.py's own _clear(), which already got this
+    right."""
+    if sys.stdout.isatty():
+        os.system("cls" if os.name == "nt" else "clear")
+
+
 def load_env_file():
     """Lightweight, standard-library-only .env file loader."""
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
@@ -172,13 +184,13 @@ def main():
 
     args = parser.parse_args()
     if not args.command:
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         parser.print_help()
         return
 
     if args.command == "onboard":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         if not args.repo and not args.path:
             print(f"{C.R}[ERR]{C.RST} Must provide either --repo or --path")
@@ -201,7 +213,7 @@ def main():
         sys.exit(0)
 
     if args.command == "doctor":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         CyphexEngine = _load_engine()
         engine = CyphexEngine()
@@ -209,7 +221,7 @@ def main():
         raise SystemExit(0 if ok else 1)
 
     if args.command == "council-doctor":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         import httpx
         from rich.console import Console
@@ -249,7 +261,7 @@ def main():
         raise SystemExit(0 if all_ok else 1)
 
     if args.command == "watch":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         print(f"  {C.BOLD}Starting CYPHEX Daemon (Auto-Healing Mode){C.RST}")
         print(f"  {C.DIM}Your app's RASP SDK will send attack telemetry here.{C.RST}")
@@ -259,7 +271,7 @@ def main():
         return
 
     if args.command == "github-hook":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         print(f"  {C.BOLD}Starting GitHub Webhook Receiver{C.RST}")
         print(f"  {C.DIM}Connect your GitHub repo's webhook to this endpoint.{C.RST}\n")
@@ -268,19 +280,19 @@ def main():
         return
 
     if args.command == "netmap":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         asyncio.run(_cmd_netmap(args))
         return
 
     if args.command == "netwatch":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         asyncio.run(_cmd_netwatch(args))
         return
 
     if args.command == "netaudit":
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         print(BANNER)
         asyncio.run(_cmd_netaudit(args))
         return
@@ -289,7 +301,7 @@ def main():
         if not args.repo and not args.path:
             print(f"{C.R}Error: Provide --repo or --path{C.RST}")
             return
-        os.system("cls" if os.name == "nt" else "clear")
+        _clear()
         # Engine prints its own full banner — don't double-print here
         CyphexEngine = _load_engine()
         engine = CyphexEngine()

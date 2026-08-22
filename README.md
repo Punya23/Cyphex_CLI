@@ -96,6 +96,8 @@ Run `cyphex doctor` first — it checks binaries, Ollama, pulled models, and har
 | **numpy / scikit-learn** | Optional | Isolation-Forest layer of the immune system; falls back to heuristics if missing |
 | **tsc** | Optional | TypeScript syntax validation for `.ts`/`.tsx` patches |
 
+**On Windows:** `pip install -e .` and `cyphex`/`cyphex doctor`/`cyphex scan` work natively in PowerShell or cmd.exe — no WSL required for the CLI itself. Two things do need it: `scripts/*.sh` (convenience scripts — WSL or Git Bash only, no native `.ps1`/`.cmd` equivalent yet) and Semgrep (its PyPI package doesn't support native Windows; `cyphex setup`/`cyphex doctor` fall back to checking for it inside WSL). Manually creating a venv instead of `pip install -e .` directly? Activate with `.venv\Scripts\activate`, not `source .venv/bin/activate`.
+
 ### Hardware tiers
 
 CYPHEX detects usable VRAM and picks the largest models that fit — small models produce poor patches.
