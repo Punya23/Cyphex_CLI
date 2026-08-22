@@ -10,7 +10,7 @@ CYPHEX is a local-first autonomous security scanner. It deploys a target app in 
 
 ```bash
 pip install -e ".[dev]"     # extras: .[memory] .[reasoning] .[cloud]
-python -m pytest tests/ -q  # 320 tests, ~17s, no network needed
+python -m pytest tests/ -q  # 388 tests, ~50s, no network needed
 ```
 
 The default pytest config deselects `-m integration` (those need a live Ollama). Do not remove that marker to "fix" a slow suite.
@@ -23,6 +23,10 @@ The default pytest config deselects `-m integration` (those need a live Ollama).
 | `cx.py` | Interactive workspace (REPL) + slash commands. The default UX (`cyphex` with no args). |
 | `cyphex_cli.py` | argparse driver behind `cyphex scan` etc. |
 | `cyphex/cli.py` | Installed console-script entry point (`cyphex = "cyphex.cli:main"`). |
+| `trace_deck.py` | Live per-phase trace deck + end-of-scan summary. |
+| `nl_router.py` | Plain English → slash command, guardrailed, local Ollama. |
+| `deck_input.py` | Raw-mode single-line editor behind the REPL's boxed input field. |
+| `mascot*.py` | Tiered terminal pixel-art mascot (8 modules). Always imported defensively. |
 | `terminal_ui.py` | All Rich rendering. Every `render_*` function. |
 | `scoring.py` | **Sole** source of truth for the 0-100 posture score. |
 | `backend/patch/` | Patch generation, application, and the Verify Gate. |
@@ -32,7 +36,7 @@ The default pytest config deselects `-m integration` (those need a live Ollama).
 | `backend/rag/` | Code indexing, knowledge tree, cross-project memory. |
 | `backend/network/` | Network discovery and behavioural flow monitoring. |
 | `backend/platform_compat.py` | Cross-platform binary/shell resolution. |
-| `tests/` | 320 tests. |
+| `tests/` | 388 tests (389 collected, 1 `integration` deselected). See [tests/README.md](tests/README.md). |
 
 ## Invariants — do not break these
 
@@ -57,6 +61,9 @@ A bare `"tsc"` or `"npm"` is a `.cmd` shim on Windows that non-shell `subprocess
 **7. Don't gate a fix on `sys.platform == "win32"` when the real condition is the encoding.**
 UTF-8 forcing must key off `sys.stdout.encoding`, not the platform — a POSIX box with `LANG=C` has the same failure mode.
 
+**8. `cyphex verify|status|benchmark` are intercepted BEFORE argparse.**
+`cyphex/cli.py::main()` routes these three to `_run_panel()` on `sys.argv[1]` before `parse_args()` runs, because argparse cannot forward an option-looking tail (`--ci`, `--selftest`, `--watch`) through a subparser — even `nargs=REMAINDER` lets the parent parser claim a leading `--flag` and die with "unrecognized arguments". Their subparsers exist only so `cyphex --help` lists them. `_cmd_verify`'s int return under `--ci` **must** become the process exit code or the CI gate is decorative.
+
 ## Where to change what
 
 | Task | Start here |
@@ -65,7 +72,7 @@ UTF-8 forcing must key off `sys.stdout.encoding`, not the platform — a POSIX b
 | Change what counts as a verified fix | `backend/patch/verifier.py` — then update `tests/test_verifier.py` |
 | Add a maintainer-facing metric | `backend/patch/verify_health.py` → `terminal_ui.py::render_verify_health()` |
 | Add a telemetry event | `self._emit("name", **fields)` in `cli_engine.py`; consume in `backend/observability/health.py` |
-| Add a slash command | `cx.py`: `_cmd_X()` + `COMMANDS` list + `_handle()` case + `main()` argv branch + both help texts |
+| Add a slash command | `cx.py`: `_cmd_X()` + `COMMANDS` list + `_handle()` case + `main()` argv branch + both help texts. If it should also be a `cyphex <cmd>`, add it to `cyphex/cli.py` — see invariant 8 |
 | Add a Rich panel | `terminal_ui.py` — follow `render_verify_health()`'s shape; use `_box(c)` |
 | Change the score | `scoring.py` only |
 | Add a patch template | `backend/patch/templates.py` |
@@ -89,4 +96,8 @@ UTF-8 forcing must key off `sys.stdout.encoding`, not the platform — a POSIX b
 
 - [docs/VERIFICATION_MAINTAINABILITY_PANEL.md](docs/VERIFICATION_MAINTAINABILITY_PANEL.md) — the verification surface in depth
 - [CYPHEX_PRD.md](CYPHEX_PRD.md) — living specification, known gaps, roadmap
-- [llms.txt](llms.txt) — condensed project summary
+- [llms.txt](llms.txt) — condensed project summary ([llmstxt.org](https://llmstxt.org))
+- [llms-full.txt](llms-full.txt) — self-contained brief: enough to answer most questions without opening another file
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, PR checklist, the invariants above restated for humans
+- [SECURITY.md](SECURITY.md) — CYPHEX's own threat model and disclosure policy
+- Per-directory READMEs: [`cyphex/`](cyphex/README.md) · [`backend/`](backend/README.md) · [`tests/`](tests/README.md) · [`docs/`](docs/README.md) · [`benchmarks/`](benchmarks/README.md) · [`sdks/node/`](sdks/node/README.md) · [`scripts/`](scripts/README.md) · [`assets/`](assets/README.md)
