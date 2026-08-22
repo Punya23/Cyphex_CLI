@@ -2029,8 +2029,15 @@ def render_observability(report, console=None):
     last = report.get("last_scan")
     errors = report.get("recent_errors") or []
     has_history = report["event_logs_found"] > 0
-    healthy = has_history and last and last["completed"] and not errors
-    v_col = PHOS if healthy else (WARN if (has_history and (not last or not last["completed"] or errors)) else LABEL)
+    # A waypoint that failed or degraded is a first-class unhealthy signal.
+    # Without this the lamp read SYSTEM NOMINAL on a scan whose patch-verify
+    # waypoint failed, because `recent_errors` only collects *_error/*_timeout
+    # events — a rolled-back patch or a leaky genome generation is neither,
+    # yet is exactly what a maintainer opened this panel to find.
+    bad_waypoints = [w for w in ((last or {}).get("trace") or [])
+                     if w.get("status") in ("fail", "warn")]
+    healthy = has_history and last and last["completed"] and not errors and not bad_waypoints
+    v_col = PHOS if healthy else (WARN if has_history else LABEL)
     v_lamp = "phosphor" if healthy else ("warning" if has_history else "reference")
 
     body = Text()
@@ -2080,6 +2087,37 @@ def render_observability(report, console=None):
             body.append("    patch verdicts     ", style=LABEL)
             body.append("  ".join(f"{k} {v}" for k, v in last["patch_verdicts"].items()), style=READOUT)
             body.append("\n")
+
+        # ── waypoint trace ──
+        # Reconstructed from the durable event log, so the goal/step tree
+        # of a finished scan is reviewable long after its terminal output
+        # scrolled away. Each waypoint shows its goal; a waypoint that
+        # failed or degraded also lists the steps, since those are the ones
+        # a maintainer is here to read.
+        trace = last.get("trace") or []
+        if trace:
+            body.append("\n    waypoint trace\n", style=LABEL)
+            _tmark = {"ok": ("✓", PHOS), "warn": ("▲", CAUT),
+                      "fail": ("✗", WARN), "skip": ("·", LABEL),
+                      "running": ("◌", REF)}
+            for wp in trace:
+                mark, mstyle = _tmark.get(wp.get("status", "ok"), ("·", LABEL))
+                body.append(f"      {mark} ", style=f"bold {mstyle}")
+                body.append(f"{str(wp.get('num', '?')):<5}", style=TGT)
+                body.append(f"{str(wp.get('title', ''))[:34]:<36}", style=READOUT)
+                dur = wp.get("duration_s")
+                body.append(f"{dur:>6.1f}s\n" if isinstance(dur, (int, float)) else "\n",
+                            style=LABEL)
+                if wp.get("goal"):
+                    body.append(f"          goal · {str(wp['goal'])[:50]}\n", style=LABEL)
+                if wp.get("status") in ("fail", "warn"):
+                    for st in wp.get("steps", []):
+                        if st.get("status") in ("ok", "skip"):
+                            continue
+                        smark, sstyle = _tmark.get(st.get("status", "ok"), ("·", LABEL))
+                        body.append(f"          {smark} ", style=sstyle)
+                        body.append(f"{str(st.get('label', ''))[:20]:<22}", style=READOUT)
+                        body.append(f"{str(st.get('detail', ''))[:38]}\n", style=LABEL)
     else:
         body.append("    no scan has been instrumented yet\n", style=LABEL)
 

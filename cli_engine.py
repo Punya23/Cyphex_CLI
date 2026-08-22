@@ -79,6 +79,28 @@ except Exception:
     def _obs_emit(*a, **kw):
         pass
 
+# Waypoint tracing. Recording is independent of rendering: a scan with no
+# TTY records the same trace an interactive one does, so /status can replay
+# it afterwards. NullTrace keeps every call site guard-free if the import
+# ever fails.
+try:
+    from backend.observability.trace import (
+        TraceRecorder as _TraceRecorder, NullTrace as _NullTrace,
+        OK as _T_OK, WARN as _T_WARN, FAIL as _T_FAIL, SKIP as _T_SKIP,
+    )
+    _TRACE_AVAILABLE = True
+except Exception:
+    _TRACE_AVAILABLE = False
+    _T_OK, _T_WARN, _T_FAIL, _T_SKIP = "ok", "warn", "fail", "skip"
+
+    class _NullTrace(object):
+        def __getattr__(self, _name):
+            def _noop(*a, **kw):
+                return None
+            return _noop
+
+    _TraceRecorder = None
+
 # Council system imports
 sys.path.insert(0, os.path.dirname(__file__))
 try:
@@ -187,6 +209,11 @@ os.makedirs(WORK_DIR, exist_ok=True)
 class CyphexEngine:
     def __init__(self):
         self.scan_id = f"cli_{uuid.uuid4().hex[:8]}"
+        # Replaced with a real recorder at the top of run(), once scan_id
+        # has a sandbox directory to write into. NullTrace until then so
+        # any early call site is still safe.
+        self.trace = _NullTrace()
+        self._deck = None
         self.source_dir = None
         self.sandbox_info = None
         self.context = None
@@ -211,6 +238,11 @@ class CyphexEngine:
                   network_scan=False, use_deepagents=False, verbose: bool = False):
         self.start_ts = time.time()
         self._emit("scan_start", repo_url=repo_url, local_path=local_path, judge_mode=judge_mode or judge)
+        if _TRACE_AVAILABLE:
+            try:
+                self.trace = _TraceRecorder(os.path.join(WORK_DIR, self.scan_id), self.scan_id)
+            except Exception:
+                self.trace = _NullTrace()
         self.repo_url = repo_url
         self.local_path = local_path
         self.judge_mode = judge_mode or judge
@@ -467,8 +499,38 @@ class CyphexEngine:
         except Exception:
             pass
 
+    def _trace_begin(self, num, title):
+        """Open a trace waypoint for this phase.
+
+        The genome build is flagged `highlight` because it is the one phase
+        whose internals evolve measurably while you watch (per-generation
+        block rate climbing as the blue team retrains) rather than being a
+        single long opaque wait — so the deck surfaces its interior live
+        instead of summarising it after the fact.
+        """
+        try:
+            key = str(num).split("/")[0].strip()
+            self.trace.begin_waypoint(num, title, highlight=(key == "5"))
+        except Exception:
+            return
+        # Paint the compact deck under the phase banner: small buddy, the
+        # waypoint's goal, and the steps as they land. Rendered once per
+        # waypoint rather than held open as a live region, because the
+        # pipeline prints continuously between waypoints and a persistent
+        # Live area would fight it for the same rows.
+        try:
+            import trace_deck
+            if self._deck is None:
+                self._deck = trace_deck.TraceDeck(self.trace, animate=True)
+                self._deck.tty = False  # static repaint; no Live takeover
+            self._deck._frame_idx += 1
+            console.print(self._deck._renderable())
+        except Exception:
+            pass
+
     def _step(self, num, title):
         self._emit("phase_start", num=str(num), title=str(title))
+        self._trace_begin(num, title)
         elapsed = time.time() - self.start_ts if self.start_ts else 0.0
         mode = "JUDGE" if self.judge_mode else "SCAN"
         step_num, step_total = num.split("/")
@@ -755,6 +817,8 @@ class CyphexEngine:
 
         # Detect framework
         fw = self._detect_framework(dest)
+        self.trace.note("detect framework", f"{fw['name']} · {fw['file_count']} files", _T_OK,
+                        {"framework": fw["name"], "files": fw["file_count"]})
         print(f"  {C.GHOST}Framework{C.RST}   {C.CYAN}{fw['name']}{C.RST}")
         print(f"  {C.GHOST}Entry{C.RST}       {C.SLATE}{fw['entry'] or 'auto-detect'}{C.RST}")
         print(f"  {C.GHOST}Files{C.RST}       {C.SLATE}{fw['file_count']} code files{C.RST}")
@@ -881,6 +945,8 @@ class CyphexEngine:
                                 self._vprint(f"       {C.GHOST}{line.strip()[:100]}{C.RST}")
                                 break  # One per pattern per file
 
+        self.trace.note("scan source files", f"{scanned} files · {len(vulns)} issues", _T_OK,
+                        {"files_scanned": scanned, "issues": len(vulns)})
         print(f"\n  {C.CYAN}SAST:{C.RST} {C.SLATE}{scanned} files scanned, {C.BOLD}{C.CYAN}{len(vulns)} issues{C.RST}")
         return vulns
 
@@ -1367,6 +1433,8 @@ class CyphexEngine:
                     self._vprint(f"  {C.Y}[Crawler][FORM]{C.RST} {method.upper()} {full} inputs={inputs}")
 
             context.all_forms = forms_found
+            self.trace.note("crawl surface", f"{len(context.all_endpoints)} pages · {len(forms_found)} forms", _T_OK,
+                            {"pages": len(context.all_endpoints), "forms": len(forms_found)})
             print(f"\n  {C.G}[Crawler][OK]{C.RST} pages={len(context.all_endpoints)} forms={len(forms_found)}")
 
             # ── API Endpoint Probe (for SPAs with no HTML forms) ──────────
@@ -1469,6 +1537,8 @@ class CyphexEngine:
                     else:
                         self._vprint(f"  {C.DIM}[API] {method} {path} => {resp.status_code}{C.RST}")
                 context.all_forms = forms_found
+                self.trace.note("discover APIs", f"{len(api_endpoints_found)} live endpoints", _T_OK,
+                                {"live_apis": len(api_endpoints_found)})
                 print(f"\n  {C.G}[API Discovery][OK]{C.RST} live_apis={len(api_endpoints_found)} synthetic_forms={len(forms_found)}")
 
                 # ── Prune dead routes ──────────────────────────────────────
@@ -1594,6 +1664,9 @@ class CyphexEngine:
                             timeout=cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S,
                         )
                         self._emit("deepagent_result", agent=agent.__class__.__name__, vulns_found=len(res.vulns))
+                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
+                                        f"{len(res.vulns)} confirmed" if res.vulns else "clean",
+                                        _T_OK, {"vulns": len(res.vulns)})
                         context.confirmed_vulns.extend(res.vulns)
                         if res.vulns:
                             print(
@@ -1605,6 +1678,8 @@ class CyphexEngine:
                             print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
                     except (asyncio.TimeoutError, TimeoutError):
                         self._emit("deepagent_timeout", agent=agent.__class__.__name__)
+                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
+                                        "timed out", _T_WARN)
                         print(
                             f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} timed out after "
                             f"{cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S:.0f}s (oracle-guided "
@@ -1613,6 +1688,8 @@ class CyphexEngine:
                         continue
                     except Exception as e:
                         self._emit("deepagent_error", agent=agent.__class__.__name__, error=str(e)[:200])
+                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
+                                        f"error: {str(e)[:40]}", _T_FAIL)
                         print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
                         continue
 
@@ -2127,6 +2204,8 @@ class CyphexEngine:
             except ImportError:
                 pass  # cyphex package not installed — skip DAST tools
 
+            self.trace.note("confirm exploitable", f"{len(context.confirmed_vulns)} confirmed", _T_OK,
+                            {"endpoints": len(context.all_endpoints), "confirmed": len(context.confirmed_vulns)})
             print(f"\n  {C.G}[SCAN][OK]{C.RST} endpoints={len(context.all_endpoints)} forms={len(forms_found)} vulns={len(context.confirmed_vulns)}")
 
         return context
@@ -2241,12 +2320,20 @@ class CyphexEngine:
         # ── Try loading existing genome for this target ──
         target_hash = hashlib.md5(context.target_url.encode()).hexdigest()[:12]
         genome_path = os.path.join(cyphex_config.GENOME_STORAGE_DIR, f"genome_{target_hash}")
+        _loaded_prior = False
         if os.path.exists(genome_path + ".pkl"):
             try:
                 genome = BehavioralGenome.load(genome_path)
+                _loaded_prior = True
                 print(f"  {C.G}[OK]{C.RST} Loaded existing genome for this target (continuing evolution)")
             except Exception:
                 genome = BehavioralGenome()
+        self.trace.note(
+            "genome source",
+            "resumed from prior scan" if _loaded_prior else "fresh genome",
+            _T_OK,
+            {"resumed": _loaded_prior},
+        )
 
         # Only build when the genome has no profiles yet. A freshly loaded genome
         # already carries its profiles/models/attack-history, so re-building here
@@ -2255,10 +2342,69 @@ class CyphexEngine:
         if not genome.endpoint_profiles:
             genome.build_from_scan(context)
         print(f"  {C.G}[OK]{C.RST} Genome built: {len(genome.endpoint_profiles)} endpoints")
+        self.trace.note("profile endpoints", f"{len(genome.endpoint_profiles)} endpoints",
+                        _T_OK, {"endpoints": len(genome.endpoint_profiles)})
 
         controller = EvolutionController()
         controller.genome = genome  # Use loaded/built genome
-        results = await controller.run_evolution(context, generations=generations, payloads_per_gen=30)
+
+        # Per-generation trace. run_evolution() has always accepted this
+        # callback; nothing passed one, so the adversarial loop — the single
+        # most interesting thing CYPHEX does — ran as an opaque wait with a
+        # few emoji prints. Each generation now becomes a traced step
+        # carrying the real measured numbers, so the climb from a leaky
+        # first generation to a converged one is visible live AND survives
+        # into the durable event log for /status.
+        async def _on_generation(result):
+            try:
+                gen = getattr(result, "generation", 0)
+                blocked = getattr(result, "payloads_blocked", 0)
+                total = getattr(result, "payloads_generated", 0)
+                rate = getattr(result, "block_rate", 0.0) or 0.0
+                bypassed = getattr(result, "payloads_bypassed", 0)
+                tactics = list(getattr(result, "red_mutations_applied", []) or [])[:3]
+                learned = list(getattr(result, "new_features_learned", []) or [])
+                # A generation that blocks everything is converged; one that
+                # leaks is the interesting case a maintainer wants flagged.
+                status = _T_OK if rate >= 0.99 else (_T_WARN if rate < 0.75 else _T_OK)
+                detail = f"blocked {blocked}/{total} · {rate * 100:.1f}%"
+                if tactics:
+                    detail += f" · red: {', '.join(tactics)}"
+                self.trace.note(
+                    f"generation {gen}", detail, status,
+                    {
+                        "generation": gen,
+                        "block_rate": round(float(rate), 4),
+                        "blocked": blocked,
+                        "bypassed": bypassed,
+                        "payloads": total,
+                        "red_tactics": tactics,
+                        "blue_retrained": len(learned),
+                        "duration_s": round(float(getattr(result, "duration_seconds", 0.0) or 0.0), 2),
+                    },
+                )
+            except Exception:
+                pass
+
+        results = await controller.run_evolution(
+            context, generations=generations, payloads_per_gen=30,
+            on_generation_complete=_on_generation,
+        )
+
+        try:
+            rates = [getattr(r, "block_rate", 0.0) or 0.0 for r in (results or [])]
+            if rates:
+                converged = next((i for i, r in enumerate(rates) if r >= 0.99), None)
+                self.trace.note(
+                    "co-evolution",
+                    (f"converged at generation {converged}" if converged is not None
+                     else f"final block rate {rates[-1] * 100:.1f}%"),
+                    _T_OK if rates[-1] >= 0.9 else _T_WARN,
+                    {"block_rates": [round(float(r), 4) for r in rates],
+                     "converged_at": converged, "generations": len(rates)},
+                )
+        except Exception:
+            pass
 
         # ── Save genome for next scan ──
         try:
@@ -3418,6 +3564,17 @@ class CyphexEngine:
                 )
                 verify_verdict = vr.verdict
                 self._emit("patch_verdict", cwe=p["cwe"], file=p["rel_path"], verdict=vr.verdict)
+                # The Verify Gate verdict is the single most important
+                # traceable event in the pipeline — it is what decides
+                # whether a "fix" counts. Status maps so a maintainer
+                # scanning the trace sees rollbacks and unverifiables
+                # without reading detail text.
+                self.trace.note(
+                    f"verify {p['cwe']}",
+                    f"{vr.verdict} · {os.path.basename(p['rel_path'])}",
+                    {"PASS": _T_OK, "FAIL": _T_FAIL}.get(vr.verdict, _T_WARN),
+                    {"cwe": p["cwe"], "file": p["rel_path"], "verdict": vr.verdict},
+                )
 
                 verdict_color = "green" if vr.verdict == "PASS" else "yellow" if vr.verdict == "UNVERIFIABLE" else "red"
                 verdict_icon = "✅" if vr.verdict == "PASS" else "⚠️" if vr.verdict == "UNVERIFIABLE" else "❌"
@@ -3975,6 +4132,16 @@ class CyphexEngine:
 
     def _final_banner(self):
         self._emit("scan_end")
+        # Close the final waypoint and print the full waypoint trace before
+        # the score banner, so the run ends with "here is everything that
+        # happened and how long each part took" rather than only a number.
+        try:
+            self.trace.end_waypoint()
+            if getattr(self.trace, "waypoints", None):
+                import trace_deck
+                trace_deck.render_trace_summary(self.trace)
+        except Exception:
+            pass
         # Cleanup Docker Compose if used
         if hasattr(self, '_docker_compose_dir') and self._docker_compose_dir:
             try:

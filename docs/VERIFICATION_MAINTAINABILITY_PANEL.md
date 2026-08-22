@@ -375,6 +375,98 @@ Phases emit no end marker — durations are derived from consecutive `phase_star
 
 ---
 
+## 7b. Waypoint tracing — what the pipeline was *trying* to do
+
+`/status` answers "what happened". The waypoint trace answers the question
+underneath it: **"what was it trying to achieve at each step, and how far
+did it get?"**
+
+Every phase now opens a traced waypoint carrying an explicit **goal** — a
+plain sentence naming what that phase is trying to establish — and records
+its sub-operations underneath:
+
+```
+  ✓ 2/9  STATIC CODE ANALYSIS                     3.7s
+        goal · Find candidate weaknesses in the code without running it
+        ✓ detect framework      Node.js (Express) · 42 files      0.1s
+        ✓ scan source files     42 files · 16 issues              3.4s
+  ▲ 5/9  IMMUNE SYSTEM - BUILD GENOME             8.1s
+        goal · Learn this app's normal behaviour well enough to spot an attack
+        ✓ genome source         resumed from prior scan           0.0s
+        ▲ generation 0          blocked 23/30 · 76.7% · red: raw  0.3s
+        ✓ generation 1          blocked 20/20 · 100.0%            0.2s
+        ✓ co-evolution          converged at generation 1         0.5s
+```
+
+The goal line is what makes this a trace of *intent* rather than a progress
+bar: a reader who has never opened the codebase can tell what was being
+attempted, not just how long it took.
+
+### The buddy is bound to the trace, not decorative
+
+The mascot renders at 8 columns *inside* the trace box, next to the thing
+it is reacting to. Its animation is selected by waypoint (`uploading` while
+fetching source, `searching` during scans, `thinking` during the genome
+build, `working` while patching, `success`/`error` on outcome), and its
+frame advances on real trace transitions rather than a decorative timer —
+so it visibly works harder when the pipeline is doing more. A glance at the
+buddy tells you what the text says.
+
+The deck composes mascot rows directly from `mascot_anim` + the subcell
+backend rather than going through `mascot.py`'s terminal-owning session, so
+it nests inside a bordered box without competing for terminal rows.
+
+### The genome build is highlighted
+
+`EvolutionController.run_evolution()` had always accepted an
+`on_generation_complete` callback, and nothing ever passed one — so the
+adversarial co-evolution loop, the single most interesting thing CYPHEX
+does, ran as an opaque wait behind a few emoji prints. Each generation is
+now a traced step carrying the real measured numbers (block rate, blocked
+/ bypassed counts, the red team's mutation tactics, whether the blue team
+retrained), so the climb from a leaky first generation to a converged one
+is visible live *and* survives into the event log. A generation that blocks
+under 75% is marked `warn` rather than passing silently.
+
+### Status propagation is honest
+
+A waypoint is **as bad as its worst step** — one `FAIL` step marks the
+whole waypoint failed, and `FAIL` outranks `WARN`. A step left open when a
+phase ends is force-closed rather than left spinning, because a stuck
+spinner in a finished trace is a lie.
+
+This feeds the `/status` lamp: a scan whose patch-verify waypoint failed
+now reads `SYSTEM DEGRADED`, where previously it read `SYSTEM NOMINAL`
+because `recent_errors` only collected `*_error`/`*_timeout` events — a
+rolled-back patch is neither, yet is exactly what a maintainer opened the
+panel to find.
+
+### Recording is decoupled from rendering
+
+| | |
+|---|---|
+| **Recorder** | `backend/observability/trace.py` — the single source of truth |
+| **Live view** | `trace_deck.py` — compact box, small mascot, one *view* |
+| **Post-hoc view** | `/status` — reconstructs the tree from the event log |
+
+A scan running in CI with no TTY records exactly the same trace as an
+interactive one. Nothing in the recorder imports a renderer, and nothing in
+it requires a terminal — which is the whole difference between
+traceability and terminal scrollback.
+
+Degradation is three-level and verified: animated mascot beside the trace
+(TTY + Pillow) → text-only box (no mascot assets) → one static line per
+completed step (no TTY, e.g. CI logs).
+
+### Failure safety
+
+Tracing must never break the scan it observes. `emit()` cannot raise; a
+listener that throws is dropped rather than propagated; an unknown status
+is coerced rather than trusted; a step opened with no active waypoint is a
+no-op. Covered by `tests/test_trace.py` (17 tests).
+
+---
+
 ## 8. CI integration
 
 `--ci` turns the panel into a build gate:
