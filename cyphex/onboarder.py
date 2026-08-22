@@ -18,13 +18,13 @@ import time
 class C:
     # MONO SIGNAL RED — names kept, values moved into terminal_ui.py's ramp.
     # Severity is carried by BRIGHTNESS in one hue, not by competing colours.
-    R="\033[38;2;255;107;107m"   # bright — error / high
-    G="\033[38;2;255;59;59m"     # PRIMARY — success / engaged
-    Y="\033[38;2;214;52;71m"     # mid — warning / medium
-    B="\033[38;2;138;106;106m"   # muted — info / low
-    M="\033[38;2;255;107;107m"   # bright (legacy alias)
-    CY="\033[38;2;255;59;59m"    # PRIMARY (legacy alias)
-    W="\033[38;2;232;207;207m"   # readout — primary prose
+    R="\033[38;2;225;142;145m"   # bright — error / high
+    G="\033[38;2;217;94;98m"     # PRIMARY — success / engaged
+    Y="\033[38;2;193;78;91m"     # mid — warning / medium
+    B="\033[38;2;142;113;116m"   # muted — info / low
+    M="\033[38;2;225;142;145m"   # bright (legacy alias)
+    CY="\033[38;2;217;94;98m"    # PRIMARY (legacy alias)
+    W="\033[38;2;225;208;210m"   # readout — primary prose
     BOLD="\033[1m"
     DIM="\033[2m"; RST="\033[0m"
 

@@ -137,8 +137,8 @@ except ImportError:
     # terminal_ui/rich can't be imported. Same convention cx.py already uses
     # for its own plain-ANSI fallback palette — keep these hex values in sync
     # with terminal_ui.py by hand if that ramp ever changes.
-    PHOS, PHOS_DIM, REF = "#ff3b3b", "#7a1010", "#ff6b6b"
-    CAUT, WARN_HOT, APEX, LABEL = "#d63447", "#ffb0a9", "#ffe0dc", "#8a6a6a"
+    PHOS, PHOS_DIM, REF = "#d95e62", "#6d2c31", "#e18e91"
+    CAUT, WARN_HOT, APEX, LABEL = "#c14e5b", "#eabcb8", "#f4e4e1", "#8e7174"
 
     def _hex_fg(hexcolor):
         r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))

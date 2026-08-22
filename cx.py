@@ -274,8 +274,8 @@ def _tc(hex_):
     return f"\033[38;2;{r};{g};{b}m"
 
 class C:
-    CYAN   = _tc("#FF3B3B")   # PRIMARY red — wordmark / accents / active
-    NEON   = _tc("#FF6B6B")   # bright red — command names / high emphasis
+    CYAN   = _tc("#D95E62")   # PRIMARY red — wordmark / accents / active
+    NEON   = _tc("#E18E91")   # bright red — command names / high emphasis
     # Alert channel. Both marks are BOLD, which the rest of the palette is
     # not, because this path has none of the structure Rich gives the normal
     # one — no panels, no rules, no styled headings. A bare ⚠ or ✗ sits in a
@@ -286,11 +286,11 @@ class C:
     # alone cannot separate it there either: WARN and REF are the same value, so
     # without the weight an error renders identically to ordinary high-emphasis
     # text (which is exactly what this fallback did before).
-    RED    = C_BOLD + _tc("#FFE0DC")  # APEX — error mark, peak of the ramp
-    YEL    = C_BOLD + _tc("#FFB0A9")  # WARN_HOT — warning mark, one rung below
-    BLUE   = _tc("#FF3B3B")   # PRIMARY red
-    GREY   = _tc("#8A6A6A")   # muted red-grey — captions / timestamps
-    MAG    = _tc("#FF6B6B")   # bright red (legacy alias)
+    RED    = C_BOLD + _tc("#F4E4E1")  # APEX — error mark, peak of the ramp
+    YEL    = C_BOLD + _tc("#EABCB8")  # WARN_HOT — warning mark, one rung below
+    BLUE   = _tc("#D95E62")   # PRIMARY red
+    GREY   = _tc("#8E7174")   # muted red-grey — captions / timestamps
+    MAG    = _tc("#E18E91")   # bright red (legacy alias)
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     RST    = "\033[0m"

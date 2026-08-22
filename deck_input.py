@@ -97,9 +97,9 @@ _DELIMS = " \t\n"            # == readline.set_completer_delims() in cx.py
 # Palette fallbacks — only reachable if terminal_ui vanished, in which case
 # supported() is already False and we never paint. Kept so the module is
 # importable and unit-testable on its own.
-_PHOS_DIM = "#7a1010"
-_LABEL    = "#8a6a6a"
-_READOUT  = "#e8cfcf"
+_PHOS_DIM = "#6d2c31"
+_LABEL    = "#8e7174"
+_READOUT  = "#e1d0d2"
 
 
 def _pal(name, default):

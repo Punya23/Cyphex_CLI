@@ -30,7 +30,11 @@ from rich.text import Text
 from rich.live import Live
 from rich.box import ROUNDED, DOUBLE
 
-console = Console()
+try:                      # drag legacy [green]/[red] markup onto the ramp
+    from terminal_ui import themed_console as _themed_console
+except Exception:         # terminal_ui not importable in this context
+    def _themed_console(**kw): return Console(**kw)
+console = _themed_console()
 
 # Security posture scoring — zero-dependency module, always importable
 # regardless of whether the rich-based SOC UI below is available. This is
@@ -168,31 +172,31 @@ class C:
     ULINE  = "\033[4m"
     # ── MONO SIGNAL RED — names kept, values mirror terminal_ui.py's ramp ──
     # One hue; severity/hierarchy carried by BRIGHTNESS, never by a second hue.
-    R  = "\033[38;2;255;107;107m"   # bright — error / high
-    G  = "\033[38;2;255;59;59m"     # PRIMARY — success / engaged
-    Y  = "\033[38;2;214;52;71m"     # mid — warning / medium
-    B  = "\033[38;2;138;106;106m"   # muted — info / low
-    M  = "\033[38;2;255;107;107m"   # bright (legacy alias)
-    CY = "\033[38;2;255;59;59m"     # PRIMARY (legacy alias)
-    W  = "\033[38;2;232;207;207m"   # readout — primary prose
+    R  = "\033[38;2;225;142;145m"   # bright — error / high
+    G  = "\033[38;2;217;94;98m"     # PRIMARY — success / engaged
+    Y  = "\033[38;2;193;78;91m"     # mid — warning / medium
+    B  = "\033[38;2;142;113;116m"   # muted — info / low
+    M  = "\033[38;2;225;142;145m"   # bright (legacy alias)
+    CY = "\033[38;2;217;94;98m"     # PRIMARY (legacy alias)
+    W  = "\033[38;2;225;208;210m"   # readout — primary prose
     # ── True-color ramp ──
-    CYAN   = "\033[38;2;255;59;59m"      # PRIMARY — wordmark / structure
-    CYAN2  = "\033[38;2;214;52;71m"      # mid — caution / secondary
-    PURPLE = "\033[38;2;122;16;16m"      # dim — borders, rails, low emphasis
-    PURP2  = "\033[38;2;255;107;107m"    # bright — high emphasis / active
-    NEON   = "\033[38;2;255;59;59m"      # PRIMARY — success
-    FLAME  = "\033[38;2;255;176;169m"    # peak — critical (brightest = urgent)
-    GHOST  = "\033[38;2;138;106;106m"    # muted — captions / dim text
-    SLATE  = "\033[38;2;232;207;207m"    # readout — secondary prose
+    CYAN   = "\033[38;2;217;94;98m"      # PRIMARY — wordmark / structure
+    CYAN2  = "\033[38;2;193;78;91m"      # mid — caution / secondary
+    PURPLE = "\033[38;2;109;44;49m"      # dim — borders, rails, low emphasis
+    PURP2  = "\033[38;2;225;142;145m"    # bright — high emphasis / active
+    NEON   = "\033[38;2;217;94;98m"      # PRIMARY — success
+    FLAME  = "\033[38;2;234;188;184m"    # peak — critical (brightest = urgent)
+    GHOST  = "\033[38;2;142;113;116m"    # muted — captions / dim text
+    SLATE  = "\033[38;2;225;208;210m"    # readout — secondary prose
     # Backgrounds
-    BG_DARK   = "\033[48;2;10;7;7m"      # VOID — negative space
-    BG_PURPLE = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
-    BG_CYAN   = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
-    BG_RED    = "\033[48;2;26;14;14m"    # PANEL — raised panel fill
+    BG_DARK   = "\033[48;2;10;8;9m"      # VOID — negative space
+    BG_PURPLE = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
+    BG_CYAN   = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
+    BG_RED    = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
     # Gradient endpoints for the brand rules/dividers below. Kept as RGB
     # triples (not escapes) because C.gradient() interpolates on the numbers.
-    RAMP_HI = (255, 59, 59)               # PRIMARY
-    RAMP_LO = (122, 16, 16)               # dim
+    RAMP_HI = (217, 94, 98)               # PRIMARY
+    RAMP_LO = (109, 44, 49)               # dim
 
     @staticmethod
     def gradient(text, r1, g1, b1, r2, g2, b2):
@@ -334,7 +338,7 @@ class CyphexEngine:
                             confirmed=False,
                             cwe=ef.cwe,
                         ))
-                        c = "red" if sev == "Critical" else "magenta" if sev == "High" else "yellow"
+                        c = "#eabcb8" if sev == "Critical" else "#e18e91" if sev == "High" else "#c14e5b"
                         console.print(f"  [[{c}]{sev}[/{c}]] {ef.name} ({ef.cwe})")
                         console.print(f"       {ef.file_path}:{ef.line_number}")
                         console.print(f"       [dim]{ef.code_snippet[:100]}[/dim]")
@@ -1361,7 +1365,7 @@ class CyphexEngine:
                 return
             border = C.gradient("─" * 68, *C.RAMP_HI, *C.RAMP_LO)
             print(f"\n  {border}")
-            print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
+            print(f"  {C.PURPLE}▸{C.RST} {C.CYAN2}[{agent_id}]{C.RST} {C.BOLD}{C.CYAN}{name}{C.RST}")
             print(f"  {C.GHOST}{objective}{C.RST}")
             print(f"  {border}")
 

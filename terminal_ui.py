@@ -2,15 +2,17 @@
 CYPHEX Terminal UI — MONO SIGNAL RED
 ════════════════════════════════════════════════════════════════════════════
 A monochromatic system: the entire interface lives in ONE hue's light→dark
-ramp (alert, high-signal red). Hierarchy and severity are carried by
-BRIGHTNESS within the ramp, not by competing hues.
+ramp (a low-chroma rose-red). Hierarchy and severity are carried by
+BRIGHTNESS within the ramp, not by competing hues, and never by saturation —
+the ramp is deliberately desaturated so long stretches of themed output (the
+14-agent scan block, findings tables) read as shading rather than as alarm.
 
-    #ff6b6b  bright   — high emphasis / active / critical-high findings
-    #ff3b3b  PRIMARY  — the wordmark, structure, "safe/engaged"
-    #d63447  mid      — medium findings / secondary
-    #7a1010  dim      — borders, rails, low findings
-    #8a6a6a  muted    — captions, timestamps, comments
-    #e8cfcf  readout  — primary readable prose / numerics
+    #e18e91  bright   — high emphasis / active / critical-high findings
+    #d95e62  PRIMARY  — the wordmark, structure, "safe/engaged"
+    #c14e5b  mid      — medium findings / secondary
+    #6d2c31  dim      — borders, rails, low findings
+    #8e7174  muted    — captions, timestamps, comments
+    #e1d0d2  readout  — primary readable prose / numerics
 
 Everything degrades to a single clean static frame when stdout is not a TTY
 (CI / pipes) — no escape spam, no alt-screen, no cursor games.
@@ -62,18 +64,18 @@ CX_VERSION = "4.4"
 #  MONO SIGNAL RED  (one hue's ramp — hierarchy & severity by brightness)
 #  Names kept (PHOS/REF/TGT…) so every renderer recolours by value change.
 # ══════════════════════════════════════════════════════════════════════════
-VOID      = "#0a0707"   # near-black — background / negative space
-PANEL     = "#1a0e0e"   # raised panel fill
-PHOS      = "#ff3b3b"   # PRIMARY red — wordmark, structure, "safe/engaged"
-PHOS_DIM  = "#7a1010"   # dim red — borders, rails, low emphasis
-REF       = "#ff6b6b"   # bright red — high emphasis / active / highlights
-TGT       = "#ff6b6b"   # bright red — commanded target (mono: = accent)
-CAUT      = "#d63447"   # mid red — caution / medium findings
-WARN      = "#ff6b6b"   # bright red — critical / high (brightest = most urgent)
-WARN_HOT  = "#ffb0a9"   # extra-bright red — peak emphasis
-APEX      = "#ffe0dc"   # near-white red — rare apex flash
-LABEL     = "#8a6a6a"   # muted red-grey — captions, timestamps, comments
-READOUT   = "#e8cfcf"   # light red-grey — primary readable prose / numerics
+VOID      = "#0a0809"   # near-black — background / negative space
+PANEL     = "#1a1214"   # raised panel fill
+PHOS      = "#d95e62"   # PRIMARY red — wordmark, structure, "safe/engaged"
+PHOS_DIM  = "#6d2c31"   # dim red — borders, rails, low emphasis
+REF       = "#e18e91"   # bright red — high emphasis / active / highlights
+TGT       = "#e18e91"   # bright red — commanded target (mono: = accent)
+CAUT      = "#c14e5b"   # mid red — caution / medium findings
+WARN      = "#e18e91"   # bright red — critical / high (brightest = most urgent)
+WARN_HOT  = "#eabcb8"   # extra-bright red — peak emphasis
+APEX      = "#f4e4e1"   # near-white red — rare apex flash
+LABEL     = "#8e7174"   # muted red-grey — captions, timestamps, comments
+READOUT   = "#e1d0d2"   # light red-grey — primary readable prose / numerics
 
 HUD_THEME = Theme({
     "hud.void": VOID, "hud.panel": PANEL,
@@ -90,9 +92,35 @@ HUD_THEME = Theme({
     "cy.green": PHOS, "cy.red": WARN,
     "brand": f"bold {PHOS}", "accent": REF, "muted": LABEL,
     "ok": f"bold {PHOS}", "warn": CAUT, "err": f"bold {WARN}", "text": READOUT,
+    # ── raw ANSI colour names, re-pointed into the ramp ──
+    # ~500 call sites across cli_engine/council/deepagents/doctor still write
+    # markup like "[green]OK[/green]". Rich resolves a style NAME against the
+    # theme before it ever tries to parse it as a colour, so naming them here
+    # drags every one of those sites onto the ramp without touching them.
+    # Compound forms need their own literal key — Rich looks up "bold green"
+    # as a whole string and only word-splits it when the theme has no such
+    # key, at which point "green" resolves as a colour again and escapes.
+    "red": WARN, "green": PHOS, "yellow": CAUT, "cyan": PHOS,
+    "magenta": REF, "blue": LABEL, "white": READOUT,
+    "bold red": f"bold {WARN}", "bold green": f"bold {PHOS}",
+    "bold yellow": f"bold {CAUT}", "bold cyan": f"bold {PHOS}",
+    "bold magenta": f"bold {REF}", "bold blue": f"bold {LABEL}",
+    "bold bright_magenta": f"bold {WARN_HOT}",
+    "bold bright_green": f"bold {REF}", "bold bright_cyan": f"bold {REF}",
 })
 
 soc = Console(theme=HUD_THEME, highlight=False)
+
+
+def themed_console(**kwargs):
+    """
+    A Console carrying HUD_THEME, for the modules that predate this one and
+    build their own bare Console(). Without the theme their markup renders in
+    the terminal's own red/green/cyan — the one thing a mono theme cannot
+    survive. Callers keep their own Console kwargs.
+    """
+    kwargs.setdefault("highlight", False)
+    return Console(theme=HUD_THEME, **kwargs)
 
 
 def _tty(console=None) -> bool:
@@ -376,7 +404,7 @@ def sweep_trail_color(distance, length):
 #  CYPHEX LOCKMARK — the padlock brand glyph, drawn procedurally in Braille
 #  (body lit in PRIMARY with a hot top-highlight, bright shackle, carved keyhole)
 # ══════════════════════════════════════════════════════════════════════════
-_LAV = "#ffb0a9"   # hot top-highlight (in-ramp — WARN_HOT)
+_LAV = "#eabcb8"   # hot top-highlight (in-ramp — WARN_HOT)
 
 
 def _padlock_canvas(cw=24, ch=16, shackle_open=1.0, lit=PHOS, ring=REF):
@@ -1473,9 +1501,9 @@ def deck_input_box_bottom(console=None):
 # ══════════════════════════════════════════════════════════════════════════
 def render_agent_header(agent_id, name, objective):
     header = Text()
-    header.append("  ▸ ", style=REF)
-    header.append(f"[{agent_id}] ", style=f"bold {PHOS}")
-    header.append(name, style=f"bold {REF}")
+    header.append("  ▸ ", style=PHOS_DIM)
+    header.append(f"[{agent_id}] ", style=CAUT)
+    header.append(name, style=f"bold {PHOS}")
     header.append(f"\n  {objective}", style=LABEL)
     soc.print(Panel(header, border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 

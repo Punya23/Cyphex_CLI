@@ -44,17 +44,17 @@ def _setup_tools():
     """Auto-install optional security tools for enhanced scanning."""
     # MONO SIGNAL RED — mirrors terminal_ui.py's ramp. Names kept; severity
     # and hierarchy are carried by BRIGHTNESS inside the one hue.
-    CY = "\033[38;2;255;59;59m"     # PRIMARY — wordmark / accents
-    P2 = "\033[38;2;255;107;107m"   # bright — high emphasis / active
-    GH = "\033[38;2;138;106;106m"   # muted — captions / dim text
-    SL = "\033[38;2;232;207;207m"   # readout — secondary prose
-    NE = "\033[38;2;255;59;59m"     # PRIMARY — success
-    FL = "\033[38;2;255;176;169m"   # peak — critical (brightest = urgent)
+    CY = "\033[38;2;217;94;98m"     # PRIMARY — wordmark / accents
+    P2 = "\033[38;2;225;142;145m"   # bright — high emphasis / active
+    GH = "\033[38;2;142;113;116m"   # muted — captions / dim text
+    SL = "\033[38;2;225;208;210m"   # readout — secondary prose
+    NE = "\033[38;2;217;94;98m"     # PRIMARY — success
+    FL = "\033[38;2;234;188;184m"   # peak — critical (brightest = urgent)
     BD = "\033[1m"
     RS = "\033[0m"
-    YL = "\033[38;2;214;52;71m"     # mid — warning / medium
-    RAMP_HI = (255, 59, 59)          # PRIMARY — gradient rule endpoint
-    RAMP_LO = (122, 16, 16)          # dim — gradient rule endpoint
+    YL = "\033[38;2;193;78;91m"     # mid — warning / medium
+    RAMP_HI = (217, 94, 98)          # PRIMARY — gradient rule endpoint
+    RAMP_LO = (109, 44, 49)          # dim — gradient rule endpoint
 
     def _grad(text, r1, g1, b1, r2, g2, b2):
         out = []
