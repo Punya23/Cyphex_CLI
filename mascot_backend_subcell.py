@@ -661,10 +661,25 @@ def render_sextant(img: Image.Image, target_cols: int,
 # Source preparation (remaster onto the mode's subpixel grid)
 # ---------------------------------------------------------------------------
 
+#: The six colors the mascot is actually designed in; everything else in the
+#: source PNGs is JPEG damage. Mirrors ``mascot_remaster.PALETTE`` so the
+#: fallback path produces the same art as the real one.
+_FALLBACK_PALETTE: Tuple[Tuple[int, int, int], ...] = (
+    (10, 10, 12),      # near-black chassis
+    (60, 14, 16),      # deep red shadow
+    (120, 26, 28),     # mid red
+    (200, 40, 42),     # bright red outline
+    (255, 72, 68),     # hot red highlight
+    (225, 215, 215),   # off-white specular
+)
+
+
 def _fallback_remaster(img: Image.Image, grid: Tuple[int, int],
                        sat: float = 2.3, gamma: float = 1.0,
                        black_floor: int = 0,
-                       alpha_threshold: int = 110) -> Image.Image:
+                       palette: Sequence[Sequence[int]] = _FALLBACK_PALETTE,
+                       alpha_threshold: int = 110,
+                       despeckle: bool = False) -> Image.Image:
     """Minimal local copy of the sprite-repair pipeline, used only when
     :mod:`mascot_remaster` is not importable.
 
@@ -677,11 +692,12 @@ def _fallback_remaster(img: Image.Image, grid: Tuple[int, int],
     push saturation about each pixel's own grey mean, and snap to the
     designed palette, which is what restores hard edges and flat fills.
     Partial alpha is JPEG halo, so alpha is binarised hard.
+
+    ``despeckle`` is accepted and ignored: the isolated-speck absorption pass
+    is :mod:`mascot_remaster`'s, and silently dropping it here is better than
+    raising on a keyword the real implementation understands.
     """
-    palette = (
-        (10, 10, 12), (60, 14, 16), (120, 26, 28),
-        (200, 40, 42), (255, 72, 68), (225, 215, 215),
-    )
+    palette = tuple(tuple(c) for c in palette)
     if img.mode != "RGBA":
         img = img.convert("RGBA")
     small = img.resize(grid, resample=Image.BOX)
@@ -725,8 +741,14 @@ def _fallback_remaster(img: Image.Image, grid: Tuple[int, int],
 #: dense modes want a little more of it to hold the same vividness. A sweep at
 #: 20 columns over sat 2.3 / 2.6 / 2.9 put quadrant's sweet spot at 2.6: more
 #: vivid than 2.3 with the wordmark letterforms still cleanly separated,
-#: whereas 2.9 starts thickening them back together.
-_DENSITY_SAT_STEP = 0.15
+#: whereas 2.9 starts thickening them back together. Hence one step = 0.3.
+#:
+#: Only the quadrant (one-step) case was validated that way. Sextant takes
+#: two steps by extrapolation, which is *not* separately verified -- and
+#: sextant is the mode whose wordmark is already fragile, so if you enable
+#: this for a full-body sprite in sextant mode, look at the wordmark before
+#: shipping it.
+_DENSITY_SAT_STEP = 0.3
 
 
 def prepare_source(src, target_cols: int, mode: str = DEFAULT_MODE,
@@ -745,6 +767,12 @@ def prepare_source(src, target_cols: int, mode: str = DEFAULT_MODE,
         src: path to a source PNG, or a PIL Image.
         target_cols: render width in terminal columns.
         mode: one of :data:`MODES`; determines the subpixel grid.
+        density_compensate: nudge saturation up for the denser modes to undo
+            the dulling documented at :data:`_DENSITY_SAT_STEP`. Off by
+            default, because the saturation tuning lives in
+            :mod:`mascot_remaster` and should not be silently overridden --
+            turn it on (or pass an explicit ``sat``) once you have looked at
+            the result for your asset.
         **remaster_kwargs: forwarded to ``mascot_remaster.remaster_to_grid``
             (``sat``, ``gamma``, ``black_floor``, ``palette``,
             ``alpha_threshold``, ``despeckle``), overriding the per-asset
@@ -763,12 +791,26 @@ def prepare_source(src, target_cols: int, mode: str = DEFAULT_MODE,
     try:
         import mascot_remaster  # local sibling module
     except Exception:
-        return _fallback_remaster(img, grid, **remaster_kwargs)
+        mascot_remaster = None
 
     params = {}
-    if isinstance(src, (str, os.PathLike)):
+    if mascot_remaster is not None and isinstance(src, (str, os.PathLike)):
         params = mascot_remaster.params_for(src)
+
+    if density_compensate and "sat" not in remaster_kwargs:
+        # Steps of density over the half-block baseline: quadrant is +1
+        # (double the horizontal samples), sextant +2 (double horizontal and
+        # half again vertical).
+        sub_cols, sub_rows = SUBGRID[mode]
+        base_cols, base_rows = SUBGRID[MODE_HALFBLOCK]
+        steps = (sub_cols // base_cols - 1) + (sub_rows - base_rows)
+        base_sat = params.get("sat", 2.3)
+        params["sat"] = base_sat + steps * _DENSITY_SAT_STEP
+
     params.update(remaster_kwargs)
+
+    if mascot_remaster is None:
+        return _fallback_remaster(img, grid, **params)
     return mascot_remaster.remaster_to_grid(img, grid[0], grid[1], **params)
 
 

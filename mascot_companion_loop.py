@@ -26,10 +26,10 @@ Rendering, in preference order:
      (mascot_backend_image / mascot_backend_halfblock) take a PIL image +
      target_cols instead, so this layer is expected to no-op against them
      today; that's fine, it just falls through to layer 3.
-  3. Reuse mascot.py's own internal frame table (mascot._STATE_FRAMES),
-     rendering the raw PIL frames as plain lines via `str()` — a degraded
-     but non-crashing text approximation, not real pixel art. Only reached
-     if layer 1 is somehow unavailable.
+  3. Reuse the animation frame table directly (mascot_anim.frames_for),
+     rendering the raw PIL frames as plain lines — a degraded but
+     non-crashing text approximation, not real pixel art. Only reached if
+     layer 1 is somehow unavailable.
   4. A tiny built-in plain-text spinner, used only if even mascot.py
      itself somehow can't be imported (e.g. run outside this repo).
 
@@ -155,23 +155,26 @@ def _render_via_backend(state):
 
 
 def _render_via_mascot_frames(state, tick):
-    """Degraded (text, not real pixel art) fallback: reuse mascot.py's own
-    composed PIL frame table (mascot._STATE_FRAMES) directly, rendering
-    each frame's repr as a single line. Only ever reached if layer 1
-    (mascot.render_and_print_state_loop) is somehow unavailable -- normal
-    runs never get here. None (never raises) if mascot.py can't be
-    imported or doesn't expose what we expect."""
-    try:
-        import mascot as _mascot
+    """Degraded (text, not real pixel art) fallback: reach into the
+    animation frame table directly and render each frame's size as a single
+    line. Only ever reached if layer 1 (mascot.render_and_print_state_loop)
+    is somehow unavailable -- normal runs never get here. None (never
+    raises) if the module can't be imported or doesn't expose what we
+    expect.
 
-        frames_table = getattr(_mascot, "_STATE_FRAMES", None)
-        if not frames_table:
-            return None
-        frames = frames_table.get(state) or frames_table.get(DEFAULT_STATE)
+    This used to read `mascot._STATE_FRAMES`, a per-state list mascot.py
+    composed itself. mascot.py no longer owns frames -- `mascot_anim` does,
+    and it hands them out per (state, width, mode) via `frames_for` -- so
+    this layer asks that module instead. `frames_for` degrades an unknown
+    state to `idle` on its own, which is exactly what this layer wanted the
+    DEFAULT_STATE lookup for."""
+    try:
+        import mascot_anim as _anim
+
+        frames = _anim.frames_for(state or DEFAULT_STATE)
         if not frames:
             return None
-        idx = tick % len(frames)
-        img = frames[idx]
+        img = frames[tick % len(frames)]
         return [f"  [{state}] {getattr(img, 'size', '?')} (pixel-art fallback)"]
     except Exception:
         return None

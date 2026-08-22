@@ -23,6 +23,10 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.27.0",
+    # Already required by the scanner/scoring path; also the runtime engine
+    # behind mascot_remaster's palette snap and mascot_anim's frame synthesis
+    # (both are imported defensively and degrade to a softer render without
+    # it, so this is not a NEW dependency — just a second consumer).
     "numpy>=1.26.0",
     "scikit-learn>=1.4.0",
     "joblib>=1.3.0",
@@ -65,7 +69,18 @@ py-modules = [
     # terminal-window companion — sibling top-level modules it imports
     # defensively at runtime, so an installed (not just in-repo) build can
     # still resolve them.
-    "mascot_backend_image", "mascot_backend_halfblock",
+    #
+    #   mascot_anim            owns WHAT the mascot does: the per-state frame
+    #                          lists, and the fixed-canvas guarantee the
+    #                          redraw loop's cursor-up arithmetic depends on.
+    #   mascot_remaster        repairs the JPEG-damaged source PNGs (BOX
+    #                          downsample -> saturate -> snap to the designed
+    #                          six-colour palette) so the art renders crisp.
+    #   mascot_backend_subcell quadrant/sextant renderers — more subpixels per
+    #                          terminal cell than half-blocks, which is what
+    #                          makes a SMALLER mascot look FINER, not chunkier.
+    "mascot_anim", "mascot_remaster",
+    "mascot_backend_image", "mascot_backend_halfblock", "mascot_backend_subcell",
     "mascot_companion", "mascot_companion_loop",
 ]
 
