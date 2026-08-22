@@ -284,9 +284,19 @@ class TraceRecorder:
 
         For work that is finished by the time you can describe it (a count,
         a decision, a fallback that was taken) — the common case.
+
+        If the caller already measured how long the work took and passes it
+        as evidence["duration_s"], that value wins. Otherwise the step would
+        report ~0.0s simply because open-and-close happened in one call —
+        which is a lie about work that genuinely took time (a genome
+        generation, an agent probe), and the exact number a maintainer
+        reads this trace to find.
         """
         try:
             st = self.step(label, detail, evidence)
+            measured = (evidence or {}).get("duration_s")
+            if st is not None and isinstance(measured, (int, float)) and measured > 0:
+                st.started_at = time.time() - float(measured)
             self.finish_step(st, status, detail, evidence)
         except Exception:
             pass

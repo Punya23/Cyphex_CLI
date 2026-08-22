@@ -426,6 +426,11 @@ def render_trace_summary(recorder, console=None):
 
     ascii_mode = bool(_ui_ascii(c)) if _UI else True
     body = Text()
+    # Hard-truncate to the panel's inner width. A wrapped goal line spills
+    # into the border column and makes the whole trace look broken, which
+    # is a poor look for the one panel whose job is legibility.
+    inner = max(int(getattr(c, "width", 80) or 80) - 8, 40)
+    goal_w = inner - 16
     wps = recorder.waypoints if hasattr(recorder, "waypoints") else []
     if not wps:
         body.append("  no waypoints traced\n", style=LABEL)
@@ -436,7 +441,7 @@ def render_trace_summary(recorder, console=None):
         body.append(f"{wp.num:<5}", style=TGT)
         body.append(f"{wp.title}", style=f"bold {READOUT}")
         body.append(f"   {wp.duration_s:.1f}s\n", style=LABEL)
-        body.append(f"        goal · {wp.goal}\n", style=LABEL)
+        body.append(f"        goal · {wp.goal[:goal_w]}\n", style=LABEL)
         for st in wp.steps:
             sg = _STATUS_GLYPH.get(st.status, ("·", "-"))[1 if ascii_mode else 0]
             body.append(f"        {sg} ", style=_status_style(st.status))
