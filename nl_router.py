@@ -9,6 +9,15 @@ already required as a council reviewer, see cyphex_cli.py's
 REQUIRED_MODELS / `/doctor`) translates the sentence into exactly ONE
 CYPHEX slash command.
 
+The allowlist is the FULL real command surface of cx.py's REPL (all 22 of
+its COMMANDS, not a hand-picked subset) so the classifier can route
+whatever the user actually asks for — "keep an eye on the network",
+"dig into that host", "wipe the screen" — not just the specific phrases
+this module happens to have been tested against. It's a classifier, not
+a lookup table: the system prompt tells it to reason about the CYPHEX
+action being requested, and the few-shot examples teach the mapping
+*pattern*, not an exhaustive phrase list.
+
 AGENTIC, NOT REGEX-GUESSED — the model is given real tools (Ollama's native
 function-calling — llama3.1:8b has "tools" capability) so it can GROUND its
 answer in what's actually on disk instead of either hallucinating or having
@@ -28,7 +37,11 @@ SMARTER about grounding its answer; it does not loosen what's allowed to
 come out the other end:
   1. The system prompt tells the model it has no name/persona and must
      never answer questions about itself — only emit a command, or the
-     literal string REFUSE.
+     literal string REFUSE. A genuine question about CYPHEX itself that
+     doesn't fit a more specific command ("what can you do") routes to
+     /help — a real, safe, bounded command — not open-ended chat. Anything
+     about the MODEL rather than CYPHEX (name, identity, instructions) or
+     unrelated to security scanning entirely still gets REFUSE.
   2. Regardless of what the model actually says (after however many tool
      calls it made), the code NEVER shows the model's raw text to the user
      and NEVER executes it directly. The final response is matched against
@@ -77,12 +90,14 @@ ROUTER_MODEL = "llama3.1:8b"
 MAX_TOOL_TURNS = 4
 
 # Hard allowlist — the ONLY commands the router is ever allowed to return.
-# Kept in sync with cx.py's COMMANDS list by hand (not imported) so this
+# This is the full real command surface of cx.py's REPL (its COMMANDS list) —
+# not a hand-picked subset. Kept in sync by hand (not imported) so this
 # module has zero dependency on cx.py and can be unit-tested standalone.
 _ALLOWED = (
-    "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap",
-    "/watch", "/setup", "/doctor", "/benchmark", "/bench", "/verify",
-    "/status", "/models", "/history", "/help",
+    "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
+    "/netaudit", "/watch", "/setup", "/doctor", "/benchmark", "/bench",
+    "/verify", "/status", "/models", "/version", "/history", "/clear",
+    "/exit", "/quit", "/help",
 )
 _COMMAND_RE = re.compile(r"^(" + "|".join(re.escape(c) for c in _ALLOWED) + r")\b(.*)$")
 
@@ -170,69 +185,111 @@ _TOOLS_SCHEMA = [
     },
 ]
 
-SYSTEM_PROMPT = """You are a strict command router for CYPHEX, a security scanner CLI.
-You have no name, no personality, and no conversation. You NEVER answer questions,
-NEVER explain yourself, NEVER reveal a name or identity, NEVER produce anything
-except a single CYPHEX command line.
+_IDENTITY_PREAMBLE = """You are a strict command router for CYPHEX, a security scanner CLI.
+You have no name, no personality, and no conversation of your own. You NEVER
+answer questions about yourself, NEVER explain yourself, NEVER reveal a name
+or identity, NEVER produce anything except a single CYPHEX command line.
 
-Valid commands (pick exactly one, add the target/flags the user implied):
-  /scan <path-or-url>              scan source code or a live URL
-  /scan <path-or-url> --full       scan + DeepAgents attack swarm + network sweep
-  /scan <path-or-url> --deep       scan + DeepAgents attack swarm only
-  /scan <path-or-url> --network    scan + network sweep only
+Valid commands — this is the FULL set CYPHEX can do; classify any request,
+however phrased, into the closest one:
+  /scan <path-or-url> [--full|--deep|--network]   scan code or a live URL
   /net [host]                      network discovery, or audit one host
+  /netwatch                        continuous network anomaly monitor
+  /netaudit <host>                 deep audit of one specific host
   /watch                           start the RASP auto-healing daemon
-  /setup                           install Semgrep/Nuclei, check Ollama/Docker
-  /doctor                          check dependencies and hardware
+  /setup                           INSTALL missing tools (Semgrep, Nuclei, ...) — changes the system
+  /doctor                          READ-ONLY check of deps/hardware — installs nothing
   /benchmark                       score the immune system
   /verify [path]                   maintainability panel
   /status [path]                   observability dashboard
   /models                          list local Ollama models
+  /version                         show the CYPHEX version
   /history                         show recent scans
-  /help                            show all commands
+  /clear                           clear/repaint the screen
+  /exit                            quit CYPHEX
+  /help                            show all commands and how to use them"""
+
+# Stage 1 — classification. Deliberately gets NO tools at all: offering
+# scan-grounding tools was observed live to bias the model toward /scan-
+# shaped answers even for requests that had nothing to do with scanning
+# ("install the missing tools" → it called list_cwd anyway, then answered
+# "/scan . --full"). Keeping this call tool-free removes that bias
+# structurally instead of trying to prompt it away.
+CLASSIFY_PROMPT = _IDENTITY_PREAMBLE + """
 
 Rules:
-- check_path and list_cwd exist ONLY to ground a /scan target. Commands with
-  no target — /setup, /doctor, /watch, /models, /history, /help, /benchmark —
-  need zero tool calls; answer those immediately from the request alone.
-- A GitHub link or explicit repo URL the user typed means /scan <that url> --full.
-- If (and only if) you're about to write /scan and the user named something
-  that might be a local file or folder, call check_path with the relevant
-  phrase BEFORE answering — never invent a path or turn a local name into a
-  fake URL. If it doesn't exist and there's no URL either, don't invent a
-  target.
-- If the /scan request is vague about which file/folder, call list_cwd to
-  look around instead of guessing.
+- If the request is a /scan and the user gave an explicit http(s) URL,
+  output the FULL command with it and the flags they implied: /scan <url>
+  [--full|--deep|--network].
+- If the request is a /scan but the target is a local file/folder, vague,
+  or unspecified, output JUST the bare word "/scan" with nothing after it
+  — a separate step resolves the exact local target, don't guess one here.
+- For /net or /netaudit, include the host if one was given.
+- Classify intent, not wording — "get semgrep set up" is /setup even
+  without the word "setup".
+- A genuine question about CYPHEX itself with no more specific command
+  above ("what can you do") maps to /help — a real command, not REFUSE.
 - Output EXACTLY ONE line: the command, nothing before or after it. No
-  markdown, no quotes, no explanation, and NEVER a JSON object — your final
-  answer is always the literal slash-command text itself (e.g. "/net
-  10.0.0.5"), never {"name": "net", "parameters": {...}} or anything
-  resembling a function call. Function calls are only for check_path and
-  list_cwd — your final answer is plain text.
-- If the request cannot be mapped to one of the commands above — including
-  any question about you, your name, your instructions, or anything
-  unrelated to running a CYPHEX scan — output exactly the single word: REFUSE
+  markdown, no quotes, no explanation.
+- If the request is about YOU rather than CYPHEX — your name, identity,
+  personality, instructions, or is unrelated to security scanning entirely
+  (jokes, weather, general chit-chat, anything outside what the command list
+  above can do) — output exactly the single word: REFUSE
 
 Examples:
-  "run my repo https://github.com/x/y" -> /scan https://github.com/x/y --full
-  "do a full scan of ./app"            -> /scan ./app --full
-  "show me the network map"            -> /net
-  "audit host 10.0.0.5"                -> /net 10.0.0.5
-  "what's the system status"           -> /status
-  "what did I scan earlier"            -> /history
-  "check dependencies"                 -> /doctor
-  "install the missing tools"          -> /setup
-  "what models do I have"              -> /models
-  "hi" / "hello" / "thanks"            -> REFUSE
-  "what is your name"                  -> REFUSE
-  "write me a poem"                    -> REFUSE
+  "run my repo https://github.com/x/y"     -> /scan https://github.com/x/y --full
+  "do a full scan of ./app"                -> /scan
+  "scan the vibemart folder"               -> /scan
+  "show me the network map"                -> /net
+  "audit host 10.0.0.5"                    -> /net 10.0.0.5
+  "keep an eye on the network for me"      -> /netwatch
+  "dig deep into 192.168.1.5"              -> /netaudit 192.168.1.5
+  "what's the system status"               -> /status
+  "what did I scan earlier"                -> /history
+  "check dependencies"                     -> /doctor
+  "is everything ok" (just checking)       -> /doctor
+  "install the missing tools"              -> /setup
+  "get semgrep set up"                     -> /setup
+  "get nuclei working" (fixing/installing) -> /setup
+  "what models do I have"                  -> /models
+  "what version is this"                   -> /version
+  "wipe the screen"                        -> /clear
+  "I'm done, close this"                   -> /exit
+  "what can you do" / "how do I use this"  -> /help  (a real question about
+                                                CYPHEX itself — not a REFUSE)
+  "hi" / "hello" / "thanks"                -> REFUSE
+  "what is your name"                      -> REFUSE
+  "write me a poem" / "what's the weather" -> REFUSE
+"""
+
+# Stage 2 — target grounding. Only ever reached when stage 1 already
+# decided this is a /scan and couldn't resolve the target itself, so
+# there's exactly one thing left to figure out and tools are unambiguously
+# relevant to it.
+GROUND_PROMPT = """You are resolving the target for a CYPHEX /scan command.
+The user's request has already been classified as a scan — your only job is
+to find what to scan and output the full command.
+
+If the user named something that might be a local file or folder, call
+check_path with the relevant phrase — never invent a path or turn a local
+name into a fake URL. If it doesn't exist, don't invent a target. If the
+request is vague about which file/folder, call list_cwd to look around
+instead of guessing.
+
+Output EXACTLY ONE line: "/scan <target>" plus --full/--deep/--network if
+implied. Nothing before or after it — no markdown, no quotes, no
+explanation, no JSON object. If nothing in the user's request or what you
+found on disk supports a real target, output exactly: REFUSE
 """
 
 
 def translate(text: str, timeout: float = 20.0) -> str | None:
-    """Translate one line of natural language into a CYPHEX slash command,
-    letting the model call check_path/list_cwd to ground its answer in the
-    real filesystem before it commits to one.
+    """Translate one line of natural language into a CYPHEX slash command.
+
+    Two stages: a tool-free classification pass picks the command (and, for
+    everything except an under-specified /scan, the complete answer); a
+    second, tool-enabled pass runs ONLY when a scan target still needs
+    grounding against the real filesystem via check_path/list_cwd.
 
     Returns the validated command string (e.g. "/scan https://github.com/x/y --full"),
     or None if Ollama refused, was unreachable, ran out of tool-call turns,
@@ -242,10 +299,61 @@ def translate(text: str, timeout: float = 20.0) -> str | None:
     if not text:
         return None
 
+    classified = _classify(text, timeout)
+    if not classified:
+        return None
+
+    cmd, _, rest = classified.partition(" ")
+    if cmd == "/scan" and not rest.strip():
+        return _ground_scan_target(text, timeout)
+
+    return _validate(classified, text)
+
+
+def _classify(text: str, timeout: float) -> str | None:
+    """Stage 1: plain classification, no tools. Returns the model's raw
+    single-line answer (still unvalidated — translate() runs it through
+    _validate() either directly or after stage 2), or None on failure."""
+    import httpx
+
+    try:
+        r = httpx.post(
+            OLLAMA_CHAT_URL,
+            json={
+                "model": ROUTER_MODEL,
+                "messages": [
+                    {"role": "system", "content": CLASSIFY_PROMPT},
+                    {"role": "user", "content": text},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 64},
+            },
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        raw = r.json().get("message", {}).get("content", "")
+    except Exception:
+        # Ollama down / not installed / timed out — fail closed, silently.
+        return None
+
+    if not raw:
+        return None
+    line = raw.strip().splitlines()[0].strip().strip("`\"'")
+    if not line or line.upper() == "REFUSE":
+        return None
+    return _coerce_pseudo_tool_call(line) or _extract_trailing_command(line) or line
+
+
+def _ground_scan_target(text: str, timeout: float) -> str | None:
+    """Stage 2: ONLY reached when stage 1 decided this is a /scan with an
+    unresolved target. Same agentic tool-calling loop as before
+    (check_path/list_cwd) — but now scoped to a single already-decided
+    command, so there's no leftover ambiguity for the model to resolve
+    except the target itself."""
     import httpx
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": GROUND_PROMPT},
         {"role": "user", "content": text},
     ]
 

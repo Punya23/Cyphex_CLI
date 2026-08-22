@@ -90,47 +90,58 @@ class TestGuardrailMapsValidRequests:
 
 class TestToolCalling:
     """The model grounds itself via check_path/list_cwd instead of this
-    module pattern-matching a fix onto whatever it said."""
+    module pattern-matching a fix onto whatever it said. translate() is
+    two-stage now: a tool-free classify() call decides "/scan" needs
+    grounding, THEN the tool-calling loop runs — so every scenario here
+    mocks the classify response first, followed by the grounding turns."""
+
+    def _bare_scan_classify(self):
+        """Stage 1's response when it correctly defers target resolution."""
+        return _chat_response("/scan")
 
     def test_check_path_tool_grounds_a_local_target(self, tmp_path):
         real_dir = tmp_path / "vibemart"
         real_dir.mkdir()
-        # Turn 1: model calls check_path with the raw phrase (sloppy — includes
-        # extra words, same as observed against the live model).
-        turn1 = _chat_response(tool_calls=[_tool_call("check_path", name=f"my repo {real_dir}")])
-        # Turn 2: after seeing the tool result, the model commits to a command.
-        turn2 = _chat_response(f"/scan {real_dir} --full")
-        with patch("httpx.post", side_effect=[turn1, turn2]) as mock_post:
+        classify = self._bare_scan_classify()
+        # Ground turn 1: model calls check_path with the raw phrase (sloppy
+        # — includes extra words, same as observed against the live model).
+        ground1 = _chat_response(tool_calls=[_tool_call("check_path", name=f"my repo {real_dir}")])
+        # Ground turn 2: after seeing the tool result, commits to a command.
+        ground2 = _chat_response(f"/scan {real_dir} --full")
+        with patch("httpx.post", side_effect=[classify, ground1, ground2]) as mock_post:
             out = nl_router.translate(f"scan my repo {real_dir}")
         assert out == f"/scan {real_dir} --full"
-        assert mock_post.call_count == 2
-        # The tool result fed back to the model on turn 2 must reflect a
-        # real filesystem check, not a canned answer.
-        second_call_messages = mock_post.call_args_list[1].kwargs["json"]["messages"]
-        tool_result = json.loads(second_call_messages[-1]["content"])
+        assert mock_post.call_count == 3
+        # The tool result fed back to the model must reflect a real
+        # filesystem check, not a canned answer.
+        ground2_messages = mock_post.call_args_list[2].kwargs["json"]["messages"]
+        tool_result = json.loads(ground2_messages[-1]["content"])
         assert tool_result == {"exists": True, "type": "directory", "matched": str(real_dir)}
 
     def test_list_cwd_tool_round_trip(self, tmp_path):
         (tmp_path / "auth.py").write_text("# auth")
-        turn1 = _chat_response(tool_calls=[_tool_call("list_cwd", subdir=str(tmp_path))])
-        turn2 = _chat_response(f"/scan {tmp_path / 'auth.py'} --full")
-        with patch("httpx.post", side_effect=[turn1, turn2]):
+        classify = self._bare_scan_classify()
+        ground1 = _chat_response(tool_calls=[_tool_call("list_cwd", subdir=str(tmp_path))])
+        ground2 = _chat_response(f"/scan {tmp_path / 'auth.py'} --full")
+        with patch("httpx.post", side_effect=[classify, ground1, ground2]):
             out = nl_router.translate("scan the auth stuff")
         assert out == f"/scan {tmp_path / 'auth.py'} --full"
 
     def test_unknown_tool_name_does_not_crash(self):
-        turn1 = _chat_response(tool_calls=[_tool_call("delete_everything", path="/")])
-        turn2 = _chat_response("REFUSE")
-        with patch("httpx.post", side_effect=[turn1, turn2]):
+        classify = self._bare_scan_classify()
+        ground1 = _chat_response(tool_calls=[_tool_call("delete_everything", path="/")])
+        ground2 = _chat_response("REFUSE")
+        with patch("httpx.post", side_effect=[classify, ground1, ground2]):
             assert nl_router.translate("scan something") is None
 
     def test_exhausting_tool_turns_fails_closed(self):
         # Model keeps calling tools forever and never commits — must not hang
         # or trust a half-finished exploration.
+        classify = self._bare_scan_classify()
         looping = _chat_response(tool_calls=[_tool_call("check_path", name="x")])
-        with patch("httpx.post", return_value=looping) as mock_post:
+        with patch("httpx.post", side_effect=[classify] + [looping] * nl_router.MAX_TOOL_TURNS) as mock_post:
             assert nl_router.translate("scan x") is None
-        assert mock_post.call_count == nl_router.MAX_TOOL_TURNS
+        assert mock_post.call_count == 1 + nl_router.MAX_TOOL_TURNS
 
     def test_model_ignoring_its_own_negative_check_is_still_refused(self):
         # Live-observed regression: model correctly calls check_path, gets
@@ -138,9 +149,10 @@ class TestToolCalling:
         # allowlist alone wouldn't catch this — /scan is a real command and
         # the argument has no shell metacharacters. _require_real_scan_target
         # is what closes this specific gap.
-        turn1 = _chat_response(tool_calls=[_tool_call("check_path", name="totally-fake-xyz")])
-        turn2 = _chat_response("/scan totally-fake-xyz --full")
-        with patch("httpx.post", side_effect=[turn1, turn2]):
+        classify = self._bare_scan_classify()
+        ground1 = _chat_response(tool_calls=[_tool_call("check_path", name="totally-fake-xyz")])
+        ground2 = _chat_response("/scan totally-fake-xyz --full")
+        with patch("httpx.post", side_effect=[classify, ground1, ground2]):
             assert nl_router.translate("scan my repo totally-fake-xyz") is None
 
     def test_extracts_command_when_model_explains_itself_first(self, tmp_path):
@@ -149,17 +161,29 @@ class TestToolCalling:
         # on the same line instead of outputting only the command as
         # instructed. The right, grounded answer is still in there — pull
         # it out instead of refusing a request that was actually correct.
-        turn1 = _chat_response(tool_calls=[_tool_call("check_path", name=str(tmp_path))])
-        turn2 = _chat_response(
+        classify = self._bare_scan_classify()
+        ground1 = _chat_response(tool_calls=[_tool_call("check_path", name=str(tmp_path))])
+        ground2 = _chat_response(
             f"check_path returned true, so we can proceed with the scan. /scan {tmp_path} --full"
         )
-        with patch("httpx.post", side_effect=[turn1, turn2]):
+        with patch("httpx.post", side_effect=[classify, ground1, ground2]):
             out = nl_router.translate(f"run this full scan {tmp_path}")
         assert out == f"/scan {tmp_path} --full"
 
     def test_well_formed_line_is_not_touched_by_extraction(self):
         # _extract_trailing_command must no-op on the common, correct case.
         assert nl_router._extract_trailing_command("/scan ./app --full") is None
+
+    def test_command_only_classification_skips_grounding_entirely(self):
+        # The whole point of the two-stage split: a target-less command
+        # must never trigger the tool-calling stage at all — regression
+        # test for "install the missing tools" answering "/scan . --full"
+        # after speculatively calling list_cwd.
+        with patch("httpx.post", return_value=_chat_response("/setup")) as mock_post:
+            out = nl_router.translate("install the missing tools")
+        assert out == "/setup"
+        assert mock_post.call_count == 1
+        assert "tools" not in mock_post.call_args.kwargs["json"]
 
 
 class TestToolImplementations:
