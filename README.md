@@ -1,4 +1,8 @@
 <p align="center">
+  <img src="assets/banner.png" alt="CYPHEX" width="720" />
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white" />
   <img src="https://img.shields.io/badge/Ollama-Local_LLM-000000?style=for-the-badge&logo=ollama&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker-Sandbox-2496ED?style=for-the-badge&logo=docker&logoColor=white" />
@@ -8,8 +12,6 @@
   <img src="https://img.shields.io/badge/Verify_Gate-maintainability_panel-3b82f6?style=for-the-badge" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
 </p>
-
-<h1 align="center">CYPHEX</h1>
 
 <p align="center">
   <b>Point CYPHEX at a repo. It deploys the app in a sandbox, attacks it with local-LLM agents,<br/>
