@@ -2405,6 +2405,11 @@ class CyphexEngine:
         results = await controller.run_evolution(
             context, generations=generations, payloads_per_gen=30,
             on_generation_complete=_on_generation,
+            # The controller's own per-generation narration duplicates the
+            # traced steps the callback above already produces, so quiet it
+            # unless --verbose. Default stays True for other callers
+            # (demo_immune_system.py exists to show exactly that output).
+            verbose=self.verbose,
         )
 
         try:
