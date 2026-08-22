@@ -154,6 +154,20 @@ def _print_help():
 # Only used when terminal_ui / rich is unavailable. Mirrors terminal_ui.py's
 # single-hue blue ramp so the degraded banner stays on-brand. RED/YEL are kept
 # as the alert channel for legible errors/warnings in the plain fallback path.
+#
+# These are raw 24-bit truecolor escapes with no Rich/colorama translation —
+# this class exists specifically for the case where rich itself failed to
+# import, so it can't lean on Console's own Windows-compat layer the way the
+# normal path does. On legacy Windows without native VT processing they'd
+# render as literal escape garbage; colorama enables VT mode where it can
+# and strips them where it can't, degrading to plain uncolored text instead.
+try:
+    import colorama
+    colorama.init(autoreset=False)
+except ImportError:
+    pass
+
+
 def _tc(hex_):
     r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
     return f"\033[38;2;{r};{g};{b}m"

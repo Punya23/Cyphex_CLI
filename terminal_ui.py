@@ -106,6 +106,32 @@ def _cols(console=None) -> int:
         return 80
 
 
+def _ascii_mode(console=None) -> bool:
+    """
+    True when this terminal can't reliably render the box-drawing/braille/
+    geometric glyph vocabulary the rest of this module uses by default.
+    Distinct from _tty(): a terminal can be interactive (isatty() True) and
+    still unable to render this — legacy Windows cmd.exe with no native VT
+    processing is exactly that case. Checked per render call rather than
+    cached once, since encoding/redirection can change mid-session (output
+    piped partway through, terminal swapped).
+
+    Three signals, any one is enough:
+      - Rich's own legacy_windows detection (no VT support found)
+      - the stream's encoding isn't UTF-8 (can't paint the glyphs at all)
+      - TERM=dumb (plain CI log viewers, some serial consoles)
+    """
+    c = console or soc
+    if getattr(c, "legacy_windows", False):
+        return True
+    enc = (getattr(c, "encoding", "") or "").lower()
+    if enc and not enc.startswith("utf"):
+        return True
+    if os.environ.get("TERM", "").lower() == "dumb":
+        return True
+    return False
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  COLOUR MATH — lerp + easing + score-band thermal colour
 # ══════════════════════════════════════════════════════════════════════════
@@ -161,8 +187,31 @@ SEV = {
     "Low":      (LABEL,    "○"),
     "Info":     (LABEL,    "·"),
 }
+# ASCII counterpart, same keys/colors — swapped in by sev() below whenever
+# _ascii_mode() is true, so every caller that reads severity pips through
+# sev() gets a safe glyph without needing its own ascii_mode check.
+SEV_ASCII = {
+    "Critical": (WARN,     "!"),
+    "High":     (WARN,     "*"),
+    "Medium":   (CAUT,     "+"),
+    "Low":      (LABEL,    "o"),
+    "Info":     (LABEL,    "."),
+}
+
+
 # BIT (built-in-test) states
 BIT_PENDING, BIT_TEST, BIT_GO, BIT_NOGO = "□", "◐", "✓", "✗"
+BIT_PENDING_ASCII, BIT_TEST_ASCII, BIT_GO_ASCII, BIT_NOGO_ASCII = "-", "~", "v", "x"
+
+
+def bit_state():
+    """(pending, test, go, nogo) glyph 4-tuple, ASCII-safe.
+    e.g. `p, t, g, n = bit_state()`."""
+    if _ascii_mode():
+        return BIT_PENDING_ASCII, BIT_TEST_ASCII, BIT_GO_ASCII, BIT_NOGO_ASCII
+    return BIT_PENDING, BIT_TEST, BIT_GO, BIT_NOGO
+
+
 # Waypoint / scan phases — geometric glyph + label (no emoji)
 STEP_META = {
     1: ("◹", "RECONNAISSANCE"),
@@ -174,6 +223,26 @@ STEP_META = {
     7: ("▤", "SECURITY REPORT"),
     8: ("✚", "PATCH & VERIFY"),
 }
+STEP_META_ASCII = {
+    1: ("[R]", "RECONNAISSANCE"),
+    2: ("[S]", "STATIC ANALYSIS"),
+    3: ("[D]", "SANDBOX DEPLOY"),
+    4: ("[X]", "DYNAMIC SCAN"),
+    5: ("[G]", "GENOME EVOLUTION"),
+    6: ("[A]", "ATTACK SIMULATION"),
+    7: ("[P]", "SECURITY REPORT"),
+    8: ("[V]", "PATCH & VERIFY"),
+}
+
+
+def step_meta(num):
+    """(glyph, title) for a waypoint number, ASCII-safe. Falls back to a
+    generic marker + None (caller supplies its own title) for an
+    out-of-range waypoint, same as the raw STEP_META.get(n, ...) pattern
+    every call site used before."""
+    table = STEP_META_ASCII if _ascii_mode() else STEP_META
+    fallback_glyph = "[?]" if _ascii_mode() else "◈"
+    return table.get(num, (fallback_glyph, None))
 _SWEEP_TRAIL = "⣿⣷⣶⣤⣄⡀⠄⠂⠁"          # braille head → tail decay
 _RAIN_POOL   = "0369ACEF⠁⠂⠄⡀⢀⠐⠈▓▒░"   # avionics crystallization noise
 
@@ -204,6 +273,30 @@ CANOPY = Box(
     "┋  ┋\n"
     "┗┅┅┛\n"
 )
+
+# ASCII-safe counterpart. CANOPY is a custom Box, so it's absent from Rich's
+# own LEGACY_WINDOWS_SUBSTITUTIONS table (that table only auto-downgrades
+# Rich's own built-in boxes) — Rich correctly detecting a legacy terminal
+# does nothing for a Panel/Table using CANOPY unless something here actually
+# swaps it. See _box().
+CANOPY_ASCII = Box(
+    "+--+\n"
+    "|  |\n"
+    "+--+\n"
+    "|  |\n"
+    "+--+\n"
+    "+--+\n"
+    "|  |\n"
+    "+--+\n",
+    ascii=True,
+)
+
+
+def _box(console=None):
+    """CANOPY, or CANOPY_ASCII on a terminal that can't render box-drawing
+    glyphs (see _ascii_mode()). Every Panel/Table in this module should
+    take its box= from here instead of hardcoding CANOPY directly."""
+    return CANOPY_ASCII if _ascii_mode(console) else CANOPY
 
 
 def _hairline(width, glyph="┅", style=PHOS_DIM):
@@ -674,17 +767,18 @@ def _logo_static(console=None, spaced=True):
 #  ANNUNCIATOR — reverse-video cockpit lamp tiles
 # ══════════════════════════════════════════════════════════════════════════
 def annunciator(text, level="phosphor", lit=True):
-    """A lamp tile like ▐ MASTER WARNING ▌. level: phosphor|reference|caution|
-    warning|target."""
+    """A lamp tile like ▐ MASTER WARNING ▌ (or [ MASTER WARNING ] in
+    _ascii_mode). level: phosphor|reference|caution|warning|target."""
     color = {"phosphor": PHOS, "reference": REF, "caution": CAUT,
              "warning": WARN, "target": TGT, "apex": APEX}.get(level, PHOS)
+    lwall, rwall = ("[", "]") if _ascii_mode() else ("▐", "▌")
     t = Text()
     if lit:
-        t.append("▐", style=color)
+        t.append(lwall, style=color)
         t.append(f" {text} ", style=f"bold reverse {color}")
-        t.append("▌", style=color)
+        t.append(rwall, style=color)
     else:
-        t.append(f"▐ {text} ▌", style=f"dim {LABEL}")
+        t.append(f"{lwall} {text} {rwall}", style=f"dim {LABEL}")
     return t
 
 
@@ -838,7 +932,7 @@ def render_help(console=None):
     c.print(Panel(t, title=Text("◈ COMMAND DECK", style=f"bold {REF}"),
                   subtitle=Text("type a path, URL, or plain English to acquire it", style=LABEL),
                   subtitle_align="left", title_align="left",
-                  border_style=PHOS_DIM, box=CANOPY, padding=(0, 2)))
+                  border_style=PHOS_DIM, box=_box(c), padding=(0, 2)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -915,13 +1009,14 @@ def render_tools_live(tools, console=None, stagger=0.10, pulse_hold=0.10):
     c = console or soc
 
     def cell(name, state):
+        pending, test, go, nogo = bit_state()
         if state == "pending":
-            return Text.assemble((BIT_PENDING + " ", LABEL), (name, LABEL))
+            return Text.assemble((pending + " ", LABEL), (name, LABEL))
         if state == "test":
-            return Text.assemble((BIT_TEST + " ", REF), (name, READOUT))
+            return Text.assemble((test + " ", REF), (name, READOUT))
         if state == "go":
-            return Text.assemble((BIT_GO + " ", PHOS), (name, READOUT))
-        return Text.assemble((BIT_NOGO + " ", WARN), (name, WARN))
+            return Text.assemble((go + " ", PHOS), (name, READOUT))
+        return Text.assemble((nogo + " ", WARN), (name, WARN))
 
     def frame(states):
         grid = Table.grid(padding=(0, 2, 0, 0))
@@ -936,7 +1031,7 @@ def render_tools_live(tools, console=None, stagger=0.10, pulse_hold=0.10):
         title = Text.assemble(("BUILT-IN TEST ", f"bold {PHOS}"),
                                (f"{n_go}/{len(tools)} GO", LABEL))
         return Panel(grid, title=title, title_align="left",
-                     border_style=PHOS_DIM, box=CANOPY, padding=(0, 2))
+                     border_style=PHOS_DIM, box=_box(c), padding=(0, 2))
 
     if not _tty(c):
         c.print(frame(["go" if ok else "nogo" for _, ok, _ in tools]))
@@ -1056,7 +1151,7 @@ def render_hero(scan_id, target="", score=None):
     if target:
         body.append("\n  TARGET   ", style=LABEL)
         body.append(f"{target}", style=READOUT)
-    soc.print(Panel(body, border_style=PHOS_DIM, box=CANOPY, padding=(0, 2)))
+    soc.print(Panel(body, border_style=PHOS_DIM, box=_box(), padding=(0, 2)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1087,7 +1182,7 @@ def render_step(step_num, total, title, elapsed=0.0, mode="SCAN"):
     num_part, suffix = (m.group(1), m.group(2)) if m else (str(step_num), "")
     done = int(num_part or "0")
     total = int(total)
-    glyph, _ = STEP_META.get(done, ("◈", title))
+    glyph, _ = step_meta(done)
     display_num = f"{done:02d}{suffix}"
 
     header = Text()
@@ -1100,7 +1195,7 @@ def render_step(step_num, total, title, elapsed=0.0, mode="SCAN"):
 
     soc.print()
     soc.print(Panel(header, subtitle=sub, subtitle_align="left",
-                    border_style=REF if done else PHOS_DIM, box=CANOPY, padding=(0, 2)))
+                    border_style=REF if done else PHOS_DIM, box=_box(), padding=(0, 2)))
 
     # A single quick SWEEP raster across the incoming bezel (tty only, ≤300ms)
     if _tty():
@@ -1163,7 +1258,7 @@ def render_ppi_radar(sweep_deg=0.0, contacts=None, console=None, static=False):
     body.append("\n")
     body.append_text(read)
     c.print(Panel(body, title=Text("PPI · ACTIVE SWEEP", style=f"bold {REF}"),
-                  title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                  title_align="left", border_style=PHOS_DIM, box=_box(c), padding=(0, 1)))
 
 
 def render_radar_scan(duration=1.6, contacts=None, console=None):
@@ -1196,7 +1291,7 @@ def render_radar_scan(duration=1.6, contacts=None, console=None):
                 bx, by = cx + r * rng * math.cos(a), cy + r * rng * math.sin(a)
                 cv.plot(bx, by, col); cv.plot(bx + 1, by, col)
             live.update(Panel(cv.to_text(), title=Text("PPI · ACTIVE SWEEP", style=f"bold {REF}"),
-                              title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                              title_align="left", border_style=PHOS_DIM, box=_box(c), padding=(0, 1)))
             time.sleep(0.066)
 
 
@@ -1267,7 +1362,14 @@ def deck_prompt(session=None):
     def rl(seq):
         return "\001" + seq + "\002"
 
-    if not _tty():
+    # _tty() alone only covers the non-interactive case (piped/redirected).
+    # This prompt is hand-built raw 24-bit-truecolor ANSI (bypassing Rich's
+    # own colorama-backed Windows-compat layer entirely, since it's fed
+    # straight to readline/input() rather than printed through a Console)
+    # — on an interactive but legacy Windows terminal (isatty() True, no
+    # native VT processing), those escapes render as literal garbage
+    # instead of a colored caret. _ascii_mode() catches that case too.
+    if not _tty() or _ascii_mode():
         return "cx > "
     return (rl(_fg(PHOS_DIM)) + "│ " + rl(_ANSI_RST)
             + rl(_fg(ccol)) + caret + " " + rl(_fg(READOUT)) + "cx "
@@ -1284,7 +1386,8 @@ def deck_input_box_top(console=None):
     if not _tty(c):
         return
     width = max(_cols(c), 20)
-    c.print(Text("╭" + "─" * (width - 2) + "╮", style=PHOS_DIM))
+    l, mid, r = ("+", "-", "+") if _ascii_mode(c) else ("╭", "─", "╮")
+    c.print(Text(l + mid * (width - 2) + r, style=PHOS_DIM))
 
 
 def deck_input_box_bottom(console=None):
@@ -1295,7 +1398,8 @@ def deck_input_box_bottom(console=None):
     if not _tty(c):
         return
     width = max(_cols(c), 20)
-    c.print(Text("╰" + "─" * (width - 2) + "╯", style=PHOS_DIM))
+    l, mid, r = ("+", "-", "+") if _ascii_mode(c) else ("╰", "─", "╯")
+    c.print(Text(l + mid * (width - 2) + r, style=PHOS_DIM))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1307,7 +1411,7 @@ def render_agent_header(agent_id, name, objective):
     header.append(f"[{agent_id}] ", style=f"bold {PHOS}")
     header.append(name, style=f"bold {REF}")
     header.append(f"\n  {objective}", style=LABEL)
-    soc.print(Panel(header, border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+    soc.print(Panel(header, border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
 
 def render_agent_result(agent, status, detail=""):
@@ -1320,7 +1424,7 @@ def render_agent_result(agent, status, detail=""):
 #  ROUTE / ENDPOINT DISCOVERY
 # ══════════════════════════════════════════════════════════════════════════
 def render_routes(routes, count=None):
-    t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+    t = Table(box=_box(), border_style=PHOS_DIM, padding=(0, 1),
               title=Text.assemble(("SOURCE-ROUTE ACQUISITION ", f"bold {PHOS}"),
                                    (f"— {count or len(routes)} routes", LABEL)),
               title_justify="left")
@@ -1350,7 +1454,7 @@ def render_endpoint_tree(target_url, endpoints, vuln_paths=None):
             risk = Text("▲ ", style=WARN) if p in vuln_paths else Text("● ", style=PHOS)
             branch.add(risk + Text(sub, style=READOUT))
     soc.print(Panel(tree, title=Text("ENDPOINT INTELLIGENCE MAP", style=f"bold {PHOS}"),
-                    title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                    title_align="left", border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1376,7 +1480,7 @@ def render_attack_graph(attack_graph):
         return
 
     if edges:
-        t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+        t = Table(box=_box(), border_style=PHOS_DIM, padding=(0, 1),
                   title=Text(f"⇋ ATTACK GRAPH — {len(edges)} chain(s) across {len(nodes)} node(s)",
                              style=f"bold {REF}"),
                   title_justify="left")
@@ -1438,7 +1542,7 @@ def render_knowledge_graph(tree, cwe_index=None, max_hubs=10):
     head.append("│  ", style=PHOS_DIM)
     head.append("CWE HUBS ", style=LABEL); head.append(f"{len(cwe_index)}", style=f"bold {PHOS}")
     soc.print(Panel(head, title=Text("◈ KNOWLEDGE GRAPH — CWE ⟷ code ⟷ security KB", style=f"bold {PHOS}"),
-                    title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                    title_align="left", border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
     if not cwe_index:
         return
@@ -1467,7 +1571,7 @@ def render_knowledge_graph(tree, cwe_index=None, max_hubs=10):
             hub.add(Text(f"◈ fix       ──▶  {names}", style=PHOS))
     if len(ranked) > max_hubs:
         tree_view.add(Text(f"… and {len(ranked) - max_hubs} more CWE hub(s)", style=LABEL))
-    soc.print(Panel(tree_view, border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+    soc.print(Panel(tree_view, border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1519,12 +1623,12 @@ def render_vulns(vulns, duration=0):
     head.append("◆ ", style=CAUT); head.append(f"MED {med:02d}   ", style=CAUT if med else LABEL)
     head.append("○ ", style=LABEL); head.append(f"LOW {low:02d}   ", style=LABEL)
     head.append("│  ", style=PHOS_DIM); head.append(f"TOTAL {total:02d}", style=READOUT)
-    soc.print(Panel(head, border_style=color, box=CANOPY, padding=(0, 1),
+    soc.print(Panel(head, border_style=color, box=_box(), padding=(0, 1),
                     title=Text("◈ TARGET ASSESSMENT", style=f"bold {color}"), title_align="left"))
 
     if not vulns:
         return score
-    t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+    t = Table(box=_box(), border_style=PHOS_DIM, padding=(0, 1),
               title=Text(f"CONFIRMED CONTACTS ({total})", style=f"bold {PHOS}"),
               title_justify="left")
     t.add_column("#", style=LABEL, width=3)
@@ -1533,7 +1637,7 @@ def render_vulns(vulns, duration=0):
     t.add_column("CWE", style=TGT, width=10)
     t.add_column("BEARING", style=LABEL)
     for i, v in enumerate(vulns, 1):
-        st, pip = SEV.get(v.severity, SEV["Low"])
+        st, pip = _sev_style(v.severity)
         t.add_row(str(i), Text(f"{pip} {v.severity}", style=st),
                   getattr(v, "title", None) or v.vuln_type, v.cwe or "—", v.endpoint or "")
     soc.print(t)
@@ -1550,7 +1654,7 @@ def render_council_vote(finding, votes, critical=False):
         short = (reason or "")[:58]
         card = Panel(Text(short, style=LABEL),
                      title=Text(model, style=f"bold {REF}"), subtitle=verdict,
-                     border_style=PHOS_DIM, box=CANOPY, width=26, padding=(0, 1))
+                     border_style=PHOS_DIM, box=_box(), width=26, padding=(0, 1))
         cards.append(card)
     confirmed = sum(1 for _, a, _ in votes if a)
     total = len(votes)
@@ -1645,14 +1749,14 @@ def render_genome(gen_count, block_history, endpoints=0, converged=False):
             else:           ch, col = "▂", WARN
             content.append(ch, style=col)
     soc.print(Panel(content, title=Text("⟳ BEHAVIORAL GENOME", style=f"bold {PHOS}"),
-                    title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                    title_align="left", border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  ATTACK SIMULATION ARENA
 # ══════════════════════════════════════════════════════════════════════════
 def render_attacks(attacks_data, blocked=0, total_mal=0, fp=0):
-    t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+    t = Table(box=_box(), border_style=PHOS_DIM, padding=(0, 1),
               title=Text("✦ ATTACK SIMULATION ARENA", style=f"bold {REF}"),
               title_justify="left")
     t.add_column("ATTACK", style=READOUT, min_width=16)
@@ -1687,13 +1791,13 @@ def render_patch_pipeline(generated, reviewed, approved, applied, verified):
     for name, count in stages:
         col = PHOS if count > 0 else LABEL
         cards.append(Panel(Text.assemble((name + "\n", col), (str(count), f"bold {col}")),
-                           border_style=PHOS_DIM, box=CANOPY, width=15))
+                           border_style=PHOS_DIM, box=_box(), width=15))
     soc.print(Panel(Columns(cards), title=Text("✚ PATCH PIPELINE", style=f"bold {PHOS}"),
-                    title_align="left", border_style=PHOS_DIM, box=CANOPY, padding=(0, 1)))
+                    title_align="left", border_style=PHOS_DIM, box=_box(), padding=(0, 1)))
 
 
 def render_patch_table(patches):
-    t = Table(box=CANOPY, border_style=PHOS_DIM, padding=(0, 1),
+    t = Table(box=_box(), border_style=PHOS_DIM, padding=(0, 1),
               title=Text("PATCH RESULTS", style=f"bold {PHOS}"), title_justify="left")
     t.add_column("#", width=3, style=LABEL)
     t.add_column("VULNERABILITY", min_width=24, style=READOUT)
@@ -1800,7 +1904,7 @@ def render_benchmark(report, console=None):
                 f"FPR ≤ {report['gates']['max_fpr']*100:.0f}%", style=LABEL)
 
     c.print(Panel(body, title=Text("◈ IMMUNE SYSTEM BENCHMARK", style=f"bold {v_col}"),
-                  title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
+                  title_align="left", border_style=v_col, box=_box(c), padding=(0, 2)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1911,7 +2015,7 @@ def render_verify_health(report, console=None):
     body.append_text(annunciator(verdict_label, v_lamp))
 
     c.print(Panel(body, title=Text("⛨ VERIFY GATE — MAINTAINABILITY PANEL", style=f"bold {v_col}"),
-                  title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
+                  title_align="left", border_style=v_col, box=_box(c), padding=(0, 2)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2006,7 +2110,7 @@ def render_observability(report, console=None):
     body.append_text(annunciator(verdict_label, v_lamp))
 
     c.print(Panel(body, title=Text("◈ SYSTEM OBSERVABILITY", style=f"bold {v_col}"),
-                  title_align="left", border_style=v_col, box=CANOPY, padding=(0, 2)))
+                  title_align="left", border_style=v_col, box=_box(c), padding=(0, 2)))
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2058,7 +2162,7 @@ def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
     if not _tty(c):
         c.print(Panel(Align.center(board(score, score)),
                       title=Text("◈ INTERCEPT COMPLETE", style=f"bold {color}"),
-                      border_style=color, box=CANOPY, padding=(0, 2)))
+                      border_style=color, box=_box(c), padding=(0, 2)))
     else:
         # dim / compute → odometer roll-up with thermal cool-down
         ticks = 26
@@ -2068,7 +2172,7 @@ def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
                 shown = int(score * p)
                 live.update(Panel(Align.center(board(shown, shown)),
                                   title=Text("◈ COMPUTING INTERCEPT", style=f"bold {REF}"),
-                                  border_style=score_color(shown), box=CANOPY, padding=(0, 2)))
+                                  border_style=score_color(shown), box=_box(c), padding=(0, 2)))
                 time.sleep(0.03)
             # LOCK — one-time xenon apex flash
             flash = Text("\n  ")
@@ -2076,17 +2180,17 @@ def render_score_reveal(score, crit, high, med, low, elapsed, scan_id,
             flash.append(f"   {label}\n\n  ", style=f"bold {APEX}")
             flash.append_text(_score_tape(score))
             live.update(Panel(Align.center(flash), title=Text("◈ SOLUTION LOCKED", style=f"bold {APEX}"),
-                              border_style=APEX, box=CANOPY, padding=(0, 2)))
+                              border_style=APEX, box=_box(c), padding=(0, 2)))
             time.sleep(0.12)
         c.print(Panel(Align.center(board(score, score)),
                       title=Text("◈ INTERCEPT COMPLETE", style=f"bold {color}"),
-                      border_style=color, box=CANOPY, padding=(0, 2)))
+                      border_style=color, box=_box(c), padding=(0, 2)))
 
     # verdict annunciator
     render_annunciator(label, lamp, console=c)
 
     # KILL BOARD
-    t = Table(box=CANOPY, border_style=PHOS_DIM, show_header=False, padding=(0, 2))
+    t = Table(box=_box(c), border_style=PHOS_DIM, show_header=False, padding=(0, 2))
     t.add_column(style=LABEL, width=14)
     t.add_column(style=READOUT)
     # crit/high/med/low are the findings STILL OPEN after remediation. Printing
@@ -2135,4 +2239,8 @@ def _gradient_bar(value, max_val, width=30):
 
 
 def _sev_style(sev):
-    return SEV.get(sev, SEV["Low"])
+    """(color, glyph) for a severity name — ASCII-safe. The one place both
+    SEV read sites in this module should go through, so a legacy Windows /
+    dumb-terminal / non-UTF-8 stream never sees the geometric pips."""
+    table = SEV_ASCII if _ascii_mode() else SEV
+    return table.get(sev, table["Low"])
