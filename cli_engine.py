@@ -3322,7 +3322,16 @@ class CyphexEngine:
                     with tempfile.NamedTemporaryFile(suffix=ext, mode='w', delete=False, encoding='utf-8') as tf:
                         tf.write(test_content); tf_name = tf.name
                     try:
-                        cmd = ["node", "-c", tf_name] if ext in ['.js', '.ts'] else ["python", "-m", "py_compile", tf_name]
+                        # sys.executable, not the literal "python" — many Linux
+                        # distros (Debian/Ubuntu w/o python-is-python3, Arch,
+                        # current Alpine) and macOS since Catalina have no bare
+                        # "python" on PATH at all. A FileNotFoundError here was
+                        # silently swallowed by the except below, leaving
+                        # syntax_passed at its default True — i.e. the
+                        # syntax-safety gate silently never ran before a patch
+                        # was written to disk. Same fix already used correctly
+                        # two lines away at the static-server fallback (~1088).
+                        cmd = ["node", "-c", tf_name] if ext in ['.js', '.ts'] else [sys.executable, "-m", "py_compile", tf_name]
                         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
                         if result.returncode != 0: syntax_passed = False
                     except Exception: pass

@@ -102,12 +102,18 @@ def run_gate_selftest(timeout: float = 8.0) -> dict:
         results["tsc"] = {"ok": None, "detail": "tsc not installed — self-test skipped", "duration_ms": 0}
     else:
         try:
+            # tsc resolves to a tsc.cmd shim on Windows — non-shell
+            # subprocess can't launch a bare "tsc" there even though
+            # _check_binary() above already confirmed it's on PATH. Same
+            # bug (and same fix) as backend/patch/applier.py's real check.
+            from backend.platform_compat import resolve_binary_cmd
+            tsc_cmd = resolve_binary_cmd("tsc")
             with tempfile.TemporaryDirectory() as td:
                 bad_ts = os.path.join(td, "bad.ts")
                 with open(bad_ts, "w", encoding="utf-8") as f:
                     f.write("const x: number = 'not a number';\n")
                 proc = subprocess.run(
-                    ["tsc", "--noEmit", "--strict", bad_ts],
+                    [tsc_cmd, "--noEmit", "--strict", bad_ts],
                     capture_output=True, text=True, timeout=timeout, cwd=td,
                 )
                 caught = proc.returncode != 0
@@ -117,6 +123,16 @@ def run_gate_selftest(timeout: float = 8.0) -> dict:
                           else "did not flag a known type error — TS build check may be broken",
                 "duration_ms": round((_time.time() - t0) * 1000),
             }
+        except (FileNotFoundError, OSError) as e:
+            # Distinguish "couldn't even launch tsc" from "tsc ran and
+            # something else went wrong" — the former reads to a maintainer
+            # as a subprocess-invocation bug, not a broken TypeScript
+            # install, and misreporting it as "crashed" sent Windows
+            # maintainers chasing a nonexistent TS problem before this fix.
+            results["tsc"] = {"ok": False,
+                               "detail": f"tsc found but could not be launched via subprocess ({e}) "
+                                         "— this is a platform invocation issue, not a TypeScript problem",
+                               "duration_ms": round((_time.time() - t0) * 1000)}
         except Exception as e:
             results["tsc"] = {"ok": False, "detail": f"self-test crashed: {e}",
                                "duration_ms": round((_time.time() - t0) * 1000)}

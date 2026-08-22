@@ -275,8 +275,15 @@ def _validate_syntax(file_path: str) -> Optional[bool]:
     if ext in (".ts", ".tsx"):
         if shutil.which("tsc"):
             try:
+                # tsc resolves to a tsc.cmd shim on Windows (npm-installed
+                # CLIs commonly are); non-shell subprocess can't launch a
+                # bare "tsc" there even though shutil.which() above already
+                # confirmed it's on PATH. Same resolution this codebase
+                # already uses for npm.
+                from backend.platform_compat import resolve_binary_cmd
+                tsc_cmd = resolve_binary_cmd("tsc")
                 result = subprocess.run(
-                    ["tsc", "--noEmit", file_path],
+                    [tsc_cmd, "--noEmit", file_path],
                     capture_output=True, text=True, timeout=15
                 )
                 return result.returncode == 0
