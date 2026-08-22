@@ -462,6 +462,9 @@ cyphex                                  # no args → slash-command workspace (a
 /benchmark [--threshold N] [--json out.json]
 /setup /doctor /models /version /history /clear /help /exit
 <bare path or URL>                      # auto-scans it; Tab completes commands
+<plain English>                         # "run my repo <link>" → routed to /scan --full
+                                         # via local Ollama (nl_router.py); guardrailed —
+                                         # only ever emits a real slash command or refuses
 ```
 
 **`./cx` launcher** — same engine, non-interactively: `cx scan`, `cx deep`, `cx net`, `cx benchmark`, `cx doctor`, `cx models`, `cx --version`, or `cx <path|url>` to auto-scan.

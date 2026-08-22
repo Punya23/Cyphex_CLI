@@ -47,6 +47,15 @@ try:
     SOC_UI = True
 except ImportError:
     SOC_UI = False
+
+# Terminal mascot — animated companion for otherwise-silent waits (Docker
+# boot, model calls). No-ops itself on non-tty/NO_COLOR, so it's always
+# safe to import and call even when SOC_UI above is False.
+try:
+    import mascot
+    MASCOT = True
+except ImportError:
+    MASCOT = False
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -467,6 +476,11 @@ class CyphexEngine:
         import re as _re
         done = int(_re.sub(r"[^0-9]", "", step_num) or "0")
         total = int(step_total)
+
+        # Mascot cameo announcing the phase transition — brief, self-cleaning,
+        # never held open (each phase's own work handles its own feedback).
+        if MASCOT:
+            mascot.thinking(label=title, flourish=True)
 
         if SOC_UI:
             ui.render_step(done, total, title, elapsed, mode)
@@ -963,6 +977,8 @@ class CyphexEngine:
                     # Wait for app to be ready
                     url = f"http://localhost:{port}"
                     print(f"  {C.GHOST}Waiting for containers to start...{C.RST}")
+                    if MASCOT:
+                        mascot.searching("Waiting for containers to start...")
                     for attempt in range(20):
                         await asyncio.sleep(3)
                         try:
@@ -978,6 +994,8 @@ class CyphexEngine:
                                         "source_dir": source_dir,
                                     }
                                     self._docker_compose_dir = source_dir
+                                    if MASCOT:
+                                        mascot.success(f"Docker stack ready (attempt {attempt + 1})")
                                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker stack ready (attempt {attempt + 1}){C.RST}")
                                     sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
                                     print(f"  {sb}")
@@ -988,6 +1006,8 @@ class CyphexEngine:
                         except Exception:
                             continue
 
+                    if MASCOT:
+                        mascot.error("Docker stack not responding")
                     self._vprint(f"  {C.Y}[WARN]{C.RST} Docker stack started but app not responding on port {port}")
                 else:
                     err_lines = [line for line in proc.stderr.splitlines() if "error" in line.lower() or "failed" in line.lower() or "yaml:" in line.lower()]
@@ -1263,6 +1283,8 @@ class CyphexEngine:
         context = ScanContext(target_url=target_url)
 
         def agent_header(agent_id: str, name: str, objective: str):
+            if MASCOT:
+                mascot.searching(label=f"[{agent_id}] {name}", flourish=True)
             if SOC_UI:
                 ui.render_agent_header(agent_id, name, objective)
                 return
@@ -1289,6 +1311,8 @@ class CyphexEngine:
             oracle = AttackOracle(orchestrator=orchestrator)
 
         def agent_header(agent_id: str, name: str, objective: str):
+            if MASCOT:
+                mascot.searching(label=f"[{agent_id}] {name}", flourish=True)
             if SOC_UI:
                 ui.render_agent_header(agent_id, name, objective)
                 return
@@ -3717,12 +3741,20 @@ class CyphexEngine:
 
         # 1. Try Ollama (local model)
         try:
+            if MASCOT:
+                # Covers the otherwise-silent gap between issuing the request
+                # and the first response headers arriving; handed off to the
+                # Rich "Thinking" Live panel below the moment headers land, so
+                # the two redraw loops never run at the same time.
+                mascot.thinking(f"{model_name} — contacting Ollama...")
             async with httpx.AsyncClient(timeout=90) as client:
                 async with client.stream(
                     "POST",
                     "http://127.0.0.1:11434/api/generate",
                     json={"model": model_name, "prompt": prompt, "stream": True}
                 ) as resp:
+                    if MASCOT:
+                        mascot.stop()
                     if resp.status_code == 200:
                         raw = ""
                         thinking_text = ""
@@ -3761,6 +3793,8 @@ class CyphexEngine:
                                 "patch_safety": "Review manually before merge.",
                             }
         except Exception as e:
+            if MASCOT:
+                mascot.error("Ollama unavailable")
             console.print(f"  [yellow][INFO] Ollama unavailable ({str(e)[:50]}). Using built-in patch rules.[/yellow]")
 
         # 2. Fallback: Rule-based patches (works 100% offline)

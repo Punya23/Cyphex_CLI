@@ -64,6 +64,14 @@ except ImportError:
 
 CX_VERSION = ui.CX_VERSION if BOOT_UI else "4.3"
 
+# ── Terminal mascot (optional — _spinner() below just stays a plain line if
+#    unavailable; no-ops itself on non-tty/NO_COLOR either way) ──────────────
+try:
+    import mascot
+    MASCOT_UI = True
+except ImportError:
+    MASCOT_UI = False
+
 
 def _boot_animation():
     """No-op. The workspace opens straight to the LEFT-aligned welcome box
@@ -101,6 +109,25 @@ def _repl_prompt():
         except Exception:
             pass
     return f"{C.CYAN}cx{C.RST}{C.GREY}>{C.RST} "
+
+
+def _input_box_top():
+    """Open the bordered input field above the prompt (no-op in the plain
+    ANSI fallback, or if rendering fails — never blocks the REPL)."""
+    if BOOT_UI:
+        try:
+            ui.deck_input_box_top()
+        except Exception:
+            pass
+
+
+def _input_box_bottom():
+    """Close the bordered input field after a line is submitted."""
+    if BOOT_UI:
+        try:
+            ui.deck_input_box_bottom()
+        except Exception:
+            pass
 
 
 def _goodbye():
@@ -184,7 +211,8 @@ QUICK_HELP = f"""
   {C.NEON}/exit{C.RST}  {C.NEON}/quit{C.RST}      Exit CYPHEX
 
 {C.DIM}─────────────────────────────────────────────────────────────
-  Tip: just type a path or URL and press Enter to scan it{C.RST}
+  Tip: type a path, URL, or plain English — "scan my repo <link>",
+       "run a full scan on ./app" — and press Enter{C.RST}
 """
 
 
@@ -228,8 +256,15 @@ def _clear():
         os.system("cls" if os.name == "nt" else "clear")
 
 def _spinner(msg: str):
-    """Print a status line."""
+    """Print a status line, with a brief animated mascot flourish alongside
+    it — the mascot is fully stopped and erased again before this returns,
+    so it never races the subprocess that _run_cyphex() spawns right after."""
     print(f"\n  {C.CYAN}◆{C.RST} {msg}")
+    if MASCOT_UI:
+        try:
+            mascot.thinking(msg, flourish=True)
+        except Exception:
+            pass
 
 def _ok(msg: str):
     print(f"  {C.NEON}✓{C.RST} {msg}")
@@ -694,7 +729,10 @@ def _cmd_history():
 def _auto_scan(raw: str):
     """
     User typed something that isn't a slash command.
-    If it looks like a path or URL, scan it.
+    If it looks like a path or URL, scan it directly. Otherwise hand it to
+    the natural-language router (nl_router.py, backed by local Ollama) —
+    "run my repo <link>" becomes "/scan <link> --full" — so the workspace
+    reads plain English the same way it always read slash commands.
     """
     raw = raw.strip()
     if not raw:
@@ -703,9 +741,29 @@ def _auto_scan(raw: str):
     is_path = os.path.exists(os.path.expanduser(raw)) or raw.startswith("./") or raw.startswith("~/")
     if is_url or is_path:
         _cmd_scan(raw)
-    else:
-        _err(f"Unknown command or path not found: {C.BOLD}{raw}{C.RST}")
-        _dim("Type /help to see available commands.")
+        return
+
+    routed = _nl_route(raw)
+    if routed:
+        _dim(f"→ {routed}")
+        _handle(routed)
+        return
+
+    _err(f"Unknown command or path not found: {C.BOLD}{raw}{C.RST}")
+    _dim("Type /help to see available commands, or plain English like \"scan my repo <link>\".")
+
+
+def _nl_route(raw: str) -> str | None:
+    """Ask the local Ollama router (nl_router.py) to translate free text
+    into a slash command. Fails silently (returns None) if Ollama isn't
+    installed, isn't running, or refuses — the REPL then just falls back
+    to the plain "unknown command" message, same as before this existed."""
+    try:
+        import nl_router
+    except ImportError:
+        return None
+    _dim("interpreting…")
+    return nl_router.translate(raw)
 
 
 # ── Main REPL ─────────────────────────────────────────────────────────────────
@@ -800,17 +858,21 @@ def _repl():
         # is always honest. Static snapshot per turn — the animated deck only
         # runs inside rich.Live during operations, never against readline.
         _deck()
+        _input_box_top()
         try:
             line = input(_repl_prompt()).strip()
         except KeyboardInterrupt:
             # Ctrl+C → new line, don't quit
+            _input_box_bottom()
             print()
             continue
         except EOFError:
             # Ctrl+D → quit
+            _input_box_bottom()
             _goodbye()
             break
 
+        _input_box_bottom()
         _handle(line)
 
 

@@ -227,16 +227,44 @@ def main():
         from rich.console import Console
         console = Console()
 
-        REQUIRED_MODELS = [
-            ("deepseek-coder:1.3b",  "Detector",    "always-on",   1.0),
-            ("phi3:mini",             "Validator",   "always-on",   2.2),
-            ("llama3.2:1b",           "Narrator",    "phase-swap",  1.0),
-            ("cyphex-patch",          "Patch Agent", "patch-only",  4.5),
-        ]
-
+        # Was previously a hardcoded tag list (deepseek-coder:1.3b, phi3:mini,
+        # cyphex-patch, ...) that had drifted from what's actually pulled and
+        # in use — it reported those as NOT FOUND while the real pipeline ran
+        # fine on different, better models. ModelSelector.discover() is the
+        # SAME resource-aware brain the live scan/patch/debate pipeline uses
+        # (see backend/council/model_selector.py) — it dynamically picks the
+        # best installed model per role, quality-first — so this check now
+        # verifies what will actually run, not a stale wishlist.
         console.print("[bold cyan]CYPHEX Council Model Health Check[/bold cyan]\n")
+
+        from backend.council.model_selector import ModelSelector
+        import nl_router
+
+        selector = ModelSelector()
+        discovered = asyncio.run(selector.discover(quiet=True))
+
+        if not discovered:
+            console.print("[red]✗ Ollama unreachable, or no models installed at localhost:11434[/red]")
+            console.print("  → Start it: [bold]ollama serve[/bold]   then pull a model: [bold]ollama pull llama3.1:8b[/bold]")
+            raise SystemExit(1)
+
+        console.print(f"  [dim]{len(selector.models)} model(s) found · strategy: {selector.strategy} · "
+                       f"VRAM budget {selector.vram_budget:.1f}GB[/dim]\n")
+
+        # role -> (display name, schedule) — mirrors ModelSelector.ROLES plus
+        # the interpreter role nl_router.py adds on top for the NL router.
+        ROLE_META = {
+            "detector":  ("Detector",    "always-on"),
+            "validator": ("Validator",   "always-on"),
+            "patcher":   ("Patch Agent", "patch-only"),
+        }
+
+        checks = [(selector.assignments[role], *meta) for role, meta in ROLE_META.items()
+                  if role in selector.assignments]
+        checks.append((nl_router.ROUTER_MODEL, "Interpreter", "NL-router"))
+
         all_ok = True
-        for tag, role, schedule, vram in REQUIRED_MODELS:
+        for tag, role, schedule in checks:
             try:
                 r = httpx.post(
                     "http://localhost:11434/api/generate",
@@ -245,9 +273,9 @@ def main():
                 )
                 response = r.json().get("response", "")
                 if "ready" in response.lower():
-                    console.print(f"  [green]✓[/green] {role:12} {tag:30} {vram} GB  ({schedule})")
+                    console.print(f"  [green]✓[/green] {role:12} {tag:30} ({schedule})")
                 else:
-                    console.print(f"  [yellow]⚠[/yellow] {role:12} {tag:30} {vram} GB  ({schedule}) — unexpected response")
+                    console.print(f"  [yellow]⚠[/yellow] {role:12} {tag:30} ({schedule}) — unexpected response")
             except Exception:
                 console.print(f"  [red]✗[/red] {role:12} {tag:30} NOT FOUND")
                 console.print(f"       → Run: [bold]ollama pull {tag}[/bold]")

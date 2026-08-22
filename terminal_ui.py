@@ -801,7 +801,7 @@ def render_masthead(console=None, hint=True):
     c.print(Panel(
         body,
         title=Text("◈ WORKSPACE", style=f"bold {REF}"),
-        subtitle=Text("type a path or URL directly to scan it", style=LABEL),
+        subtitle=Text("type a path, URL, or plain English to scan it", style=LABEL),
         title_align="left", subtitle_align="left",
         border_style=PHOS_DIM, box=ROUNDED, padding=(1, 2),
     ))
@@ -836,7 +836,7 @@ def render_help(console=None):
     for cmd, arg, desc in rows:
         t.add_row(cmd, arg, desc)
     c.print(Panel(t, title=Text("◈ COMMAND DECK", style=f"bold {REF}"),
-                  subtitle=Text("type a path or URL directly to acquire it", style=LABEL),
+                  subtitle=Text("type a path, URL, or plain English to acquire it", style=LABEL),
                   subtitle_align="left", title_align="left",
                   border_style=PHOS_DIM, box=CANOPY, padding=(0, 2)))
 
@@ -896,6 +896,12 @@ def render_boot(console=None):
             body.append(TAGLINE, style=LABEL)
             screen.update(ctr(body))
             time.sleep(0.7)
+        # A brief mascot cameo on the MAIN screen as boot hands off to
+        # whatever normally follows (render_masthead). Imported lazily —
+        # mascot.py imports these colour constants from this module, so a
+        # top-level import here would be circular.
+        import mascot as _mascot
+        _mascot.success("systems armed")
     except Exception:
         # Never let eye-candy crash a launch
         pass
@@ -936,6 +942,16 @@ def render_tools_live(tools, console=None, stagger=0.10, pulse_hold=0.10):
         c.print(frame(["go" if ok else "nogo" for _, ok, _ in tools]))
         return
 
+    # Lazy import — mascot.py imports this module's colour constants, so a
+    # top-level import here would be circular. Bracketed around (not run
+    # concurrently with) the Live loop below so the two redraw loops never
+    # fight over the same terminal lines. Never let eye-candy crash a launch.
+    try:
+        import mascot as _mascot
+        _mascot.searching("Running built-in test...", flourish=True)
+    except Exception:
+        _mascot = None
+
     states = ["pending"] * len(tools)
     any_nogo = False
     with Live(frame(states), console=c, refresh_per_second=14, transient=False) as live:
@@ -946,7 +962,17 @@ def render_tools_live(tools, console=None, stagger=0.10, pulse_hold=0.10):
             any_nogo = any_nogo or (not ok)
             live.update(frame(states)); time.sleep(stagger)
     if any_nogo:
+        if _mascot:
+            try:
+                _mascot.error("MASTER CAUTION")
+            except Exception:
+                pass
         render_annunciator("MASTER CAUTION", "caution", console=c)
+    elif _mascot:
+        try:
+            _mascot.success("all systems go")
+        except Exception:
+            pass
 
 
 # Legacy static variant (kept for API completeness)
@@ -974,6 +1000,15 @@ async def render_progress_task(awaitable, label, console=None, ease_target=92, t
     if not _tty(c):
         return await awaitable
 
+    # Lazy import — mascot.py imports this module's colour constants, so a
+    # top-level import here would be circular. A quick announcing beat before
+    # the SWEEP bar takes over (never let eye-candy crash real work).
+    try:
+        import mascot as _mascot
+        _mascot.thinking(label, flourish=True)
+    except Exception:
+        _mascot = None
+
     with Progress(
         TextColumn("  [bold]{task.fields[lab]}[/bold]", style=REF),
         BarColumn(bar_width=34, style=PHOS_DIM, complete_style=REF, finished_style=PHOS),
@@ -989,7 +1024,22 @@ async def render_progress_task(awaitable, label, console=None, ease_target=92, t
                 progress.update(tid, completed=min(pct, ease_target))
             await asyncio.sleep(tick)
         progress.update(tid, completed=100)
-        return work.result()
+        try:
+            result = work.result()
+        except Exception:
+            if _mascot:
+                try:
+                    _mascot.error(label)
+                except Exception:
+                    pass
+            raise
+
+    if _mascot:
+        try:
+            _mascot.success(label)
+        except Exception:
+            pass
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1208,7 +1258,8 @@ _ANSI_RST = "\033[0m"
 
 def deck_prompt(session=None):
     """readline-safe armed-caret prompt (line 2). ANSI wrapped in \\001..\\002
-    so cursor/column math stays correct on long input."""
+    so cursor/column math stays correct on long input. Prefixed with the
+    left wall of the input field opened by deck_input_box_top()."""
     s = session or {}
     caret, ccol = {"idle": ("⊕", PHOS), "executing": ("⌖", REF),
                    "locked": ("◈", TGT)}.get(s.get("caret", "idle"), ("⊕", PHOS))
@@ -1218,8 +1269,33 @@ def deck_prompt(session=None):
 
     if not _tty():
         return "cx > "
-    return (rl(_fg(ccol)) + caret + " " + rl(_fg(READOUT)) + "cx "
+    return (rl(_fg(PHOS_DIM)) + "│ " + rl(_ANSI_RST)
+            + rl(_fg(ccol)) + caret + " " + rl(_fg(READOUT)) + "cx "
             + rl(_fg(PHOS)) + "▸ " + rl(_ANSI_RST))
+
+
+def deck_input_box_top(console=None):
+    """Top wall of the boxed input field — printed just above the prompt so
+    typing happens visually 'inside' a field, not bare on the rail. Paired
+    with deck_input_box_bottom() after the line is submitted; the right
+    wall is intentionally not drawn on the input line itself since plain
+    readline can't keep a fixed-column border in sync with live typing."""
+    c = console or soc
+    if not _tty(c):
+        return
+    width = max(_cols(c), 20)
+    c.print(Text("╭" + "─" * (width - 2) + "╮", style=PHOS_DIM))
+
+
+def deck_input_box_bottom(console=None):
+    """Bottom wall of the boxed input field — closes it once Enter (or
+    Ctrl+C/Ctrl+D) ends the line, so command output renders below the box
+    rather than inside it."""
+    c = console or soc
+    if not _tty(c):
+        return
+    width = max(_cols(c), 20)
+    c.print(Text("╰" + "─" * (width - 2) + "╯", style=PHOS_DIM))
 
 
 # ══════════════════════════════════════════════════════════════════════════
