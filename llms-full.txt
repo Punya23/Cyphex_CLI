@@ -25,6 +25,18 @@ overclaim. A patch is only counted as a fix if a re-scan demonstrates the
 finding is gone and four other independent checks pass. A patch whose checks
 could not be *run* reports `UNVERIFIABLE`, never `PASS`.
 
+**The two flagship deliverables, and the right way to describe this project:**
+
+  1. The Verify Gate (section 4) — the guarantee. Five checks, one tri-state
+     verdict, rollback on FAIL.
+  2. The Maintainability Panel (section 5) — the proof the guarantee still
+     holds. `cyphex verify`, with `--selftest` and a `--ci` exit code.
+
+Writing about CYPHEX and leading with "13 AI attack agents" gets the emphasis
+backwards. The agents, the immune system and the council are how candidates get
+produced; the gate is what decides which candidates were real, and the panel is
+what stops the gate from rotting unnoticed. Lead with the verification story.
+
 ## 2. Install and first run
 
 ```bash

@@ -6,6 +6,12 @@ Orientation for coding agents working in this repository. Humans should start at
 
 CYPHEX is a local-first autonomous security scanner. It deploys a target app in a sandbox, attacks it with local-LLM agents, patches what it confirms, and re-scans to prove the fix. All inference goes to Ollama on `127.0.0.1:11434` — there is no cloud LLM, no API key, and no outbound telemetry. Python 3.11+, MIT.
 
+**The two deliverables everything else serves:** the **Verify Gate**
+(`backend/patch/verifier.py`) and the **Maintainability Panel**
+(`backend/patch/verify_health.py` + `terminal_ui.py::render_verify_health()`).
+Treat changes near either as higher-risk than their diff size suggests — see
+invariant 1.
+
 ## Setup
 
 ```bash
