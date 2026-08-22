@@ -386,7 +386,50 @@ def _launch_workspace():
     cx.run_workspace()
 
 
+def _run_panel(name: str, argv: list) -> None:
+    """Route `cyphex verify|status|benchmark` to cx.py's existing handlers.
+
+    One implementation, two entry points: these panels used to be reachable
+    only from `cx <cmd>` and the workspace's `/verify` `/status` `/benchmark`,
+    while README, llms.txt and docs/ all documented them as `cyphex <cmd>` —
+    which argparse rejected outright ("invalid choice").
+
+    Called BEFORE parse_args(): argparse cannot forward an option-looking
+    tail (`--ci`, `--selftest`, `--watch`) through a subparser — even
+    nargs=REMAINDER lets the parent parser claim a leading `--flag` and die
+    with "unrecognized arguments". Handing the raw tail to cx.py's own shlex
+    parsing keeps every flag behaving identically on both entry points.
+    """
+    # Imported here, not at module scope, for the same reason cx.py defers its
+    # own heavy imports: `cyphex --help` must stay fast.
+    try:
+        import cx
+    except Exception as e:
+        print(f"Could not load the CYPHEX panels: {e}")
+        print("Run from the project directory, or reinstall with: pip install -e .")
+        sys.exit(1)
+
+    rest = " ".join(argv)
+    if name == "verify":
+        # _cmd_verify returns an int only under --ci, and that int IS the CI
+        # verdict (0 healthy / 1 degraded / 2 unusable). It has to become the
+        # process exit code or the gate is decorative.
+        code = cx._cmd_verify(rest)
+        if code is not None:
+            sys.exit(code)
+    elif name == "status":
+        cx._cmd_status(rest)
+    else:
+        cx._cmd_benchmark(rest)
+
+
 def main():
+    # Pre-parse intercept — see _run_panel's docstring for why these three
+    # cannot go through argparse.
+    if len(sys.argv) > 1 and sys.argv[1] in ("verify", "status", "benchmark"):
+        _run_panel(sys.argv[1], sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(
         prog="cyphex",
         description="CYPHEX — AI Security Scanner with Adversarial Immune System. "
@@ -432,6 +475,24 @@ def main():
 
     # ── cyphex council-doctor ──
     subparsers.add_parser("council-doctor", help="Check council model status")
+
+    # ── cyphex verify / status / benchmark ──
+    # These three maintainer-facing panels were reachable only from `cx` and
+    # from the workspace's `/verify` `/status` `/benchmark`, while README,
+    # llms.txt and docs/ all documented them as `cyphex <cmd>` — which
+    # argparse rejected outright ("invalid choice"). They are the same
+    # handlers cx.py already ships; argparse.REMAINDER forwards the flag
+    # tail verbatim so `--selftest` / `--ci` / `--json` / `--watch` keep
+    # working identically on both entry points.
+    for _name, _help in (
+        ("verify", "Verify Gate maintainability panel "
+                   "[path] [--selftest] [--ci] [--json out.json] [--watch [s]]"),
+        ("status", "System observability panel — last scan's phases, agents, errors "
+                   "[path] [--json out.json] [--watch [s]]"),
+        ("benchmark", "Immune-system benchmark "
+                      "[--data corpus.csv] [--threshold N] [--json out.json]"),
+    ):
+        subparsers.add_parser(_name, help=_help, add_help=False)
 
     args = parser.parse_args()
 
@@ -485,6 +546,7 @@ def main():
         sys.path.insert(0, _PROJECT_ROOT)
         from cyphex_cli import council_doctor
         asyncio.run(council_doctor())
+
 
     else:
         parser.print_help()
