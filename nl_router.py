@@ -331,6 +331,28 @@ def _coerce_pseudo_tool_call(line: str) -> str | None:
     return " ".join(parts)
 
 
+_COMMAND_TOKEN_RE = re.compile(r"(?:(?<=\s)|^)(" + "|".join(re.escape(c) for c in _ALLOWED) + r")\b")
+
+
+def _extract_trailing_command(line: str) -> str | None:
+    """The model sometimes explains its reasoning before the real answer,
+    on the SAME line, despite being told not to — observed live:
+    "check_path returned true, so we can proceed. /scan /path --full".
+    It already grounded itself correctly via check_path; it just didn't
+    follow the "output nothing else" formatting rule. Pull the LAST real
+    command out of the line — the model's actual final answer — instead
+    of refusing because the line doesn't start with '/'. No-ops (returns
+    None) when the line is already well-formed, so the common case is
+    untouched, and it only ever extracts a command the model itself
+    already wrote in full — it doesn't construct one."""
+    if _COMMAND_RE.match(line):
+        return None
+    matches = list(_COMMAND_TOKEN_RE.finditer(line))
+    if not matches:
+        return None
+    return line[matches[-1].start(1):]
+
+
 def _validate(raw: str, original_text: str = "") -> str | None:
     """Enforce the guardrail: only a whitelisted command line survives.
     Everything else — chatter, a claimed name, multi-line output, an
@@ -342,6 +364,7 @@ def _validate(raw: str, original_text: str = "") -> str | None:
     if not line or line.upper() == "REFUSE":
         return None
     line = _coerce_pseudo_tool_call(line) or line
+    line = _extract_trailing_command(line) or line
     m = _COMMAND_RE.match(line)
     if not m:
         return None

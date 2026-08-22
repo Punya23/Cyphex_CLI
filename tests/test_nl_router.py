@@ -143,6 +143,24 @@ class TestToolCalling:
         with patch("httpx.post", side_effect=[turn1, turn2]):
             assert nl_router.translate("scan my repo totally-fake-xyz") is None
 
+    def test_extracts_command_when_model_explains_itself_first(self, tmp_path):
+        # Live-observed regression: model correctly calls check_path, gets
+        # exists:True back, then still prefixes its answer with reasoning
+        # on the same line instead of outputting only the command as
+        # instructed. The right, grounded answer is still in there — pull
+        # it out instead of refusing a request that was actually correct.
+        turn1 = _chat_response(tool_calls=[_tool_call("check_path", name=str(tmp_path))])
+        turn2 = _chat_response(
+            f"check_path returned true, so we can proceed with the scan. /scan {tmp_path} --full"
+        )
+        with patch("httpx.post", side_effect=[turn1, turn2]):
+            out = nl_router.translate(f"run this full scan {tmp_path}")
+        assert out == f"/scan {tmp_path} --full"
+
+    def test_well_formed_line_is_not_touched_by_extraction(self):
+        # _extract_trailing_command must no-op on the common, correct case.
+        assert nl_router._extract_trailing_command("/scan ./app --full") is None
+
 
 class TestToolImplementations:
     """The tools themselves — read-only filesystem grounding."""
