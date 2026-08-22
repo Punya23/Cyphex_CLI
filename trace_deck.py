@@ -5,34 +5,43 @@ The compact live view of the waypoint trace: a small mascot on the left,
 the current goal and its sub-steps on the right, inside one bordered box.
 
     ╭─ ◈ CYPHEX ─ 4/9 DYNAMIC VULNERABILITY SCAN ──────── 12.4s ─╮
-    │  ▄▀▀▄   goal · Prove which candidates are exploitable      │
-    │  ██▄▄   ✓ crawler         24 endpoints              1.2s   │
-    │  ▀█▄▄▀  ✓ api discovery   8 routes                  0.4s   │
-    │   ▄     ⠋ agent 03 SQLi   probing /api/orders              │
+    │     ╹     goal · Prove which candidates are exploitable    │
+    │   ▛▀▀▀▀▜  ✓ crawler         24 endpoints            1.2s   │
+    │   ▌▘ ▸▸▐  ✓ api discovery   8 routes                0.4s   │
+    │   ▙▄▄▄▄▟  ⠋ agent 03 SQLi   probing /api/orders            │
+    │    ▀  ▀                                                    │
     ╰────────────────────────────────────────────────────────────╯
 
 WHY THIS EXISTS, AND WHY IT IS SMALL
 The mascot previously rendered at 24 columns and owned its own terminal
 region, which made it a decoration competing with the pipeline output. Here
-it is 8-10 columns and lives *inside* the trace box, next to the thing it
-is reacting to — the same relationship a coding agent's companion has to
-its status line. Its expression is not ambient: it is bound to the trace
-state, so a glance at the buddy tells you the same thing the text does.
+it is 8 columns and lives *inside* the trace box, next to the thing it is
+reacting to — the same relationship a coding agent's companion has to its
+status line. Its expression is not ambient: it is bound to the trace state,
+so a glance at the buddy tells you the same thing the text does.
+
+WHY THE ART IS HAND-AUTHORED
+The first version downsampled mascot.py's pixel-art sprite to 8 columns. It
+did not work, and could not: mascot.py itself sets _MIN_TARGET_COLS = 16 and
+documents that below it the art is mush. Squeezing a 109x177 sprite —
+already recovered from JPEG-compressed reference art — through a 13x
+reduction produced disconnected fragments with no silhouette. So the buddy
+is drawn at the size it is displayed, as 8x5 block glyphs, one authored
+frame set per state. Resampling cannot invent structure at this scale;
+drawing can.
 
 WHY IT IS A SEPARATE MODULE
 It renders `backend.observability.trace.TraceRecorder`, which is the single
 source of truth. This module holds no state a maintainer could disagree
-with — it is a pure view. It deliberately does NOT live in terminal_ui.py:
-it composes mascot frames directly via mascot_anim + the subcell backend,
-so it needs neither mascot.py's terminal-owning session machinery nor a
-change to any of it.
+with — it is a pure view. It deliberately does NOT live in terminal_ui.py,
+and since the art became glyphs it needs neither Pillow, nor the sprite
+assets, nor any of mascot.py's terminal-owning session machinery.
 
-DEGRADATION — three levels, each verified:
-  1. Full      — TTY + Pillow + mascot assets: animated mascot beside the trace.
-  2. No mascot — Pillow/assets unavailable: the box renders text-only.
-  3. No TTY    — CI, pipes: one static line per completed step, no box, no
-                 escapes. The trace is still fully recorded either way; the
-                 durable record is the event log, not this view.
+DEGRADATION — two levels, each verified:
+  1. Full    — TTY: the animated buddy beside the live trace, in one box.
+  2. No TTY  — CI, pipes: one static line per completed step, no box, no
+               escapes. The trace is still fully recorded either way; the
+               durable record is the event log, not this view.
 """
 
 import os
@@ -44,12 +53,13 @@ import time
 # terminal_ui must degrade this to plain text, never break a scan.
 try:
     from terminal_ui import (
-        PHOS, PHOS_DIM, REF, CAUT, WARN, LABEL, READOUT, TGT,
+        PHOS, PHOS_DIM, REF, CAUT, WARN, WARN_HOT, APEX, LABEL, READOUT, TGT,
         soc as _soc, _tty as _ui_tty, _ascii_mode as _ui_ascii,
     )
     _UI = True
 except Exception:  # pragma: no cover - defensive
     PHOS = PHOS_DIM = REF = CAUT = WARN = LABEL = READOUT = TGT = ""
+    WARN_HOT = APEX = ""
     _soc = None
     _UI = False
 
@@ -63,40 +73,6 @@ except Exception:  # pragma: no cover - defensive
 
 from backend.observability.trace import RUNNING, OK, WARN as ST_WARN, FAIL, SKIP
 
-
-# ── mascot frame source ──────────────────────────────────────────────────
-# Composed directly from mascot_anim + the subcell backend rather than
-# through mascot.py's Mascot session, because that session owns a terminal
-# region (cursor save/restore, reserve/clear) and cannot be nested inside
-# somebody else's box. render_frame() returns exactly `cols`-wide padded
-# lines, which is precisely what box composition needs.
-try:
-    import mascot_anim as _anim
-    import mascot_backend_subcell as _subcell
-    _MASCOT = True
-except Exception:
-    _anim = _subcell = None
-    _MASCOT = False
-
-# Small on purpose. 8 cols renders 6 rows through the quadrant backend,
-# which is the whole content height of a compact deck.
-DECK_COLS = 8
-DECK_MODE = "quadrant"
-
-# Trace state -> mascot animation. Every state in mascot_anim.STATE_ORDER
-# is reachable from some pipeline condition, so the full animation set is
-# used rather than a token two.
-STATE_FOR_WAYPOINT = {
-    "1": "uploading",    # fetching source
-    "2": "searching",    # static analysis
-    "3": "working",      # sandbox deploy
-    "3b": "searching",   # network sweep
-    "4": "searching",    # dynamic scan
-    "5": "thinking",     # genome build — the highlighted one
-    "6": "working",      # attack simulation
-    "7": "thinking",     # report
-    "8": "working",      # patch + verify
-}
 
 _STATUS_GLYPH = {
     OK: ("✓", "v"),
@@ -124,83 +100,159 @@ def _visible(s: str) -> str:
     return _ANSI_RE.sub("", s)
 
 
+# ── mascot frame source ──────────────────────────────────────────────────
+# The buddy here is HAND-AUTHORED block art, not the downsampled pixel-art
+# sprite the full-size mascot uses, and that is a deliberate reversal of the
+# first implementation.
+#
+# mascot.py sets _MIN_TARGET_COLS = 16 and documents why: below that the
+# sprite is mush and a plain glyph line is the honest answer. The deck wants
+# 8 columns. Feeding a 109x177 sprite — itself recovered from JPEG-compressed
+# reference art — through a 13x downsample produced disconnected fragments
+# with no readable silhouette: at 8 cols "idle" rendered as
+#
+#     ▄▄▄▄        ▀█  ▄█        ▀  ▀▀        ▀▀▀▀▀
+#
+# which is not a robot by any reading. Resampling cannot invent structure
+# that few pixels; the only way to be legible at this size is to draw it at
+# this size. So each state is authored directly as 8x5 block glyphs.
+#
+# This also drops Pillow and the sprite assets from the deck's dependency
+# set entirely, so the "no mascot" degradation level no longer exists — the
+# buddy renders anywhere the box does.
+#
+# GLYPH WIDTH: the chassis uses ▀ ▄ ▌ which Unicode classes as
+# East-Asian-Ambiguous, i.e. double-width under some CJK locales. They are
+# kept because the shipped subcell renderer already depends on them being
+# narrow, so the deck is exactly as safe as the rest of the UI and no more.
+# The FACE glyphs are all unambiguously narrow (▘ ▂ ▪ ▸ ▴ ◜ ◝ ✕), since
+# those are the ones that change per state and would desynchronise the box
+# width if they measured differently frame to frame.
+DECK_COLS = 8
+DECK_MODE = "glyph"
+
+#: Antenna, 4-cell face, 4-cell feet — per animation frame, per state.
+#: Frames cycle at the deck's redraw rate; single-frame states are static.
+_SPRITE_STATES = {
+    "idle":      [("╻", "▘  ▘", "▀  ▀"), ("╻", "▂  ▂", "▀  ▀")],
+    "searching": [("╹", "▘ ▸▸", "▀  ▀"), ("╹", "▘▸▸ ", "▀  ▀"),
+                  ("╹", "▘▸  ", "▀  ▀")],
+    "thinking":  [("╹", "▪   ", "▀  ▀"), ("╹", "▪▪  ", "▀  ▀"),
+                  ("╹", "▪▪▪ ", "▀  ▀")],
+    "working":   [("╻", "▘  ▘", "▄  ▀"), ("╻", "▘  ▘", "▀  ▄")],
+    "uploading": [("╹", "▴  ▴", "▀  ▀"), ("╹", "▘  ▘", "▀  ▀")],
+    "success":   [("╹", "◜  ◝", "▀  ▀")],
+    "error":     [("╻", "✕  ✕", "▀  ▀"), ("╻", "▘  ▘", "▀  ▀")],
+}
+
+#: ASCII twin of _SPRITE_STATES, for terminals that cannot render the block
+#: glyphs at all (legacy Windows consoles, non-UTF-8 locales). Same 8x5 grid
+#: and the same per-state faces, so the deck's geometry is identical either
+#: way — only the character vocabulary changes, exactly as _STATUS_GLYPH and
+#: the box characters already do.
+_SPRITE_STATES_ASCII = {
+    "idle":      [("|", "o  o", "^  ^"), ("|", "-  -", "^  ^")],
+    "searching": [("|", "o  >", "^  ^"), ("|", "o >>", "^  ^"),
+                  ("|", "o>> ", "^  ^")],
+    "thinking":  [("|", ".   ", "^  ^"), ("|", "..  ", "^  ^"),
+                  ("|", "... ", "^  ^")],
+    "working":   [("|", "o  o", "_  ^"), ("|", "o  o", "^  _")],
+    "uploading": [("|", "^  ^", "^  ^"), ("|", "o  o", "^  ^")],
+    "success":   [("|", "\\  /", "^  ^")],
+    "error":     [("|", "x  x", "^  ^"), ("|", "o  o", "^  ^")],
+}
+
+#: Chassis rows, Unicode and ASCII. Index 0/1/2 = top, face row walls, bottom.
+_CHASSIS = ("\u259b\u2580\u2580\u2580\u2580\u259c", "\u258c", "\u2590",
+            "\u2599\u2584\u2584\u2584\u2584\u259f")
+_CHASSIS_ASCII = ("+----+", "|", "|", "+----+")
+
+#: States whose antenna reads as "powered" — brighter than the chassis.
+_ACTIVE_STATES = {"searching", "thinking", "working", "uploading", "success"}
+
+STATE_FOR_WAYPOINT = {
+    "1": "uploading",    # fetching source
+    "2": "searching",    # static analysis
+    "3": "working",      # sandbox deploy
+    "3b": "searching",   # network sweep
+    "4": "searching",    # dynamic scan
+    "5": "thinking",     # genome build — the highlighted one
+    "6": "working",      # attack simulation
+    "7": "thinking",     # report
+    "8": "working",      # patch + verify
+}
+
+
+def _ansi(hex_color):
+    """Truecolor escape for a ramp hex, or "" when colour is unavailable."""
+    if not hex_color or not hex_color.startswith("#"):
+        return ""
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+_RST = "\033[0m"
+
+
 class _FrameSource:
-    """Caches rendered mascot rows per (state, frame) so the redraw loop
-    never re-runs the image pipeline for a frame it already drew."""
+    """Hand-authored buddy frames, rendered to ANSI rows of exactly `cols`
+    visible cells.
+
+    The interface is unchanged from the image-backed version it replaces —
+    `.cols`, `.rows`, `.ok`, `.rows_for(state, idx)` — so TraceDeck's
+    composition code did not need to change.
+    """
 
     def __init__(self, cols=None, mode=None):
         self.cols = DECK_COLS if cols is None else cols
         self.mode = DECK_MODE if mode is None else mode
         self._cache = {}
-        self._frames = {}
-        self.rows = 0
-        self.ok = False
-        # Crop bounds, computed once across EVERY state (below).
-        self._top = 0
-        self._bot = None
-        if not _MASCOT:
-            return
+        self.rows = 5
+        # Always available: no Pillow, no assets, no image pipeline.
+        self.ok = self.cols >= DECK_COLS
+
+    def _compose(self, state, idx):
         try:
-            self._compute_crop()
-            # _rows_for, not rows_for: the public wrapper gates on self.ok,
-            # which is exactly what this probe is about to determine.
-            probe = self._rows_for("idle", 0)
-            self.rows = len(probe)
-            self.ok = self.rows > 0
+            ascii_mode = bool(_ui_ascii())
         except Exception:
-            self.ok = False
+            ascii_mode = False
+        table = _SPRITE_STATES_ASCII if ascii_mode else _SPRITE_STATES
+        top, lwall, rwall, bot = _CHASSIS_ASCII if ascii_mode else _CHASSIS
+        frames = table.get(state) or table["idle"]
+        antenna, face, feet = frames[idx % len(frames)]
 
-    def _compute_crop(self):
-        """Find the blank margin the sprite never uses, across all states.
+        chassis = _ansi(PHOS)
+        accent = _ansi(REF)
+        # The error face is the one thing that must not read as decoration.
+        if state == "error":
+            face_c = _ansi(WARN_HOT) or accent
+        elif state == "success":
+            face_c = _ansi(APEX) or accent
+        else:
+            face_c = accent
+        ant_c = accent if state in _ACTIVE_STATES else _ansi(PHOS_DIM)
+        rst = _RST if chassis else ""
 
-        The canvas is sized for the largest pose, so smaller poses render
-        with blank rows top and bottom — dead height in a box this compact.
-        Cropping per-state would make the deck's height jump as the mascot
-        switched animations, which is exactly the drift the fixed-canvas
-        invariant exists to prevent. So the crop is computed ONCE from the
-        union of every state's content: whatever row is blank in every
-        frame of every state is safe to drop, and the height stays constant
-        for the whole run.
-        """
-        top, bot = None, None
-        for state in getattr(_anim, "STATE_ORDER", ("idle",)):
-            try:
-                frames = self._frames_for(state)
-            except Exception:
-                continue
-            for img in frames:
-                rows = _subcell.render_frame(img, self.cols, mode=self.mode).split("\n")
-                for i, r in enumerate(rows):
-                    if _visible(r).strip():
-                        top = i if top is None else min(top, i)
-                        bot = i if bot is None else max(bot, i)
-        if top is not None and bot is not None and bot >= top:
-            self._top, self._bot = top, bot + 1
-
-    def _frames_for(self, state):
-        if state not in self._frames:
-            self._frames[state] = _anim.frames_for(state, cols=self.cols)
-        return self._frames[state]
-
-    def _rows_for(self, state, idx):
-        key = (state, idx)
-        if key in self._cache:
-            return self._cache[key]
-        frames = self._frames_for(state)
-        img = frames[idx % len(frames)]
-        text = _subcell.render_frame(img, self.cols, mode=self.mode)
-        rows = text.split("\n")[self._top:self._bot]
-        self._cache[key] = rows
-        return rows
+        pad = " " * max(self.cols - DECK_COLS, 0)
+        return [
+            f"   {ant_c}{antenna}{rst}    {pad}",
+            f" {chassis}{top}{rst} {pad}",
+            f" {chassis}{lwall}{rst}{face_c}{face}{rst}{chassis}{rwall}{rst} {pad}",
+            f" {chassis}{bot}{rst} {pad}",
+            f"  {chassis}{feet}{rst}  {pad}",
+        ]
 
     def rows_for(self, state, idx):
         """Rendered rows, or blank padding if anything goes wrong."""
-        if not self.ok:
-            return [" " * self.cols] * max(self.rows, 1)
+        key = (state, idx)
+        if key in self._cache:
+            return self._cache[key]
         try:
-            return self._rows_for(state, idx)
+            rows = self._compose(state, idx)
         except Exception:
-            return [" " * self.cols] * max(self.rows, 1)
+            rows = [" " * self.cols] * self.rows
+        self._cache[key] = rows
+        return rows
 
 
 class TraceDeck:
