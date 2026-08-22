@@ -243,8 +243,15 @@ def _print_help():
 # single-hue red ramp so the degraded banner stays on-brand. RED/YEL keep their
 # names as the alert channel, but their VALUES now sit inside the red ramp —
 # a literal red error mark on a red theme reads as body text, so severity is
-# carried by brightness here exactly as it is in terminal_ui.py (peak = error,
-# mid = warning).
+# carried by brightness here exactly as it is in terminal_ui.py.
+#
+# The alert marks take the TOP two rungs (APEX for ✗, WARN_HOT for ⚠) plus
+# bold, so the channel is strictly brighter than everything it has to be
+# distinguished from. Placing them mid-ramp does not work: at CAUT the warning
+# mark lands at the same luminance as the muted caption grey (0.172 vs 0.168),
+# and at REF the error mark is byte-identical to NEON, so a failure renders
+# exactly like a command name. Severity ordering here is now strictly
+# monotonic — captions < body < emphasis < warning < error.
 #
 # These are raw 24-bit truecolor escapes with no Rich/colorama translation —
 # this class exists specifically for the case where rich itself failed to
@@ -259,6 +266,9 @@ except ImportError:
     pass
 
 
+C_BOLD = "\033[1m"
+
+
 def _tc(hex_):
     r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
     return f"\033[38;2;{r};{g};{b}m"
@@ -266,8 +276,18 @@ def _tc(hex_):
 class C:
     CYAN   = _tc("#FF3B3B")   # PRIMARY red — wordmark / accents / active
     NEON   = _tc("#FF6B6B")   # bright red — command names / high emphasis
-    RED    = _tc("#FF6B6B")   # bright — error mark (alert channel)
-    YEL    = _tc("#D63447")   # mid — warning mark (alert channel)
+    # Alert channel. Both marks are BOLD, which the rest of the palette is
+    # not, because this path has none of the structure Rich gives the normal
+    # one — no panels, no rules, no styled headings. A bare ⚠ or ✗ sits in a
+    # line of plain terminal text and has to carry its own emphasis, so weight
+    # does the work hue can't in a single-hue theme.
+    #
+    # Bold on the error mark also mirrors terminal_ui's "err": bold WARN. Colour
+    # alone cannot separate it there either: WARN and REF are the same value, so
+    # without the weight an error renders identically to ordinary high-emphasis
+    # text (which is exactly what this fallback did before).
+    RED    = C_BOLD + _tc("#FFE0DC")  # APEX — error mark, peak of the ramp
+    YEL    = C_BOLD + _tc("#FFB0A9")  # WARN_HOT — warning mark, one rung below
     BLUE   = _tc("#FF3B3B")   # PRIMARY red
     GREY   = _tc("#8A6A6A")   # muted red-grey — captions / timestamps
     MAG    = _tc("#FF6B6B")   # bright red (legacy alias)
