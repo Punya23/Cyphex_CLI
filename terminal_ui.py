@@ -21,14 +21,25 @@ import sys, os, math, time, random, asyncio, base64, zlib
 
 from scoring import score_from_counts as _scoring_score_from_counts, score_band as _scoring_band
 
-# Force UTF-8 output on Windows to avoid encoding errors with Unicode chars
-if sys.platform == "win32":
-    try:
+# Force UTF-8 output whenever the terminal isn't already using it — this
+# module prints Unicode unconditionally (box-drawing panels, braille HUD
+# frames, severity glyphs) and Rich does NOT swallow the resulting
+# UnicodeEncodeError on a non-UTF-8 stdout; it re-raises after annotating the
+# message. Gating this to win32 only left every POSIX box with a non-UTF-8
+# locale (LANG=C, minimal Docker base images, most CI runners, cron/non-
+# interactive shells) with zero protection — the first Unicode render
+# crashed the whole scan there, not just on Windows.
+try:
+    if not (sys.stdout.encoding or "").lower().startswith("utf"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if not (sys.stderr.encoding or "").lower().startswith("utf"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+except Exception:
+    pass
+# Only affects a Python child process THIS process spawns later (it has no
+# effect on the current process — PYTHONIOENCODING is read at interpreter
+# bootstrap, which has already happened by the time this line runs).
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from rich.console import Console
 from rich.panel import Panel

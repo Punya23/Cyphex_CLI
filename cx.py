@@ -13,7 +13,18 @@ import os
 import sys
 import shutil
 import subprocess
-import readline
+try:
+    import readline
+except ImportError:
+    # readline is POSIX-only (GNU readline/libedit binding) — absent from
+    # Windows CPython entirely. pyreadline3 is the Windows-compatible shim
+    # (see pyproject.toml's win32-only dependency); if neither is available,
+    # tab-completion/history are simply disabled rather than crashing the
+    # whole interactive workspace at import time.
+    try:
+        import pyreadline3 as readline
+    except ImportError:
+        readline = None
 import glob
 import time
 import textwrap
@@ -32,7 +43,7 @@ except Exception:
 def _load_env():
     env = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if os.path.exists(env):
-        with open(env) as f:
+        with open(env, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
@@ -195,9 +206,10 @@ def _completer(text, state):
         return options[state]
     return None
 
-readline.set_completer(_completer)
-readline.parse_and_bind("tab: complete")
-readline.set_completer_delims(" \t\n")
+if readline:
+    readline.set_completer(_completer)
+    readline.parse_and_bind("tab: complete")
+    readline.set_completer_delims(" \t\n")
 
 
 # ── Session state ─────────────────────────────────────────────────────────────

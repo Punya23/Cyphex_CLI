@@ -18,13 +18,18 @@ import shutil
 import subprocess
 import platform
 
-# Fix Windows terminal encoding for rich characters like ✓
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+# Fix terminal encoding for rich characters like ✓ whenever it isn't already
+# UTF-8 — not just on Windows. A win32-only gate here left any POSIX box with
+# a non-UTF-8 locale (LANG=C, minimal Docker images, most CI runners) with no
+# protection at all against the Unicode this CLI and its render_* dependents
+# print unconditionally.
+try:
+    if not (sys.stdout.encoding or "").lower().startswith("utf"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if not (sys.stderr.encoding or "").lower().startswith("utf"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 # Ensure project root is in path so existing modules resolve
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
