@@ -121,6 +121,34 @@ def test_services_yaml_round_trip_without_pyyaml(tmp_path, monkeypatch):
     assert loaded.nodes["svc-a"].base_url == "http://localhost:4001"
 
 
+def test_find_node_for_url_matches_by_base_url_host():
+    graph = ServiceGraph(auto_generated=True)
+    graph.add_node(ServiceNode(name="notification-service", path="notification-service",
+                                base_url="http://localhost:4002"))
+    graph.add_node(ServiceNode(name="whatsapp-broadcast", path="whatsapp-broadcast",
+                                base_url="http://localhost:4001"))
+    assert graph.find_node_for_url("http://localhost:4002/api/notify").name == "notification-service"
+    assert graph.find_node_for_url("http://localhost:4001/").name == "whatsapp-broadcast"
+
+
+def test_find_node_for_url_falls_back_to_name_in_url():
+    """A fresh auto-generated services.yaml only has placeholder ports, so a
+    real target_url (e.g. from docker-compose) won't match base_url — the
+    service's own name appearing in the URL is the fallback signal."""
+    graph = ServiceGraph(auto_generated=True)
+    graph.add_node(ServiceNode(name="notification-service", path="notification-service",
+                                base_url="http://localhost:9999"))  # deliberately wrong
+    node = graph.find_node_for_url("http://notification-service:4002/api/notify")
+    assert node is not None and node.name == "notification-service"
+
+
+def test_find_node_for_url_returns_none_for_unknown_host():
+    graph = ServiceGraph(auto_generated=True)
+    graph.add_node(ServiceNode(name="notification-service", path="notification-service",
+                                base_url="http://localhost:4002"))
+    assert graph.find_node_for_url("http://totally-unrelated:1234/x") is None
+
+
 def test_service_graph_summary_shape():
     graph = ServiceGraph(auto_generated=True)
     graph.add_node(ServiceNode(name="a", path="a", routes=["/x"], language="Python"))

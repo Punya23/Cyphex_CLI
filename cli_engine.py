@@ -1440,6 +1440,19 @@ class CyphexEngine:
             orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
             oracle = AttackOracle(orchestrator=orchestrator)
 
+            # Phase 2 microservice VAPT: if source_dir turned out to be a
+            # monorepo of services (self.service_graph set in Step 1), and
+            # this scan's target_url matches one of its nodes, hand both the
+            # Oracle's prompt context (ASI) and the deterministic chainer
+            # (AttackGraph) that static map — a credential/token confirmed
+            # here can then propose actually testing a sibling service.
+            if self.service_graph:
+                current = self.service_graph.find_node_for_url(target_url)
+                current_name = current.name if current else ""
+                asi.set_service_context(self.service_graph, current_name)
+                attack_graph.service_graph = self.service_graph
+                attack_graph.current_service = current_name
+
         async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
             # Agent 01 - Recon (runs first: fingerprint the live target)
             agent_header("Agent 01", "Recon", "Fingerprint headers and tech hints")

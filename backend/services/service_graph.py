@@ -49,6 +49,32 @@ class ServiceGraph:
     def unresolved_edges(self) -> list[ServiceEdge]:
         return [e for e in self.edges if not e.target]
 
+    def find_node_for_url(self, url: str) -> ServiceNode | None:
+        """Which ServiceNode a running scan's target_url corresponds to —
+        Phase 2 needs this to know whose outbound edges apply to the service
+        actually being tested right now. Matches by host:port against each
+        node's base_url first (the real signal once services.yaml has real
+        URLs); falls back to the node's name appearing in the url, since a
+        freshly auto-generated services.yaml only has placeholder ports."""
+        import re
+        from urllib.parse import urlparse
+
+        def _netloc(u: str) -> str:
+            return urlparse(u if "://" in u else f"http://{u}").netloc.lower()
+
+        target_netloc = _netloc(url)
+        if target_netloc:
+            for node in self.nodes.values():
+                if node.base_url and _netloc(node.base_url) == target_netloc:
+                    return node
+
+        norm_url = re.sub(r"[^a-z0-9]", "", url.lower())
+        for node in self.nodes.values():
+            norm_name = re.sub(r"[^a-z0-9]", "", node.name.lower())
+            if norm_name and norm_name in norm_url:
+                return node
+        return None
+
     def to_summary_dict(self) -> dict:
         """JSON-report shape — see cli_engine._service_graph_summary()."""
         return {
