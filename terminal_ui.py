@@ -953,6 +953,7 @@ COMMAND_DECK = [
     ("/netwatch", "", "Behavioural network flow monitor (Ctrl+C to stop)"),
     ("/netaudit", "<host>", "Oracle-guided audit of one network host"),
     ("/models", "", "List available local Ollama models"),
+    ("/llm", "[set|test|local]", "Use your own OpenAI-compatible API key / hosted SLM instead of local Ollama"),
     ("/webhook", "[link]", "Connect Google Chat / Slack — scan updates & PR approvals go there"),
     ("", "flags", "/webhook remove [n|all]  — or just paste the link"),
     ("/github", "[login|token|clear]", "Check or connect GitHub auth — needed for org-wide sibling discovery"),

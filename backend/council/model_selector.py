@@ -34,6 +34,10 @@ except Exception:         # terminal_ui not importable in this context
 console = _themed_console()
 
 OLLAMA_BASE = "http://localhost:11434"
+try:  # user-configured OpenAI-compatible LLM (/llm); inactive unless configured
+    from backend import llm_provider
+except ImportError:
+    import llm_provider
 
 # ── Model classification patterns ──────────────────────────────
 CODE_MODEL_PATTERNS = [
@@ -202,6 +206,17 @@ class ModelSelector:
         Query Ollama for installed models and build the optimal strategy.
         Returns True if at least one model is available.
         """
+        if llm_provider.active():  # the user's own OpenAI-compatible LLM (/llm): no Ollama, no VRAM
+            cfg = llm_provider.load()
+            # Hosted size is unknown: assume a capable model so the >=7B debate gate passes.
+            self.models = [ModelInfo(name, 70.0, False, 0.0) for name in llm_provider.all_models(cfg)]
+            self.vram_budget = 999.0
+            self._build_strategy()
+            self._discovered = True
+            if not quiet:
+                console.print(f"\n  [bold cyan]⚡ Model Brain[/bold cyan]  hosted: {llm_provider.label(cfg)}"
+                              f"{' +' + str(len(self.models) - 1) + ' more' if len(self.models) > 1 else ''}\n")
+            return True
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.get(f"{OLLAMA_BASE}/api/tags")
