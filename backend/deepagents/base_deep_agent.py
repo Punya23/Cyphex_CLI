@@ -82,7 +82,7 @@ class BaseDeepAgent:
         # Measure baseline response time once
         self._baseline_ms = await self._measure_baseline()
 
-        # Oracle generates attack plan
+        # Generate adaptive attack plan via agent-reasoning enhanced local model
         surface_summary = self.asi.summarise_for_prompt()
         name = self.__class__.__name__
         ui = _deep_ui()
@@ -110,6 +110,7 @@ class BaseDeepAgent:
         except Exception as e:
             console.print(f"[red]Oracle plan failed for {name}: {e}[/red]")
             return AgentResult(agent=name, vulns=self.vulns, context=context)
+
 
         # Execute hypotheses in parallel batches
         hypotheses = plan.hypotheses[:self.MAX_HYPOTHESES]

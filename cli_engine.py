@@ -2473,6 +2473,7 @@ class CyphexEngine:
 
         return context
 
+
     async def _run_network_scan(self) -> None:
         """
         Network Security step (Step 3b/9) — runs when --network flag is set.

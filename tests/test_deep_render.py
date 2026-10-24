@@ -102,24 +102,28 @@ def test_parallel_group_panels_list_agents_and_counts():
     assert "3 vuln(s) found" in _capture(tu.render_deepagents_group_result, 2, 3)
 
 
-def test_oracle_per_model_lock_serialises_same_model_inference():
-    """Agents in a parallel group share one oracle; its per-model lock must
-    keep same-model LLM calls one-at-a-time so local VRAM never thrashes."""
+def test_oracle_global_semaphore_serialises_concurrent_inference():
+    """Agents in a parallel group share one oracle; _LLM_SEMAPHORE (asyncio.Semaphore(1))
+    around self.reasoner.generate() must keep concurrent LLM calls one-at-a-time so local
+    VRAM never thrashes — this branch's serialization is global, not per-model."""
     import asyncio
+    import time
     import types
     from backend.deepagents.oracle_attack import AttackOracle
 
-    oracle = AttackOracle(types.SimpleNamespace(reasoner=None))
+    oracle = AttackOracle()
     live = {"n": 0, "peak": 0}
 
-    async def fake_call(model, **k):
+    def fake_generate(model, prompt, **k):
         live["n"] += 1
         live["peak"] = max(live["peak"], live["n"])
-        await asyncio.sleep(0.02)
+        time.sleep(0.02)  # generate() is sync — run_in_executor is what makes this concurrent
         live["n"] -= 1
-        return {"target_summary": "t", "primary_vulnerability_class": "x", "hypotheses": []}
+        return types.SimpleNamespace(
+            response='{"target_summary": "t", "primary_vulnerability_class": "x", "hypotheses": []}',
+            strategy_name="CoT", strategy="cot", duration_ms=1)
 
-    oracle.orchestrator._call = fake_call
+    oracle.reasoner.generate = fake_generate
 
     async def main():
         await asyncio.gather(*[oracle.plan("t", "s", "c") for _ in range(4)])
