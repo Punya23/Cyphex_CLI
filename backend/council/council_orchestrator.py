@@ -95,6 +95,12 @@ def _detect_vram_limit() -> float:
     """
     Detect actual VRAM/unified memory and set a safe limit.
     Leaves 2GB headroom for OS + other apps.
+
+    This is a ONE-TIME estimate taken at process start from TOTAL memory —
+    it has no idea whether Docker, a browser, or anything else is using
+    several GB of that total RIGHT NOW. VRAMManager.live_budget() is the
+    runtime check that re-reads actual free memory on every load decision;
+    this stays only as the static ceiling that check is additionally capped by.
     """
     try:
         from cyphex.hardware import get_gpu_info
@@ -106,6 +112,16 @@ def _detect_vram_limit() -> float:
     except Exception:
         pass
     return 5.5  # safe fallback
+
+
+# Minimum free system RAM VRAMManager will always leave untouched, checked
+# live before every load — not the one-time startup estimate above. The
+# real incident this guards against: CYPHEX detected a "good" total-RAM
+# budget at startup, then loaded 2 parallel 7B+ Ollama models while Docker
+# was already running, with nothing re-checking actual free memory at the
+# moment of that load — the machine hung. User asked for 2-3GB always free;
+# 2.5GB splits that range.
+MIN_FREE_RAM_HEADROOM_GB = 2.5
 
 
 class VRAMManager:
@@ -158,14 +174,36 @@ class VRAMManager:
         """Merge dynamically discovered VRAM costs (from ModelSelector)."""
         self.VRAM_COST.update(dynamic_costs)
 
+    def live_budget(self) -> float:
+        """How much model-VRAM we may use RIGHT NOW: the static VRAM_LIMIT,
+        further capped by actually-free system RAM minus MIN_FREE_RAM_HEADROOM_GB.
+        Re-read on every call — not cached — so a Docker container or another
+        app starting mid-scan immediately tightens the budget. Falls back to
+        the static VRAM_LIMIT unchanged when live RAM can't be read (unknown
+        platform/sandbox), never to a stricter-than-intended silent zero."""
+        if llm_provider.active():
+            return self.VRAM_LIMIT  # hosted LLM: no local load to budget
+        try:
+            from cyphex.hardware import get_available_memory_gb
+            available = get_available_memory_gb()
+        except Exception:
+            available = None
+        if available is None:
+            return self.VRAM_LIMIT
+        # Already-loaded models' memory is counted in `available` too (Ollama
+        # holds it), so add it back before subtracting the headroom we want
+        # to keep genuinely free.
+        usable = available + sum(self.loaded.values()) - MIN_FREE_RAM_HEADROOM_GB
+        return max(0.0, min(self.VRAM_LIMIT, usable))
+
     def can_load(self, model: str) -> bool:
         cost = self.VRAM_COST.get(model, 2.0)
-        return sum(self.loaded.values()) + cost <= self.VRAM_LIMIT
+        return sum(self.loaded.values()) + cost <= self.live_budget()
 
     def can_load_together(self, models: list[str]) -> bool:
         """Check if all given models can be loaded simultaneously."""
         total = sum(self.VRAM_COST.get(m, 2.0) for m in models)
-        return total <= self.VRAM_LIMIT
+        return total <= self.live_budget()
 
     def get_parallel_batches(self, models: list[str]) -> list[list[str]]:
         """
@@ -176,9 +214,10 @@ class VRAMManager:
         current_batch = []
         current_cost = 0.0
 
+        budget = self.live_budget()
         for model in models:
             cost = self.VRAM_COST.get(model, 2.0)
-            if current_cost + cost > self.VRAM_LIMIT and current_batch:
+            if current_cost + cost > budget and current_batch:
                 batches.append(current_batch)
                 current_batch = [model]
                 current_cost = cost
@@ -195,23 +234,35 @@ class VRAMManager:
         if llm_provider.active():
             return                       # nothing to load into VRAM
         async with self._lock:
-            if model in self.loaded:
-                return                   # already resident — no load, no log
-            console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
-            # If adding this model would exceed budget, unload least-recently-used
-            cost = self.VRAM_COST.get(model, 2.0)
-            while sum(self.loaded.values()) + cost > self.VRAM_LIMIT and self.loaded:
-                evict = next(iter(self.loaded))
-                await self._unload_locked(evict)
-            # Warm up the model with a no-op prompt
-            try:
-                await self._raw_call(model, "ready", stream=False)
-                self.loaded[model] = cost
-            except Exception as e:
-                raise ModelNotFoundError(f"Could not load model {model}: {e}")
+            await self._load_single_locked(model)
+
+    async def _load_single_locked(self, model: str):
+        """Evict-then-warm ONE model. Caller must already hold self._lock."""
+        if model in self.loaded:
+            return                   # already resident — no load, no log
+        console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
+        # If adding this model would exceed budget, unload least-recently-used.
+        # Re-read live_budget() each iteration, not once — an eviction frees
+        # real memory, which the next live RAM read will actually reflect.
+        cost = self.VRAM_COST.get(model, 2.0)
+        while sum(self.loaded.values()) + cost > self.live_budget() and self.loaded:
+            evict = next(iter(self.loaded))
+            await self._unload_locked(evict)
+        # Warm up the model with a no-op prompt
+        try:
+            await self._raw_call(model, "ready", stream=False)
+            self.loaded[model] = cost
+        except Exception as e:
+            raise ModelNotFoundError(f"Could not load model {model}: {e}")
 
     async def ensure_loaded_together(self, models: list[str]):
-        """Load multiple models simultaneously for parallel execution."""
+        """Load multiple models simultaneously for parallel execution — or,
+        when live free RAM can't hold them all at once, fall back to loading
+        them one at a time (evicting the previous one first) so the machine
+        never gets pushed into swapping/hanging just to keep several models
+        resident together. That serial fallback trades parallel-inference
+        speed for staying inside the live RAM budget, which is the tradeoff
+        asked for: never let a /deep scan make the user's machine unusable."""
         if llm_provider.active():
             return
         async with self._lock:
@@ -222,9 +273,22 @@ class VRAMManager:
 
             needed = sum(self.VRAM_COST.get(m, 2.0) for m in models_to_load)
             current = sum(self.loaded.values())
+            budget = self.live_budget()
+
+            if needed > budget:
+                # Even after evicting everything else, these models don't fit
+                # together in what's actually free right now — serialize
+                # instead of forcing them into RAM simultaneously.
+                console.print(
+                    f"[yellow]⚠ Low free RAM ({budget:.1f}GB usable) — loading "
+                    f"{len(models_to_load)} model(s) one at a time instead of in parallel[/yellow]"
+                )
+                for model in models_to_load:
+                    await self._load_single_locked(model)
+                return
 
             # Evict until we have room
-            while current + needed > self.VRAM_LIMIT and self.loaded:
+            while current + needed > budget and self.loaded:
                 evict = next(iter(self.loaded))
                 if evict not in models:  # Don't evict a model we're trying to keep
                     current -= self.loaded.get(evict, 0)

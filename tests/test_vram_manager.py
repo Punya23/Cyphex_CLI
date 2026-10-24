@@ -13,11 +13,20 @@ from backend.council.council_orchestrator import VRAMManager
 class TestVRAMManager:
 
     @pytest.fixture
-    def vram(self):
+    def vram(self, monkeypatch):
         v = VRAMManager()
         # Pin to 5.5 GB (the no-GPU fallback) so tests are deterministic
         # regardless of the host machine's physical GPU memory.
         v.VRAM_LIMIT = 5.5
+        # live_budget() also caps on actually-free system RAM (see
+        # test_live_ram_budget.py) — pin that to "plenty free" here so every
+        # pre-existing test in this file keeps testing VRAM_LIMIT alone,
+        # deterministic regardless of how much RAM is free on the machine
+        # actually running the suite.
+        monkeypatch.setattr(
+            "backend.council.council_orchestrator.VRAMManager.live_budget",
+            lambda self: self.VRAM_LIMIT,
+        )
         return v
 
     @pytest.mark.asyncio
