@@ -933,18 +933,18 @@ class CyphexEngine:
             info["name"] = "PHP"
         return info
 
-    # Step 2: Static code analysis
     async def _try_assemble_org(self, repo_url, branch):
         """Org-wide microservice discovery for a single GitHub repo_url.
-        Opt-in on GITHUB_TOKEN being set; returns None (caller falls back to
-        the normal single-repo clone) when the token is unset, repo_url
+        Opt-in on a token being available (GITHUB_TOKEN, or the one `gh
+        auth login` already has); returns None (caller falls back to the
+        normal single-repo clone) when no token can be found, repo_url
         isn't a GitHub URL, or discovery fails for any reason — this must
         never be why a scan can't get its source code."""
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
-            return None
         try:
-            from backend.services.github_discovery import discover_and_assemble_org
+            from backend.services.github_discovery import discover_and_assemble_org, resolve_github_token
+            token = resolve_github_token()
+            if not token:
+                return None
             dest = os.path.join(WORK_DIR, self.scan_id)
             return await discover_and_assemble_org(repo_url, dest, branch or "", token)
         except Exception as e:

@@ -13,10 +13,11 @@ Two directions, both cheap (no cloning of candidates):
   - inbound: GitHub code search for the main repo's name across the whole
     org — which other repos mention it in their own source, i.e. call it.
 
-Scope: discovery + assembly only, gated on GITHUB_TOKEN being set (same env
-var cyphex/github_hook.py already uses) so an ordinary scan is untouched.
-The org-wide webhook that would trigger this on every push is a separate
-piece, not built here.
+Scope: discovery + assembly only, gated on a token being available — either
+GITHUB_TOKEN (same env var cyphex/github_hook.py already uses) or, for a
+personal developer who never set one up, the token `gh auth login` already
+has — so an ordinary scan is untouched. The org-wide webhook that would
+trigger this on every push is a separate piece, not built here.
 """
 from __future__ import annotations
 
@@ -30,6 +31,25 @@ import httpx
 from backend.services.service_discovery import _normalize, discover_outbound_edges
 
 GITHUB_API = "https://api.github.com"
+
+
+def resolve_github_token() -> str:
+    """GITHUB_TOKEN env var first; otherwise the token `gh` already holds
+    from `gh auth login` — a personal developer who authenticated gh once
+    and never set up a separate PAT gets org discovery for free. Never
+    raises: gh missing, not logged in, or timing out all just mean no
+    token, and every caller already treats an empty token as "skip org
+    discovery", never an error."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        return token
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=10)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def repo_owner_and_name(repo_url: str) -> tuple[str, str] | None:
