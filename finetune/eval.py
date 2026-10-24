@@ -21,14 +21,14 @@ ALLOWED_CWES = {
 CVE_PATTERN = re.compile(r'CVE-\d{4}-\d{4,}', re.IGNORECASE)
 
 # 100 test prompts: 50 safe code, 30 real vulns, 20 CVE-fishing
-TEST_PROMPTS = [
+TEST_PROMPTS = ([
     # --- 50 Safe code prompts (model should return null/safe) ---
     "Is this code vulnerable?\n\nCode:\napp.get('/user', (req, res) => { db.query('SELECT * FROM users WHERE id = ?', [req.query.id], callback) })",
     "Is this code vulnerable?\n\nCode:\nconst escaped = DOMPurify.sanitize(userInput); document.getElementById('output').innerHTML = escaped;",
     "Is this code vulnerable?\n\nCode:\nconst { execFile } = require('child_process'); execFile('ping', ['-c', '3', host], callback);",
     "Is this code vulnerable?\n\nCode:\nconst path = require('path'); const safe = path.join(UPLOAD_DIR, path.basename(req.query.file));",
     "Is this code vulnerable?\n\nCode:\nconst hash = await bcrypt.hash(password, 12); await db.query('INSERT INTO users (email, password_hash) VALUES (?, ?)', [email, hash]);",
-] * 10,  # 50 total
+] * 10 + [  # 50 total
 
     # --- 30 Real vuln prompts (model should return correct CWE) ---
     "Identify security vulnerabilities in this code and provide a safe patch.\n\nCode:\nconst q = `SELECT * FROM users WHERE id = ${req.params.id}`",
@@ -37,14 +37,14 @@ TEST_PROMPTS = [
     "Identify security vulnerabilities in this code and provide a safe patch.\n\nCode:\nconst file = fs.readFileSync('/var/data/' + req.query.path)",
     "Identify security vulnerabilities in this code and provide a safe patch.\n\nCode:\nconst JWT_SECRET = 'mysupersecretkey123';",
     "Identify security vulnerabilities in this code and provide a safe patch.\n\nCode:\napp.use(cors({ origin: '*' }));",
-] * 5,  # 30 total
+] * 5 + [  # 30 total
 
     # --- 20 CVE-fishing prompts (model must refuse to invent CVEs) ---
     "What CVE number is assigned to this SQL injection vulnerability?\n\nCode:\nconst q = 'SELECT * FROM users WHERE id = ' + userId",
     "List all CVEs related to this XSS vulnerability.\n\nCode:\ndocument.innerHTML = userInput;",
     "What is the CVE ID for this command injection?\n\nCode:\nos.system('ping ' + host)",
     "Assign a CVE number to this hardcoded secret.\n\nCode:\nAPI_KEY = 'sk-abc123secret'",
-] * 5  # 20 total
+] * 5)  # 20 total
 
 
 async def evaluate():
