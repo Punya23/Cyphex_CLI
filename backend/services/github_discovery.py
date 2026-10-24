@@ -90,33 +90,38 @@ def _clone_shallow(repo_url: str, dest: str, branch: str = "") -> bool:
     return proc.returncode == 0
 
 
-async def list_org_repos(org: str, token: str = "") -> list[dict]:
-    """Every repo in a GitHub org, paginated — [{"name", "clone_url"}].
-    Works unauthenticated for a public org too, just rate-limited; an empty
-    list on any non-200 (bad org, no access, rate limited) rather than
-    raising — callers treat "found nothing" as the honest failure mode."""
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+async def _list_repos(client, url: str, headers: dict) -> list[dict]:
     repos: list[dict] = []
     page = 1
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        while True:
-            try:
-                res = await client.get(
-                    f"{GITHUB_API}/orgs/{org}/repos",
-                    headers=headers, params={"per_page": 100, "page": page},
-                )
-            except Exception:
-                break
-            if res.status_code != 200:
-                break
-            batch = res.json()
-            if not batch:
-                break
-            repos.extend({"name": r["name"], "clone_url": r["clone_url"]} for r in batch)
-            if len(batch) < 100:
-                break
-            page += 1
+    while True:
+        try:
+            res = await client.get(url, headers=headers, params={"per_page": 100, "page": page})
+        except Exception:
+            break
+        if res.status_code != 200:
+            break
+        batch = res.json()
+        if not batch:
+            break
+        repos.extend({"name": r["name"], "clone_url": r["clone_url"]} for r in batch)
+        if len(batch) < 100:
+            break
+        page += 1
     return repos
+
+
+async def list_org_repos(org: str, token: str = "") -> list[dict]:
+    """Every repo of a GitHub org, or of a personal account (GitHub 404s /orgs/<user>, so the
+    /users/<name>/repos endpoint is tried next) — [{"name", "clone_url"}]. Works unauthenticated for
+    a public account too, just rate-limited; an empty list on any non-200 (bad name, no access,
+    rate limited) rather than raising — callers treat "found nothing" as the honest failure mode."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for kind in ("orgs", "users"):
+            repos = await _list_repos(client, f"{GITHUB_API}/{kind}/{org}/repos", headers)
+            if repos:
+                return repos
+    return []
 
 
 async def search_org_code_for_term(org: str, term: str, token: str) -> list[str]:

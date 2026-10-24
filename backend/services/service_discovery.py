@@ -41,7 +41,10 @@ _INBOUND_PATTERNS = [
 _OUTBOUND_PATTERNS = [
     re.compile(r'fetch\s*\(\s*([`"\'])(.*?)\1', re.I),
     re.compile(r'axios(?:\.(?:get|post|put|delete|patch))?\s*\(\s*([`"\'])(.*?)\1', re.I),
-    re.compile(r'(?:requests|httpx)\.(?:get|post|put|delete|patch)\s*\(\s*([\'"])(.*?)\1', re.I),
+    re.compile(r'(?:requests|httpx)\.(?:get|post|put|delete|patch)\s*\(\s*[fF]?([\'"])(.*?)\1', re.I),  # f-strings too
+    # URL held in an env var (fetch(process.env.X + ...), requests.get(os.environ['X'])): keep the var name as the hint.
+    re.compile(r'(?:fetch|axios(?:\.\w+)?)\s*\(\s*()(process\.env\.[A-Z][A-Z0-9_]{3,})'),
+    re.compile(r'(?:requests|httpx)\.(?:get|post|put|delete|patch)\s*\(\s*()(os\.(?:environ\[[\'"]|getenv\([\'"])[A-Z][A-Z0-9_]{3,})'),
     re.compile(r'http\.(?:Get|Post|Put|Delete)\s*\(\s*([\'"])(.*?)\1', re.I),
     re.compile(r'http\.NewRequest\s*\(\s*[\'"][A-Z]+[\'"]\s*,\s*([\'"])(.*?)\1', re.I),
 ]
@@ -142,16 +145,22 @@ def discover_outbound_edges(service_name: str, service_dir: str) -> list[Service
     return edges
 
 
+def _tokens(s: str) -> list[str]:
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", s)  # camelCase -> words
+    return [w for w in re.split(r"[^a-z0-9]+", s.lower()) if w]
+
+
 def _resolve_target(hint: str, candidate_names: list[str]) -> str:
-    """Match an outbound call's raw target text to a sibling service by
-    substring containment on normalized names — covers both a literal
-    hostname (http://notification-service:4002/...) and the common
-    <NAME>_SERVICE_URL / <NAME>_API_URL env-var convention, since both embed
-    the service's own name as a substring."""
-    norm_hint = _normalize(hint)
+    """Match an outbound call's raw target text to a sibling service by WHOLE words, so
+    "auth" no longer matches "author". Covers a literal hostname
+    (http://notification-service:4002/...) and the <NAME>_SERVICE_URL env-var convention,
+    since both contain the service's own name as consecutive words."""
+    words = _tokens(hint)
     for name in candidate_names:
-        norm_name = _normalize(name)
-        if norm_name and norm_name in norm_hint:
+        want = _tokens(name)
+        n = len(want)
+        if want and (any(words[i:i + n] == want for i in range(len(words) - n + 1))
+                     or _normalize(name) in words):
             return name
     return ""
 
