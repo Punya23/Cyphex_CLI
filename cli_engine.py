@@ -493,6 +493,7 @@ class CyphexEngine:
             stop_sandbox(self.sandbox_info.get("sandbox_id", ""))
             print(f"\n  {C.G}[OK]{C.RST} Sandbox stopped.")
 
+        self._step("9/9", "COMPLETE")
         self._final_banner()
 
         # ── Visual HTML report (openable link) ──
