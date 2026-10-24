@@ -17,6 +17,10 @@ from datetime import datetime
 from typing import Optional, Union
 
 import httpx
+try:  # user-configured OpenAI-compatible LLM (/llm); inactive unless configured
+    from backend import llm_provider
+except ImportError:
+    import llm_provider
 
 from agents.terminal import AgentTerminal, Colors, AGENT_COLORS
 from models.scan import ScanContext, Vuln, Evidence
@@ -130,6 +134,12 @@ class BaseAgent(ABC):
 
         Fallback chain: groq → ollama → empty string
         """
+        if llm_provider.active():  # user configured their own OpenAI-compatible LLM via /llm
+            try:
+                return await llm_provider.chat(system_prompt, user_prompt, json_mode=False)
+            except llm_provider.ProviderError as e:
+                await self.log(f"Hosted LLM failed: {e}", "warning")
+                return ""
         mode = config.AI_BACKEND_MODE
 
         if mode == "groq":
