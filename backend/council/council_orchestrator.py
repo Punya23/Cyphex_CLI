@@ -1,3 +1,4 @@
+import asyncio
 import httpx
 import json
 import os
@@ -136,6 +137,13 @@ class VRAMManager:
 
     def __init__(self):
         self.loaded: dict[str, float] = {}  # model → VRAM cost
+        # Up to 6 DeepAgents call ensure_loaded()/unload() truly concurrently
+        # (asyncio.gather over a parallel group), each with real awaits
+        # (the Ollama warm-up call, the unload HTTP call) inside the
+        # read-evict-write section below — without serializing that section,
+        # two coroutines racing on this one shared dict produced a real
+        # "dictionary changed size during iteration" crash, confirmed live.
+        self._lock = asyncio.Lock()
         self.VRAM_LIMIT = _detect_vram_limit()
         self._parallel_capable = self.VRAM_LIMIT >= 8.0  # Can fit 2 × 7B models
         if llm_provider.active():  # hosted model: no local VRAM to budget
@@ -186,55 +194,71 @@ class VRAMManager:
     async def ensure_loaded(self, model: str):
         if llm_provider.active():
             return                       # nothing to load into VRAM
-        if model in self.loaded:
-            return                       # already resident — no load, no log
-        console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
-        # If adding this model would exceed budget, unload least-recently-used
-        cost = self.VRAM_COST.get(model, 2.0)
-        while sum(self.loaded.values()) + cost > self.VRAM_LIMIT and self.loaded:
-            evict = next(iter(self.loaded))
-            await self.unload(evict)
-        # Warm up the model with a no-op prompt
-        try:
-            await self._raw_call(model, "ready", stream=False)
-            self.loaded[model] = cost
-        except Exception as e:
-            raise ModelNotFoundError(f"Could not load model {model}: {e}")
+        async with self._lock:
+            if model in self.loaded:
+                return                   # already resident — no load, no log
+            console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
+            # If adding this model would exceed budget, unload least-recently-used
+            cost = self.VRAM_COST.get(model, 2.0)
+            while sum(self.loaded.values()) + cost > self.VRAM_LIMIT and self.loaded:
+                evict = next(iter(self.loaded))
+                await self._unload_locked(evict)
+            # Warm up the model with a no-op prompt
+            try:
+                await self._raw_call(model, "ready", stream=False)
+                self.loaded[model] = cost
+            except Exception as e:
+                raise ModelNotFoundError(f"Could not load model {model}: {e}")
 
     async def ensure_loaded_together(self, models: list[str]):
         """Load multiple models simultaneously for parallel execution."""
         if llm_provider.active():
             return
-        # First check if they all fit
-        models_to_load = [m for m in models if m not in self.loaded]
-        if not models_to_load:
-            return  # All already loaded
+        async with self._lock:
+            # First check if they all fit
+            models_to_load = [m for m in models if m not in self.loaded]
+            if not models_to_load:
+                return  # All already loaded
 
-        needed = sum(self.VRAM_COST.get(m, 2.0) for m in models_to_load)
-        current = sum(self.loaded.values())
+            needed = sum(self.VRAM_COST.get(m, 2.0) for m in models_to_load)
+            current = sum(self.loaded.values())
 
-        # Evict until we have room
-        while current + needed > self.VRAM_LIMIT and self.loaded:
-            evict = next(iter(self.loaded))
-            if evict not in models:  # Don't evict a model we're trying to keep
-                current -= self.loaded.get(evict, 0)
-                await self.unload(evict)
-            else:
-                break
+            # Evict until we have room
+            while current + needed > self.VRAM_LIMIT and self.loaded:
+                evict = next(iter(self.loaded))
+                if evict not in models:  # Don't evict a model we're trying to keep
+                    current -= self.loaded.get(evict, 0)
+                    await self._unload_locked(evict)
+                else:
+                    break
 
-        # Load all needed models
-        for model in models_to_load:
-            try:
-                await self._raw_call(model, "ready", stream=False)
-                cost = self.VRAM_COST.get(model, 2.0)
-                self.loaded[model] = cost
-            except Exception as e:
-                console.print(f"[yellow]⚠ Could not load {model} for parallel execution: {e}[/yellow]")
+            # Load all needed models
+            for model in models_to_load:
+                try:
+                    await self._raw_call(model, "ready", stream=False)
+                    cost = self.VRAM_COST.get(model, 2.0)
+                    self.loaded[model] = cost
+                except Exception as e:
+                    console.print(f"[yellow]⚠ Could not load {model} for parallel execution: {e}[/yellow]")
 
     async def unload(self, model: str):
-        """Force Ollama to release VRAM for this model immediately."""
+        """Force Ollama to release VRAM for this model immediately. Public
+        entry point — acquires the lock itself, since callers outside this
+        class (patch_council.py, debate_protocol.py, analysis_council.py)
+        may run concurrently with an ensure_loaded() elsewhere."""
         if llm_provider.active():
             return
+        async with self._lock:
+            await self._unload_locked(model)
+
+    async def _unload_locked(self, model: str):
+        """The actual unload — only called with self._lock already held
+        (by unload(), or by ensure_loaded()/ensure_loaded_together() evicting
+        internally). Up to 6 DeepAgents used to call ensure_loaded()/unload()
+        truly concurrently (a parallel group via asyncio.gather), each with
+        real awaits (this POST, the warm-up call) inside the read-evict-write
+        section — unprotected, that raced on this one shared dict and threw a
+        real "dictionary changed size during iteration", confirmed live."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.post(
