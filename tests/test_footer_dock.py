@@ -9,7 +9,12 @@ the caller to keep its inline behaviour.
 import os
 import re
 
+import pytest
 from rich.console import Console
+
+# deck_input is the POSIX raw-mode editor (imports fcntl at module top); on
+# Windows cx falls back to readline, so there is nothing for these to pin.
+pytest.importorskip("fcntl", reason="deck_input is POSIX-only")
 
 import deck_input
 import footer_dock

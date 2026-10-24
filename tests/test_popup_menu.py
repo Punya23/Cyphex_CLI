@@ -5,6 +5,12 @@ and the editor's menu keys in deck_input (select, accept, run, dismiss).
 """
 import os
 
+import pytest
+
+# deck_input is the POSIX raw-mode editor (imports fcntl at module top); on
+# Windows cx falls back to readline, so there is nothing for these to pin.
+pytest.importorskip("fcntl", reason="deck_input is POSIX-only")
+
 import cx
 import deck_input
 

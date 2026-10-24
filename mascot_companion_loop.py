@@ -184,10 +184,11 @@ def _render_frame(state, tick):
     """Plain lines to draw for this poll — tries progressively simpler,
     fully-guarded fallbacks; the last one is a hardcoded built-in that
     can never fail (no imports, no I/O)."""
+    spin = "|/-\\"      # hoisted: py3.11 forbids a backslash inside an f-string {}
     return (
         _render_via_backend(state)
         or _render_via_mascot_frames(state, tick)
-        or [f"  [{'|/-\\\\'[tick % 4]}] cyphex mascot — {state}"]
+        or [f"  [{spin[tick % 4]}] cyphex mascot — {state}"]
     )
 
 

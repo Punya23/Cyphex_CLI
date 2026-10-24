@@ -22,7 +22,8 @@ _CONSUMERS = ("terminal_ui.py", "cx.py", "deck_input.py", "mascot.py",
 
 def test_no_hex_colour_literals_outside_palette():
     offenders = [f"{name}:{i}" for name in _CONSUMERS
-                 for i, line in enumerate((ROOT / name).read_text().splitlines(), 1)
+                 for i, line in enumerate(
+                     (ROOT / name).read_text(encoding="utf-8").splitlines(), 1)
                  if _HEX.search(line)]
     assert not offenders, f"hard-coded colours (use ui_palette): {offenders}"
 
