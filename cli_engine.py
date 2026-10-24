@@ -80,6 +80,7 @@ from immune.behavioral_genome import BehavioralGenome
 from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
 from models.scan import ScanContext, FormData, ParamData, Vuln
+from cyphex import notify as buddy
 from config import config as cyphex_config
 
 try:
@@ -571,6 +572,7 @@ class CyphexEngine:
         self._trace_begin(num, title)
         elapsed = time.time() - self.start_ts if self.start_ts else 0.0
         mode = "JUDGE" if self.judge_mode else "SCAN"
+        buddy.step(self.scan_id, num, title)
         step_num, step_total = num.split("/")
         # step_num may be '2b', '3', etc — strip non-digit suffix for progress bar
         import re as _re
@@ -2736,6 +2738,10 @@ class CyphexEngine:
             except (Exception, asyncio.CancelledError):
                 print(f"  {C.Y}⚠{C.RST} {C.GHOST}Council analysis skipped — start Ollama: {C.CYAN}ollama serve{C.RST}")
 
+        _rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+        buddy.report(self.scan_id, sc_label, score, (crit, high, med, low),
+                     sorted(((v.severity, v.name) for v in vulns), key=lambda f: _rank.get(f[0], 5)))
+
         return {
             "scan_id": self.scan_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -4096,6 +4102,8 @@ class CyphexEngine:
             sum(1 for v in _killed if v.severity == "Medium"),
             sum(1 for v in _killed if v.severity in ("Low", "Info")),
         )
+        buddy.send(f"🛠️ Patching finished: kept {self._patches_applied} of {self._patches_total} fixes.",
+                   [f"Security score {score_before} → {score_after}/100"], subtitle=f"scan {self.scan_id}")
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")
@@ -4358,7 +4366,15 @@ class CyphexEngine:
             if rr.returncode == 0:
                 remote_url = rr.stdout.strip().replace(".git", "")
 
+            # `branch` was never defined here (NameError swallowed as "Push failed").
+            branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=self.source_dir,
+                                    capture_output=True, text=True).stdout.strip()
             print(f"  {C.G}[OK]{C.RST} Branch pushed: {branch}")
+            _left = sum(1 for v in getattr(self, "_post_patch_remaining", []) if v.severity == "Critical")
+            buddy.review_card(
+                self.scan_id, branch, getattr(self, "_score_before", "?"), getattr(self, "_post_patch_score", "?"),
+                _left, getattr(self, "_patches_applied", 0), getattr(self, "_patches_total", 0),
+                f"{remote_url}/compare/{branch}?expand=1" if remote_url.startswith("https://github.com/") else "")
             if remote_url.startswith("https://github.com/"):
                 print(f"  {C.CYAN}Open PR:{C.RST} {remote_url}/compare/{branch}?expand=1")
             else:

@@ -386,7 +386,7 @@ QUICK_HELP = f"""
 COMMANDS = [
     "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
     "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/verify", "/status", "/runs", "/doctor",
-    "/models", "/version", "/history", "/clear", "/exit", "/quit", "/help",
+    "/models", "/webhook", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
 def _completer(text, state):
@@ -1146,6 +1146,44 @@ def _cmd_status(arg: str):
             pass
 
 
+def _notify():
+    # Loaded by path: backend/backend/cyphex.py (on sys.path above) shadows the cyphex/ package here.
+    import importlib.util
+    if "cyphex_notify" not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            "cyphex_notify", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cyphex", "notify.py"))
+        sys.modules["cyphex_notify"] = mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return sys.modules["cyphex_notify"]
+
+
+def _cmd_webhook(arg: str):
+    """Connect a Google Chat / Slack / Teams webhook so every scan reports to that space."""
+    notify = _notify()
+    arg = arg.strip()
+    if arg.lower().startswith("remove"):
+        which = arg[6:].strip() or "all"
+        n = notify.disconnect(which)
+        _ok(f"Disconnected {n} webhook(s).") if n else _warn("Nothing to remove. Use /webhook to see the numbers.")
+        return
+    if not arg:
+        saved = notify.saved_urls()
+        print(f"\n  {C.CYAN}{C.BOLD}Webhook connections{C.RST}")
+        for i, u in enumerate(saved, 1):
+            print(f"  {C.NEON}●{C.RST} {i}. {notify.label(u)}  {C.GREY}connected{C.RST}")
+        if not saved:
+            _dim("Nothing connected yet. Every scan notification goes to the spaces listed here.")
+        _dim("Connect:  /webhook <link>   (or paste the link on its own)   ·   Remove:  /webhook remove [n|all]")
+        return
+    _spinner("Saying hello to your chat space…")
+    res = notify.connect(arg)
+    if res["ok"]:
+        _ok(f"Connected to {res['label']}")
+        _dim("Cyphex Buddy just said hello there. Scan updates, reports and PR approvals will now go to this space.")
+    else:
+        _err(res["error"])
+
+
 def _cmd_models():
     """List available Ollama models."""
     print()
@@ -1270,6 +1308,9 @@ def _handle(line: str):
         case "/models":
             _cmd_models()
 
+        case "/webhook" | "/webhooks":
+            _cmd_webhook(arg)
+
         case "/benchmark" | "/bench":
             _cmd_benchmark(arg)
 
@@ -1293,7 +1334,8 @@ def _handle(line: str):
             sys.exit(0)
 
         case _:
-            _auto_scan(line)
+            # A pasted chat-webhook link is a connection request, never a scan target.
+            _cmd_webhook(line) if _notify().looks_like_webhook(line) else _auto_scan(line)
 
 
 def run_workspace():
