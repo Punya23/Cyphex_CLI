@@ -26,6 +26,7 @@ from typing import Optional, Callable
 if os.name == 'nt':
     os.environ.setdefault("PYTHONUTF8", "1")
 
+from scoring import score_from_counts
 from agents.terminal import Colors
 from agents.agent_01_recon import ReconAgent
 from agents.agent_02_crawler import CrawlerAgent
@@ -312,6 +313,11 @@ class ScanOrchestrator:
             deduped_vulns = self._deduplicate_vulns(context.confirmed_vulns)
             context.confirmed_vulns = deduped_vulns
 
+            n_critical = len([v for v in context.confirmed_vulns if v.severity == "Critical"])
+            n_high = len([v for v in context.confirmed_vulns if v.severity == "High"])
+            n_medium = len([v for v in context.confirmed_vulns if v.severity == "Medium"])
+            n_low = len([v for v in context.confirmed_vulns if v.severity == "Low"])
+
             report = {
                 "scan_id": scan_id,
                 "target": target_url,
@@ -323,10 +329,18 @@ class ScanOrchestrator:
                 "technologies": context.technologies,
                 "summary": {
                     "total_vulns": len(context.confirmed_vulns),
-                    "critical": len([v for v in context.confirmed_vulns if v.severity == "Critical"]),
-                    "high": len([v for v in context.confirmed_vulns if v.severity == "High"]),
-                    "medium": len([v for v in context.confirmed_vulns if v.severity == "Medium"]),
-                    "low": len([v for v in context.confirmed_vulns if v.severity == "Low"]),
+                    "critical": n_critical,
+                    "high": n_high,
+                    "medium": n_medium,
+                    "low": n_low,
+                    # Authoritative 0-100 posture score (higher = safer), from
+                    # scoring.py — the SAME formula the CLI's before/after
+                    # panel and final banner use. The web dashboard's
+                    # real-time gauge computes its own local approximation
+                    # while a scan is in flight (see usePipeline.ts); this
+                    # value is what it reconciles against once the scan
+                    # completes, so the two never permanently disagree.
+                    "security_score": score_from_counts(n_critical, n_high, n_medium, n_low),
                     "pages_crawled": len(context.sitemap),
                     "forms_found": len(context.all_forms),
                     "endpoints_found": len(context.all_endpoints),
@@ -389,11 +403,13 @@ class ScanOrchestrator:
             while True:
                 item = await log_queue.get()
                 event_type = item.get("type", "")
-                # Skip verbose terminal/agent logs — the orchestrator already
-                # emits the important lifecycle events (agent_start, agent_complete,
-                # vuln_found, stage_start) directly.  Forwarding every terminal
-                # command floods the WebSocket and causes ping timeouts (1011).
-                if event_type in ("terminal_log", "agent_log"):
+                # Raw terminal_log carries a command's FULL stdout, which can be
+                # huge (a curl body, a hallucinated HTML page) and floods the
+                # socket into a 1011 ping timeout — keep skipping it. agent_log
+                # lines are short narration (hard-truncated at the source in
+                # BaseAgent.log) and are exactly the "something is happening"
+                # signal the frontend needs, so forward those.
+                if event_type == "terminal_log":
                     continue
                 await self._emit(item)
         except asyncio.CancelledError:

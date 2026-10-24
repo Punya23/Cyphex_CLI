@@ -13,12 +13,10 @@ Falls back to deterministic pre-flight probes if LLM is unavailable.
 
 Zero external API cost — runs entirely local through Ollama + agent-reasoning.
 """
-import json
-import re
 import asyncio
 import httpx
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 # ── Multi-model role assignments ──────────────────────────────────────────────
 # Each role has a preference list ordered by fitness for the task.
@@ -153,6 +151,11 @@ Rules:
   CWE-22 (Path Traversal), CWE-918 (SSRF), CWE-94 (SSTI), CWE-611 (XXE),
   CWE-287 (Auth), CWE-639 (IDOR), CWE-915 (Mass Assignment)
 - severity: Critical | High | Medium | Low
+- Output AT MOST 6 hypotheses. Never more than 6. Fewer is better — pick the
+  highest-value tests only. Extra hypotheses will be discarded.
+- Keep every string value short (under ~120 characters). Do not pad.
+- The JSON must be COMPLETE. Emit the full closing brackets. A truncated
+  response is a failed response.
 - Return ONLY valid JSON. No markdown. No preamble.
 
 JSON schema:
@@ -273,6 +276,8 @@ class AttackPlan:
     target_summary: str
     primary_vulnerability_class: str
     hypotheses: List[Hypothesis]
+    model: str = ""        # which local model produced the plan (for the UI)
+    strategy: str = ""     # reasoning strategy used (Standard, CoT, ...)
 
     @classmethod
     def from_json(cls, data: dict) -> "AttackPlan":
@@ -310,6 +315,8 @@ class Decision:
     confidence: int = 0   # 0-100
     vuln: dict = None
     next_probe: Optional[HttpRequest] = None
+    model: str = ""       # which local model made the call (for the UI)
+    strategy: str = ""    # reasoning strategy used
 
     @classmethod
     def from_json(cls, data: dict) -> "Decision":
@@ -392,14 +399,24 @@ class AttackOracle:
     Falls back to empty plan / abandoned decision if LLM is unavailable.
     """
 
+    # Preferred planner model (the actual model may fall back if missing);
+    # exposed so the UI can name it before a call resolves it.
+    PLANNER_MODEL = _ROLE_PREFERENCES["planner"][0]
+
     def __init__(self, orchestrator=None):
-        # Keep orchestrator param for backward compatibility — not used
+        # The CLI passes its council orchestrator; inference does not use it,
+        # it goes through the reasoner (serialised by _LLM_SEMAPHORE).
+        self.orchestrator = orchestrator
         # Try both import paths: project root context and backend/ context
         try:
             from backend.reasoning.oracle_adapter import get_reasoner
         except ImportError:
             from reasoning.oracle_adapter import get_reasoner
         self.reasoner = get_reasoner()
+
+    def _strategy_label(self, role: str) -> str:
+        """Reasoning strategy shown in the UI panels."""
+        return _ROLE_STRATEGY.get(role, "cot").replace("_", " ").title()
 
 
     async def _call_reasoner(
@@ -464,9 +481,9 @@ class AttackOracle:
             f"Target: {target}\n\n"
             f"Vulnerability class to test: {vuln_class}\n\n"
             f"Observed attack surface:\n{surface_summary}\n\n"
-            "Generate a prioritised, hypothesis-driven attack plan with 5-8 hypotheses. "
-            "Focus ONLY on endpoints and parameters that actually exist in the surface above. "
-            "Think like a real attacker — adaptive, evidence-driven, not guessing."
+            "Generate a prioritised, hypothesis-driven attack plan with 4-6 "
+            "hypotheses (never more than 6). Focus ONLY on endpoints and parameters "
+            "that actually exist in the surface above. Return complete, compact JSON."
         )
         data = await self._call_reasoner(
             role="planner",
@@ -480,7 +497,10 @@ class AttackOracle:
                 primary_vulnerability_class=vuln_class,
                 hypotheses=[],  # Falls through to deterministic pre-flight probes
             )
-        return AttackPlan.from_json(data)
+        plan = AttackPlan.from_json(data)
+        plan.model = _ROLE_CACHE.get("planner", self.PLANNER_MODEL)
+        plan.strategy = self._strategy_label("planner")
+        return plan
 
     async def decide(
         self,
@@ -526,7 +546,10 @@ class AttackOracle:
         )
         if not data:
             return Decision(action="abandoned", thinking="ANALYST LLM unavailable", confidence=0)
-        return Decision.from_json(data)
+        decision = Decision.from_json(data)
+        decision.model = _ROLE_CACHE.get("analyst", "")
+        decision.strategy = self._strategy_label("analyst")
+        return decision
 
     async def mutate(self, payload: str, vuln_class: str, reason: str = "blocked") -> list[str]:
         """

@@ -48,7 +48,8 @@ from auth import get_or_create_api_key, install_api_key_middleware
 
 try:
     from rich.console import Console
-    console = Console()
+    from terminal_ui import themed_console as _tc_
+    console = _tc_()
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -56,11 +57,9 @@ except ImportError:
         @staticmethod
         def print(msg, **kwargs): print(msg)
 
-# ── ANSI colors for non-rich output ──
-class C:
-    R="\033[91m"; G="\033[92m"; Y="\033[93m"; B="\033[94m"
-    M="\033[95m"; CY="\033[96m"; W="\033[97m"; BOLD="\033[1m"
-    DIM="\033[2m"; RST="\033[0m"
+# ── ANSI colours for non-rich output ──
+from ui_palette import ANSI as C  # noqa: E402  (shared role palette)
+
 
 # ── Healing event log ──
 HEAL_LOG: list[dict] = []

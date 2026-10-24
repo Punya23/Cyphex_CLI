@@ -29,7 +29,16 @@ class CyphexConfig:
     # ─── Cross-project patch memory (cognee, optional — pip install ".[memory]") ───
     COGNEE_LLM_MODEL: str = ""              # Falls back to OLLAMA_MODEL if unset
     COGNEE_EMBEDDING_MODEL: str = "nomic-embed-text"
-    COGNEE_RECALL_TIMEOUT_S: float = 20.0    # CHUNKS retrieval + cold vector load
+    COGNEE_RECALL_TIMEOUT_S: float = 20.0    # warm CHUNKS retrieval, per recall
+    COGNEE_RECALL_COLD_TIMEOUT_S: float = 60.0  # the FIRST recall of a scan also pays
+                                              # cognee's one-time cold vector-DB load
+                                              # (lancedb open + index page-in). At the
+                                              # 20s warm budget that first call reliably
+                                              # timed out and logged a blank-error
+                                              # "cognee_recall_result" every scan, even
+                                              # though every later recall succeeded.
+                                              # Only the first recall uses this larger
+                                              # budget, so warm-path latency is unchanged.
     COGNEE_REMEMBER_TIMEOUT_S: float = 300.0  # cognify() runs an LLM extraction pass;
                                               # cognee's own Ollama structured-output retry
                                               # floor is 240s (stop_after_delay), so a 120s
@@ -47,9 +56,20 @@ class CyphexConfig:
     CEREBRAS_API_URL: str = "https://api.cerebras.ai/v1/chat/completions"
 
     # ─── Scan settings ───
-    SCAN_TIMEOUT_SECONDS: int = 1800  # 30 minutes max
+    SCAN_TIMEOUT_SECONDS: int = 1800  # 30 minutes max — only enforced on the
+                                       # backend API path (main.py/api.py via
+                                       # asyncio.wait_for); the `cx` CLI path
+                                       # (cli_engine.py) has no equivalent
+                                       # top-level cap, see DEEPAGENT_* below.
     COMMAND_TIMEOUT_SECONDS: int = 60  # Per-command default timeout
     MAX_PARALLEL_AGENTS: int = 6
+
+    # ─── DeepAgents swarm (--deep) ───
+    # No wall-clock cap: the swarm runs every agent to completion (see the
+    # loop in cli_engine.py). A former per-agent/phase budget starved the
+    # tail agents, so it was removed. Termination rests on each agent's
+    # internal MAX_HYPOTHESES × MAX_ATTEMPTS bound plus the per-request
+    # httpx/Ollama timeouts, not on a timer over the whole phase.
 
     # ─── Immune System / Co-Evolution ───
     GENOME_BLOCK_THRESHOLD: float = 0.7      # Anomaly score above this = BLOCK
@@ -86,6 +106,7 @@ class CyphexConfig:
         self.COGNEE_LLM_MODEL = os.getenv("COGNEE_LLM_MODEL", self.COGNEE_LLM_MODEL)
         self.COGNEE_EMBEDDING_MODEL = os.getenv("COGNEE_EMBEDDING_MODEL", self.COGNEE_EMBEDDING_MODEL)
         self.COGNEE_RECALL_TIMEOUT_S = float(os.getenv("COGNEE_RECALL_TIMEOUT_S", self.COGNEE_RECALL_TIMEOUT_S))
+        self.COGNEE_RECALL_COLD_TIMEOUT_S = float(os.getenv("COGNEE_RECALL_COLD_TIMEOUT_S", self.COGNEE_RECALL_COLD_TIMEOUT_S))
         self.COGNEE_REMEMBER_TIMEOUT_S = float(os.getenv("COGNEE_REMEMBER_TIMEOUT_S", self.COGNEE_REMEMBER_TIMEOUT_S))
 
         # Fall back to the main coding model if no cognee-specific model is set

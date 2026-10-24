@@ -28,20 +28,19 @@ if os.name == 'nt':
 
 
 # ANSI color codes for terminal output
-class Colors:
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    RED = "\033[91m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    BLUE = "\033[94m"
-    MAGENTA = "\033[95m"
-    CYAN = "\033[96m"
-    WHITE = "\033[97m"
-    GRAY = "\033[90m"
-    BG_RED = "\033[41m"
-    BG_GREEN = "\033[42m"
+try:
+    from ui_palette import ANSI as _ANSI, PANEL as _PANEL, bg as _bg
+except ImportError:          # legacy tree run without the repo root on sys.path
+    _ANSI = None
+
+
+class Colors(_ANSI or object):
+    """Role palette from ui_palette; plain text when it can't be imported."""
+    if _ANSI is None:
+        RESET = BOLD = DIM = RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = GRAY = ""
+        BG_RED = BG_GREEN = ""
+    else:
+        BG_RED = BG_GREEN = _bg(_PANEL)   # raised panel fill
 
 
 # Agent color mapping
@@ -194,12 +193,18 @@ class AgentTerminal:
                         return result
                     self._print_output(f"[!] Command failed (code {result.exit_code}). Retrying...", "stderr")
                 else:
+                    # /bin/bash is absent in minimal/Alpine containers; None falls back to /bin/sh.
+                    try:
+                        from backend.platform_compat import resolve_shell
+                        bash_path = resolve_shell("bash")
+                    except Exception:
+                        bash_path = "/bin/bash" if os.path.exists("/bin/bash") else None
                     proc = await asyncio.create_subprocess_shell(
                         command,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         cwd=self.working_dir,
-                        executable="/bin/bash",
+                        executable=bash_path,
                     )
 
                     stdout_lines = []

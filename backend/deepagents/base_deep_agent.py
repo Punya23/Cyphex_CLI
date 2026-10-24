@@ -19,7 +19,19 @@ from backend.deepagents.attack_graph import AttackGraph
 from backend.deepagents.attack_surface_index import AttackSurfaceIndex
 from backend.deepagents.oracle_attack import AttackOracle, Hypothesis, HttpRequest
 
-console = Console()
+try:                      # drag legacy [green]/[red] markup onto the ramp
+    from terminal_ui import themed_console as _themed_console
+    import terminal_ui as _ui
+except Exception:         # terminal_ui not importable in this context
+    def _themed_console(**kw): return Console(**kw)
+    _ui = None
+console = _themed_console()
+
+
+def _deep_ui():
+    """terminal_ui module when its DeepAgents panel renderers are present,
+    else None so callers fall back to a plain print. Guards old installs."""
+    return _ui if (_ui is not None and hasattr(_ui, "render_attack_plan")) else None
 
 
 # How many hypotheses to test in parallel (keep at 3 to avoid hammering target)
@@ -72,28 +84,32 @@ class BaseDeepAgent:
 
         # Generate adaptive attack plan via agent-reasoning enhanced local model
         surface_summary = self.asi.summarise_for_prompt()
-        console.print(
-            f"[dim]  ▸ {self.__class__.__name__}: analysing surface, generating hypotheses...[/dim]"
-        )
+        name = self.__class__.__name__
+        ui = _deep_ui()
+        if ui:
+            ui.render_deep_planner(name, self.oracle.PLANNER_MODEL, "Standard")
+        else:
+            console.print(f"[dim]DeepAgent {name} consulting Oracle...[/dim]")
         try:
+            t0 = time.time()
             plan = await self.oracle.plan(
                 target=self.target,
                 surface_summary=surface_summary,
                 vuln_class=self.PRIMARY_VULN_CLASS,
             )
-            if plan.hypotheses:
-                console.print(
-                    f"[cyan]  ◈ {self.__class__.__name__}[/cyan] "
-                    f"[green]{len(plan.hypotheses)} hypotheses generated[/green]"
-                )
+            if ui:
+                # ONE ATTACK PLAN panel per agent (payload · endpoint · severity
+                # per hypothesis). The target summary is already the panel's
+                # "Target" line, so no separate thinking line is printed.
+                ui.render_attack_plan(name, plan, (time.time() - t0) * 1000)
             else:
                 console.print(
-                    f"[dim]  ◈ {self.__class__.__name__}: no LLM hypotheses — "
-                    f"running deterministic pre-flight only[/dim]"
+                    f"[cyan]Oracle[/cyan] generated {len(plan.hypotheses)} hypotheses "
+                    f"for {name}."
                 )
         except Exception as e:
-            console.print(f"[yellow]  ◈ {self.__class__.__name__} plan error: {str(e)[:80]}[/yellow]")
-            return AgentResult(agent=self.__class__.__name__, vulns=self.vulns, context=context)
+            console.print(f"[red]Oracle plan failed for {name}: {e}[/red]")
+            return AgentResult(agent=name, vulns=self.vulns, context=context)
 
 
         # Execute hypotheses in parallel batches
@@ -229,6 +245,7 @@ class BaseDeepAgent:
 
             # Oracle evaluates
             try:
+                t0 = time.time()
                 decision = await self.oracle.decide(
                     hypothesis=hyp,
                     response_status=status,
@@ -237,14 +254,26 @@ class BaseDeepAgent:
                     attempt=attempt,
                     baseline_time=self._baseline_ms,
                 )
+                decide_ms = (time.time() - t0) * 1000
             except Exception as e:
                 console.print(f"[red]Oracle decide failed: {e}[/red]")
                 break
 
-            console.print(
-                f"[dim]  [{hyp.id}] attempt {attempt+1} → {decision.action} "
-                f"(conf={decision.confidence}%) {decision.thinking}[/dim]"
-            )
+            ui = _deep_ui()
+            if ui:
+                # Keep it terse: one compact attempt line per probe (no repeated
+                # reasoning text), and a VERDICT panel only when a vuln is
+                # CONFIRMED — the outcome worth surfacing. Abandon/adapt are just
+                # the one-liner, so a long run does not bury the screen.
+                ui.render_deep_attempt(hyp.id, attempt + 1, decision.action,
+                                       decision.confidence)
+                if decision.action == "confirmed":
+                    ui.render_deep_verdict(self.__class__.__name__, decision, decide_ms)
+            else:
+                console.print(
+                    f"[dim]  [{hyp.id}] attempt {attempt+1} → {decision.action} "
+                    f"(conf={decision.confidence}%)[/dim]"
+                )
 
             if decision.action == "confirmed" and decision.vuln:
                 if decision.confidence >= _CONFIDENCE_THRESHOLD:

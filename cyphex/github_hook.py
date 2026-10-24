@@ -51,16 +51,15 @@ except ImportError:
 
 try:
     from rich.console import Console
-    console = Console()
+    from terminal_ui import themed_console as _tc_
+    console = _tc_()
 except ImportError:
     class console:
         @staticmethod
         def print(msg, **kwargs): print(msg)
 
 
-class C:
-    R="\033[91m"; G="\033[92m"; Y="\033[93m"; B="\033[94m"
-    M="\033[95m"; CY="\033[96m"; BOLD="\033[1m"; DIM="\033[2m"; RST="\033[0m"
+from ui_palette import ANSI as C  # noqa: E402  (shared role palette)
 
 
 # Hosts that are allowed to receive an authenticated (token-bearing) `git push`.

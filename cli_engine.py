@@ -12,6 +12,7 @@ import json
 import hashlib
 import re
 import glob
+import math
 import random
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -29,7 +30,25 @@ from rich.text import Text
 from rich.live import Live
 from rich.box import ROUNDED, DOUBLE
 
-console = Console()
+try:                      # drag legacy [green]/[red] markup onto the ramp
+    from terminal_ui import themed_console as _themed_console
+except Exception:         # terminal_ui not importable in this context
+    def _themed_console(**kw): return Console(**kw)
+console = _themed_console()
+
+# Severity → colour for plain markup lines. From ui_palette (dependency-free)
+# rather than terminal_ui, which may not be importable here.
+import ui_palette as _pal
+_SEV_HEX = {"Critical": _pal.WARN, "High": _pal.HIGH, "Medium": _pal.CAUT, "Low": _pal.LOW}
+
+# Security posture scoring — zero-dependency module, always importable
+# regardless of whether the rich-based SOC UI below is available. This is
+# the ONLY place the score formula and its 20/40/60/80 presentation bands
+# are defined; do not hand-copy them here or anywhere else — that hand-
+# copying previously let this exact fallback silently diverge from
+# terminal_ui's copy (this one was missing the severity-band cap the other
+# one had), producing wrong scores whenever SOC_UI was False.
+from scoring import score_from_counts as security_score, score_band as _score_band
 
 # SOC Terminal UI
 try:
@@ -37,6 +56,15 @@ try:
     SOC_UI = True
 except ImportError:
     SOC_UI = False
+
+# Terminal mascot — animated companion for otherwise-silent waits (Docker
+# boot, model calls). No-ops itself on non-tty/NO_COLOR, so it's always
+# safe to import and call even when SOC_UI above is False.
+try:
+    import mascot
+    MASCOT = True
+except ImportError:
+    MASCOT = False
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "backend", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -53,6 +81,34 @@ from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
 from models.scan import ScanContext, FormData, ParamData, Vuln
 from config import config as cyphex_config
+
+try:
+    from backend.observability.events import emit as _obs_emit
+except Exception:
+    def _obs_emit(*a, **kw):
+        pass
+
+# Waypoint tracing. Recording is independent of rendering: a scan with no
+# TTY records the same trace an interactive one does, so /status can replay
+# it afterwards. NullTrace keeps every call site guard-free if the import
+# ever fails.
+try:
+    from backend.observability.trace import (
+        TraceRecorder as _TraceRecorder, NullTrace as _NullTrace,
+        OK as _T_OK, WARN as _T_WARN, FAIL as _T_FAIL, SKIP as _T_SKIP,
+    )
+    _TRACE_AVAILABLE = True
+except Exception:
+    _TRACE_AVAILABLE = False
+    _T_OK, _T_WARN, _T_FAIL, _T_SKIP = "ok", "warn", "fail", "skip"
+
+    class _NullTrace(object):
+        def __getattr__(self, _name):
+            def _noop(*a, **kw):
+                return None
+            return _noop
+
+    _TraceRecorder = None
 
 # Council system imports
 sys.path.insert(0, os.path.dirname(__file__))
@@ -107,40 +163,41 @@ except ImportError:
     AGENT_REASONING_AVAILABLE = False
     REASONING_AVAILABLE = False
 
+# ── Grounded Reflexion (evidence-fed patch retry) ──
+# Was fully wired up (tested end-to-end in tests/test_reasoning.py) but never
+# actually called from _patch_workflow — a patch rejected by the Verify Gate
+# (structural integrity, syntax, still-vulnerable-on-rescan, ...) had exactly
+# one attempt and then gave up, which is why a Critical whose ONE patch got
+# rejected stayed open for the rest of the scan and capped the security score
+# (see scoring.py: an open Critical caps the score regardless of anything
+# else fixed). rounds_for_tier() is the same hardware-tier -> round-count
+# table _patch_workflow's status banner already claims to use (was actually a
+# hand-duplicated copy that was never connected to anything real).
+try:
+    from backend.reasoning.reflexion import _build_feedback as _reflexion_feedback, rounds_for_tier
+    REFLEXION_AVAILABLE = True
+except ImportError:
+    REFLEXION_AVAILABLE = False
+
 # Backwards-compat alias — some code paths use PATCH_PIPELINE_AVAILABLE,
 # others use PATCH_V2_AVAILABLE; both should reflect the same flag.
 PATCH_PIPELINE_AVAILABLE = PATCH_V2_AVAILABLE
 
-class C:
-    """Premium cyber-themed color palette — turquoise/purple/black."""
-    # ── Core palette ──
-    RST    = "\033[0m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    ITALIC = "\033[3m"
-    ULINE  = "\033[4m"
-    # Standard colors
-    R  = "\033[91m"
-    G  = "\033[92m"
-    Y  = "\033[93m"
-    B  = "\033[94m"
-    M  = "\033[95m"
-    CY = "\033[96m"
-    W  = "\033[97m"
-    # ── True-color cyber palette ──
-    CYAN   = "\033[38;2;0;255;255m"      # Turquoise/cyan primary
-    CYAN2  = "\033[38;2;72;209;204m"     # Muted teal
-    PURPLE = "\033[38;2;138;43;226m"     # Vivid purple
-    PURP2  = "\033[38;2;161;100;255m"    # Soft purple
-    NEON   = "\033[38;2;57;255;20m"      # Neon green (success)
-    FLAME  = "\033[38;2;255;69;0m"       # Orange-red (critical)
-    GHOST  = "\033[38;2;100;100;120m"    # Ghost gray (dim text)
-    SLATE  = "\033[38;2;140;150;170m"    # Slate (secondary text)
-    # Backgrounds
-    BG_DARK   = "\033[48;2;15;15;25m"    # Near-black bg
-    BG_PURPLE = "\033[48;2;30;20;50m"    # Dark purple bg
-    BG_CYAN   = "\033[48;2;0;50;60m"     # Dark cyan bg
-    BG_RED    = "\033[48;2;60;10;10m"    # Dark red bg
+class C(_pal.ANSI):
+    """Plain-escape palette for the engine's non-Rich output. Values come from
+    ui_palette; the extra names here are this module's older role aliases."""
+    CYAN2  = _pal.fg(_pal.CAUT)       # caution / secondary
+    PURPLE = _pal.fg(_pal.PHOS_DIM)   # borders, rails
+    PURP2  = _pal.fg(_pal.REF)        # active / high emphasis
+    NEON   = _pal.fg(_pal.OK)         # success
+    FLAME  = _pal.fg(_pal.WARN)       # critical
+    GHOST  = _pal.fg(_pal.LABEL)      # captions / dim text
+    SLATE  = _pal.fg(_pal.READOUT)    # secondary prose
+    BG_CYAN = _pal.bg(_pal.PANEL)     # raised panel fill
+    # Gradient endpoints for the brand rules/dividers below. Kept as RGB
+    # triples (not escapes) because C.gradient() interpolates on the numbers.
+    RAMP_HI = _pal.rgb(_pal.PHOS)
+    RAMP_LO = _pal.rgb(_pal.PHOS_DIM)
 
     @staticmethod
     def gradient(text, r1, g1, b1, r2, g2, b2):
@@ -159,9 +216,27 @@ WORK_DIR = os.path.join(os.path.dirname(__file__), "backend", "sandboxes")
 os.makedirs(WORK_DIR, exist_ok=True)
 
 
+def _partition_for_council(vulns):
+    """Split findings for the council's false-positive debate into
+    (static_keep, to_validate). STATIC findings ([STATIC] prefix) are
+    deterministic Semgrep/scanner source matches — the ones the patch phase
+    repairs — so they bypass the local-model vote and are always kept; only
+    dynamic/network findings are debated. Keeping static findings out of the
+    vote is what stops a wrong verdict from deleting a patchable vuln and
+    zeroing the after-patch score."""
+    def _static(v):
+        return str(getattr(v, "name", "")).startswith("[STATIC]")
+    return [v for v in vulns if _static(v)], [v for v in vulns if not _static(v)]
+
+
 class CyphexEngine:
     def __init__(self):
         self.scan_id = f"cli_{uuid.uuid4().hex[:8]}"
+        # Replaced with a real recorder at the top of run(), once scan_id
+        # has a sandbox directory to write into. NullTrace until then so
+        # any early call site is still safe.
+        self.trace = _NullTrace()
+        self._deck = None
         self.source_dir = None
         self.sandbox_info = None
         self.context = None
@@ -171,6 +246,7 @@ class CyphexEngine:
         self._static_proc = None
         self.judge_mode = False
         self.non_interactive = False
+        self.verbose = False
         self.start_ts = 0.0
         try:
             from cyphex.hardware import detect_mode
@@ -182,12 +258,19 @@ class CyphexEngine:
                   target_url=None, branch="main",
                   generations=10, output_file=None, auto_patch=True,
                   judge_mode=False, judge=False, non_interactive=False,
-                  network_scan=False, use_deepagents=False):
+                  network_scan=False, use_deepagents=False, verbose: bool = False):
         self.start_ts = time.time()
+        self._emit("scan_start", repo_url=repo_url, local_path=local_path, judge_mode=judge_mode or judge)
+        if _TRACE_AVAILABLE:
+            try:
+                self.trace = _TraceRecorder(os.path.join(WORK_DIR, self.scan_id), self.scan_id)
+            except Exception:
+                self.trace = _NullTrace()
         self.repo_url = repo_url
         self.local_path = local_path
         self.judge_mode = judge_mode or judge
         self.non_interactive = non_interactive
+        self.verbose = verbose
 
         # Show premium splash banner
         self._splash_banner()
@@ -269,7 +352,7 @@ class CyphexEngine:
                             confirmed=False,
                             cwe=ef.cwe,
                         ))
-                        c = "red" if sev == "Critical" else "magenta" if sev == "High" else "yellow"
+                        c = _SEV_HEX[sev]
                         console.print(f"  [[{c}]{sev}[/{c}]] {ef.name} ({ef.cwe})")
                         console.print(f"       {ef.file_path}:{ef.line_number}")
                         console.print(f"       [dim]{ef.code_snippet[:100]}[/dim]")
@@ -360,6 +443,9 @@ class CyphexEngine:
 
         self._final_banner()
 
+        # ── Visual HTML report (openable link) ──
+        self._write_html_report(report)
+
     def doctor(self) -> bool:
         """
         Local readiness check for judge/demo environments.
@@ -419,7 +505,66 @@ class CyphexEngine:
             print(f"\n  Result: {C.Y}PARTIAL - fix failed checks before demo{C.RST}")
         return all_ok
 
+    def _vprint(self, *args, **kwargs):
+        """Verbose-only print — pipeline chatter (per-payload DAST narration,
+        per-file SAST hits, docker retry noise, patch-loop internals) that
+        floods the terminal on a normal run. Gated behind --verbose so the
+        default CLI output stays phase-banner + final-result focused."""
+        if self.verbose:
+            print(*args, **kwargs)
+
+    def _vconsole(self, *args, **kwargs):
+        """Same as _vprint but for rich `console.print(...)` call sites."""
+        if self.verbose:
+            console.print(*args, **kwargs)
+
+    def _emit(self, event: str, **fields):
+        """Best-effort observability event — never raises, never blocks the pipeline."""
+        try:
+            _obs_emit(os.path.join(WORK_DIR, self.scan_id), event, scan_id=self.scan_id, **fields)
+        except Exception:
+            pass
+
+    def _trace_begin(self, num, title):
+        """Open a trace waypoint for this phase.
+
+        The genome build is flagged `highlight` because it is the one phase
+        whose internals evolve measurably while you watch (per-generation
+        block rate climbing as the blue team retrains) rather than being a
+        single long opaque wait — so the deck surfaces its interior live
+        instead of summarising it after the fact.
+        """
+        try:
+            key = str(num).split("/")[0].strip()
+            self.trace.begin_waypoint(num, title, highlight=(key == "5"))
+        except Exception:
+            return
+        # Paint the compact deck under the phase banner: small buddy, the
+        # waypoint's goal, and the steps as they land. Rendered once per
+        # waypoint rather than held open as a live region, because the
+        # pipeline prints continuously between waypoints and a persistent
+        # Live area would fight it for the same rows.
+        try:
+            import trace_deck
+            if self._deck is None:
+                self._deck = trace_deck.TraceDeck(self.trace, animate=True)
+                self._deck.tty = False  # static repaint; no Live takeover
+            self._deck._frame_idx += 1
+            console.print(self._deck._renderable())
+            # The buddy and a live status line sit in the pinned footer
+            # (footer_dock) beside the input box; the box above scrolls with
+            # the output, the footer does not.
+            import footer_dock
+            wp = self.trace.current
+            if footer_dock.adopt(console):
+                footer_dock.start_task(f"{wp.num}  {wp.title}",
+                                       state=trace_deck.buddy_state(wp))
+        except Exception:
+            pass
+
     def _step(self, num, title):
+        self._emit("phase_start", num=str(num), title=str(title))
+        self._trace_begin(num, title)
         elapsed = time.time() - self.start_ts if self.start_ts else 0.0
         mode = "JUDGE" if self.judge_mode else "SCAN"
         step_num, step_total = num.split("/")
@@ -440,7 +585,7 @@ class CyphexEngine:
         icon = step_icons.get(step_num, "◆")
         filled = int(done / total * 20)
         progress = f"{'█' * filled}{'░' * (20 - filled)}"
-        border = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+        border = C.gradient("━" * 72, *C.RAMP_HI, *C.RAMP_LO)
         print(f"\n{border}")
         pill = f"{C.BG_CYAN}{C.BOLD} {icon} STEP {step_num}/{step_total} {C.RST}"
         title_text = f"{C.CYAN}{C.BOLD}{title}{C.RST}"
@@ -459,14 +604,14 @@ class CyphexEngine:
 
         # Fallback: original ANSI rendering
         banner = f"""
-{C.CYAN}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
-{C.CYAN}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
-{C.CYAN2}  ██║      ╚████╔╝ ██████╔╝███████║█████╗   ╚███╔╝{C.RST}
-{C.PURP2}  ██║       ╚██╔╝  ██╔═══╝ ██╔══██║██╔══╝   ██╔██╗{C.RST}
-{C.PURPLE}  ╚██████╗   ██║   ██║     ██║  ██║███████╗██╔╝ ██╗{C.RST}
-{C.PURPLE}   ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C.RST}
+{C.FLAME}  ██████╗██╗   ██╗██████╗ ██╗  ██╗███████╗██╗  ██╗{C.RST}
+{C.PURP2}  ██╔════╝╚██╗ ██╔╝██╔══██╗██║  ██║██╔════╝╚██╗██╔╝{C.RST}
+{C.CYAN}  ██║      ╚████╔╝ ██████╔╝███████║█████╗   ╚███╔╝{C.RST}
+{C.CYAN}  ██║       ╚██╔╝  ██╔═══╝ ██╔══██║██╔══╝   ██╔██╗{C.RST}
+{C.CYAN2}  ╚██████╗   ██║   ██║     ██║  ██║███████╗██╔╝ ██╗{C.RST}
+{C.CYAN2}   ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝{C.RST}
 """
-        divider = C.gradient("━" * 60, 0, 255, 255, 138, 43, 226)
+        divider = C.gradient("━" * 60, *C.RAMP_HI, *C.RAMP_LO)
         print(banner)
         print(f"  {divider}")
         print(f"  {C.SLATE}Multi-Agent Security Pipeline{C.RST}  {C.GHOST}│{C.RST}  {C.CYAN}v2.0{C.RST}  {C.GHOST}│{C.RST}  {C.PURP2}AI-Powered  │  OFFLINE-FIRST{C.RST}")
@@ -495,7 +640,11 @@ class CyphexEngine:
         print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Verification Gate','Verify — off',C.NEON)}  {C.SLATE}re-scan + exploit-replay + rollback{C.RST}       {B}│{C.RST}")
         print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Manifest','Manifest — off',C.NEON)}   {C.SLATE}.cyphex/patches.json durability tracking{C.RST}  {B}│{C.RST}")
         print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Patch Memory','Memory — off',C.CYAN2)}    {C.SLATE}semantic-hash recall + pattern library{C.RST}    {B}│{C.RST}")
-        _refl_rounds = {"minimal": 1, "low": 1, "mid": 2, "high": 3, "ultra": 3, "cloud": 3}.get(self._hw_tier, 2)
+        # Same table _patch_workflow's reflexion-retry wiring actually calls
+        # (backend.reasoning.reflexion.rounds_for_tier) — this used to be a
+        # hand-duplicated copy, disconnected from anything real, back when
+        # this banner line was the ONLY place reflexion was mentioned at all.
+        _refl_rounds = rounds_for_tier(self._hw_tier) if REFLEXION_AVAILABLE else 1
         print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Reflexion Loop','Reflexion — off',C.CYAN2)}  {C.SLATE}evidence-fed retry ({self._hw_tier}: up to {_refl_rounds} round(s)){C.RST}  {B}│{C.RST}")
         print(f"  {B}│{C.RST}  {_flag(pipe_ok)}  {_label(pipe_ok,'Regression Tests','Regression — off',C.PURP2)} {C.SLATE}auto-emitted per verified fix{C.RST}          {B}│{C.RST}")
         print(f"  {B}│{C.RST}  {_flag(True)}  {C.Y}{C.BOLD}Autonomy Ladder{C.RST}  {C.SLATE}L1–L4 degradation honesty{C.RST}                {B}│{C.RST}")
@@ -525,8 +674,18 @@ class CyphexEngine:
                         subprocess.run(["open", "-a", "Docker"], capture_output=True)
                         time.sleep(3)
                     elif sys.platform == "win32":
-                        docker_exe = r"C:\Program Files\Docker\Docker\Docker Desktop.exe"
-                        if os.path.exists(docker_exe):
+                        # A single hardcoded path missed non-default installs
+                        # (per-user %LOCALAPPDATA% installs, a non-C: drive,
+                        # Program Files (x86)) — check the common locations
+                        # before giving up on auto-start. Fails silently
+                        # either way (os.path.exists guard), same as before.
+                        _candidates = [
+                            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+                            r"C:\Program Files (x86)\Docker\Docker\Docker Desktop.exe",
+                            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Docker\Docker\Docker Desktop.exe"),
+                        ]
+                        docker_exe = next((p for p in _candidates if os.path.exists(p)), None)
+                        if docker_exe:
                             print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Docker Desktop offline — auto-starting...{C.RST}")
                             subprocess.Popen([docker_exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                             time.sleep(5)
@@ -555,9 +714,21 @@ class CyphexEngine:
             if sys.platform == "darwin":
                 subprocess.run(["open", "-a", "Ollama"], capture_output=True)
             elif sys.platform == "win32":
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+                # CREATE_NO_WINDOW (0x08000000) alone hides the console but
+                # doesn't stop Ctrl+C from reaching this child — need
+                # CREATE_NEW_PROCESS_GROUP (0x00000200) too so
+                # GenerateConsoleCtrlEvent from a Ctrl+C during the scan
+                # doesn't kill the Ollama server this just launched.
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  creationflags=0x08000000 | 0x00000200)
             else:
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # start_new_session=True (== os.setsid()) takes this process
+                # out of the terminal's foreground process group — without
+                # it, Ctrl+C during the scan sends SIGINT to this freshly
+                # launched Ollama server too, defeating the point of having
+                # auto-started a persistent local model server.
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
             time.sleep(3)  # Give server a moment to bind to port
             
         try:
@@ -679,6 +850,8 @@ class CyphexEngine:
 
         # Detect framework
         fw = self._detect_framework(dest)
+        self.trace.note("detect framework", f"{fw['name']} · {fw['file_count']} files", _T_OK,
+                        {"framework": fw["name"], "files": fw["file_count"]})
         print(f"  {C.GHOST}Framework{C.RST}   {C.CYAN}{fw['name']}{C.RST}")
         print(f"  {C.GHOST}Entry{C.RST}       {C.SLATE}{fw['entry'] or 'auto-detect'}{C.RST}")
         print(f"  {C.GHOST}Files{C.RST}       {C.SLATE}{fw['file_count']} code files{C.RST}")
@@ -695,7 +868,7 @@ class CyphexEngine:
 
         if os.path.exists(os.path.join(path, "package.json")):
             try:
-                with open(os.path.join(path, "package.json")) as f:
+                with open(os.path.join(path, "package.json"), encoding="utf-8") as f:
                     pkg = json.load(f)
                 deps = {**pkg.get("dependencies",{}), **pkg.get("devDependencies",{})}
                 if "express" in deps: info["name"] = "Node.js (Express)"
@@ -800,11 +973,13 @@ class CyphexEngine:
                                 vulns.append(v)
                                 sev_icon = {"Critical": f"{C.FLAME}▲", "High": f"{C.R}●", "Medium": f"{C.Y}◆", "Low": f"{C.SLATE}○"}
                                 icon = sev_icon.get(severity, f"{C.SLATE}○")
-                                print(f"  {icon} {C.BOLD}[{severity}]{C.RST} {C.CYAN}{vuln_type}{C.RST}")
-                                print(f"       {C.SLATE}{rel_path}:{i}{C.RST}")
-                                print(f"       {C.GHOST}{line.strip()[:100]}{C.RST}")
+                                self._vprint(f"  {icon} {C.BOLD}[{severity}]{C.RST} {C.CYAN}{vuln_type}{C.RST}")
+                                self._vprint(f"       {C.SLATE}{rel_path}:{i}{C.RST}")
+                                self._vprint(f"       {C.GHOST}{line.strip()[:100]}{C.RST}")
                                 break  # One per pattern per file
 
+        self.trace.note("scan source files", f"{scanned} files · {len(vulns)} issues", _T_OK,
+                        {"files_scanned": scanned, "issues": len(vulns)})
         print(f"\n  {C.CYAN}SAST:{C.RST} {C.SLATE}{scanned} files scanned, {C.BOLD}{C.CYAN}{len(vulns)} issues{C.RST}")
         return vulns
 
@@ -840,7 +1015,7 @@ class CyphexEngine:
 
                 # ── Pre-flight: tear down any stale containers from a previous
                 #    scan so we never hit "container name already in use" conflicts.
-                print(f"  {C.GHOST}[DOCKER] Cleaning up any stale containers...{C.RST}")
+                self._vprint(f"  {C.GHOST}[DOCKER] Cleaning up any stale containers...{C.RST}")
                 await asyncio.to_thread(
                     subprocess.run,
                     ["docker", "compose", "-f", compose_file, "down", "--remove-orphans"],
@@ -858,7 +1033,7 @@ class CyphexEngine:
                     stderr_text = proc.stderr or ""
                     # Conflict: container name already in use → force-remove and retry once
                     if "conflict" in stderr_text.lower() or "already in use" in stderr_text.lower():
-                        print(f"  {C.Y}[DOCKER]{C.RST} Container conflict detected — force-removing and retrying...")
+                        self._vprint(f"  {C.Y}[DOCKER]{C.RST} Container conflict detected — force-removing and retrying...")
                         await asyncio.to_thread(
                             subprocess.run,
                             ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
@@ -882,10 +1057,10 @@ class CyphexEngine:
                         )
                     # Common failure: a service has no Dockerfile
                     elif "dockerfile" in stderr_text.lower() or "no such file" in stderr_text.lower():
-                        print(f"  {C.Y}▸ [INFO]{C.RST} {C.SLATE}Some services lack Dockerfiles — deploying buildable services only...{C.RST}")
+                        self._vprint(f"  {C.Y}▸ [INFO]{C.RST} {C.SLATE}Some services lack Dockerfiles — deploying buildable services only...{C.RST}")
                         buildable = self._get_buildable_services(compose_file, source_dir)
                         if buildable:
-                            print(f"  {C.GHOST}Deploying: {C.CYAN2}{', '.join(buildable)}{C.RST}")
+                            self._vprint(f"  {C.GHOST}Deploying: {C.CYAN2}{', '.join(buildable)}{C.RST}")
                             proc = await asyncio.to_thread(
                                 subprocess.run,
                                 ["docker", "compose", "-f", compose_file, "up", "-d", "--build"] + buildable,
@@ -901,6 +1076,8 @@ class CyphexEngine:
                     # Wait for app to be ready
                     url = f"http://localhost:{port}"
                     print(f"  {C.GHOST}Waiting for containers to start...{C.RST}")
+                    if MASCOT:
+                        mascot.searching("Waiting for containers to start...")
                     for attempt in range(20):
                         await asyncio.sleep(3)
                         try:
@@ -916,8 +1093,10 @@ class CyphexEngine:
                                         "source_dir": source_dir,
                                     }
                                     self._docker_compose_dir = source_dir
+                                    if MASCOT:
+                                        mascot.success(f"Docker stack ready (attempt {attempt + 1})")
                                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker stack ready (attempt {attempt + 1}){C.RST}")
-                                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                                    sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
                                     print(f"  {sb}")
                                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
                                     print(f"  {C.GHOST}  Full stack: app + database + all services{C.RST}")
@@ -926,15 +1105,17 @@ class CyphexEngine:
                         except Exception:
                             continue
 
-                    print(f"  {C.Y}[WARN]{C.RST} Docker stack started but app not responding on port {port}")
+                    if MASCOT:
+                        mascot.error("Docker stack not responding")
+                    self._vprint(f"  {C.Y}[WARN]{C.RST} Docker stack started but app not responding on port {port}")
                 else:
                     err_lines = [line for line in proc.stderr.splitlines() if "error" in line.lower() or "failed" in line.lower() or "yaml:" in line.lower()]
                     err_msg = err_lines[-1] if err_lines else proc.stderr[-150:].replace("\n", " ")
-                    print(f"  {C.Y}[WARN]{C.RST} docker-compose failed: {err_msg[:150]}")
+                    self._vprint(f"  {C.Y}[WARN]{C.RST} docker-compose failed: {err_msg[:150]}")
             except subprocess.TimeoutExpired:
-                print(f"  {C.Y}[WARN]{C.RST} Docker build timed out (300s)")
+                self._vprint(f"  {C.Y}[WARN]{C.RST} Docker build timed out (300s)")
             except Exception as e:
-                print(f"  {C.Y}[WARN]{C.RST} Docker error: {str(e)[:100]}")
+                self._vprint(f"  {C.Y}[WARN]{C.RST} Docker error: {str(e)[:100]}")
 
         # ── Priority 2: Docker container (existing OR auto-generated Dockerfile) ──
         # Docker is already confirmed available above (docker_available() returned
@@ -955,15 +1136,15 @@ class CyphexEngine:
                     url = result["url"]
                     _gen = " (auto-generated Dockerfile)" if result.get("generated_dockerfile") else ""
                     print(f"  {C.NEON}✓{C.RST} {C.SLATE}Docker container running{_gen}{C.RST}")
-                    sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+                    sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
                     print(f"  {sb}")
                     print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
                     print(f"  {C.GHOST}  Container: {result.get('container_name')}  ·  {result.get('log_cmd','')}{C.RST}")
                     _clogs = (result.get("logs") or "").strip()
                     if _clogs:
-                        print(f"  {C.GHOST}  ── container logs (tail) ──{C.RST}")
+                        self._vprint(f"  {C.GHOST}  ── container logs (tail) ──{C.RST}")
                         for _ln in _clogs.splitlines()[-15:]:
-                            print(f"  {C.GHOST}  │ {_ln[:200]}{C.RST}")
+                            self._vprint(f"  {C.GHOST}  │ {_ln[:200]}{C.RST}")
                     print(f"  {sb}")
                     return url
                 elif result and result.get("error"):
@@ -1066,11 +1247,11 @@ class CyphexEngine:
             print(f"  {C.GHOST}Logs: {_lf}{C.RST}")
         _nlogs = (self.sandbox_info.get("logs") or "").strip() if isinstance(self.sandbox_info, dict) else ""
         if _nlogs:
-            print(f"  {C.GHOST}── sandbox logs (tail) ──{C.RST}")
+            self._vprint(f"  {C.GHOST}── sandbox logs (tail) ──{C.RST}")
             for _ln in _nlogs.splitlines()[-15:]:
-                print(f"  {C.GHOST}│ {_ln[:200]}{C.RST}")
+                self._vprint(f"  {C.GHOST}│ {_ln[:200]}{C.RST}")
         print()
-        sb = C.gradient("━" * 58, 0, 255, 255, 138, 43, 226)
+        sb = C.gradient("━" * 58, *C.RAMP_HI, *C.RAMP_LO)
         print(f"  {sb}")
         print(f"  {C.CYAN}▸{C.RST} {C.BOLD}SANDBOX LIVE AT:{C.RST}  {C.NEON}{url}{C.RST}")
         print(f"  {C.GHOST}  Open in browser to see the target app{C.RST}")
@@ -1113,7 +1294,7 @@ class CyphexEngine:
             pass
 
         try:
-            with open(compose_file) as f:
+            with open(compose_file, encoding="utf-8") as f:
                 content = f.read()
 
             # Look for port mappings like "3000:3000" or "- 3000:3000"
@@ -1134,12 +1315,12 @@ class CyphexEngine:
     def _strip_compose_version(self, compose_file):
         """Remove obsolete 'version' key from docker-compose.yml to prevent warnings."""
         try:
-            with open(compose_file, 'r') as f:
+            with open(compose_file, 'r', encoding="utf-8") as f:
                 lines = f.readlines()
             # Remove lines that start with 'version:' (top-level only)
             cleaned = [l for l in lines if not re.match(r'^version\s*:', l)]
             if len(cleaned) < len(lines):
-                with open(compose_file, 'w') as f:
+                with open(compose_file, 'w', encoding="utf-8") as f:
                     f.writelines(cleaned)
         except Exception:
             pass
@@ -1148,7 +1329,7 @@ class CyphexEngine:
         """Find services that have valid Dockerfiles or use pre-built images."""
         import re
         try:
-            with open(compose_file) as f:
+            with open(compose_file, encoding="utf-8") as f:
                 content = f.read()
 
             buildable = []
@@ -1201,17 +1382,19 @@ class CyphexEngine:
         context = ScanContext(target_url=target_url)
 
         def agent_header(agent_id: str, name: str, objective: str):
+            if MASCOT:
+                mascot.searching(label=f"[{agent_id}] {name}", flourish=True)
             if SOC_UI:
                 ui.render_agent_header(agent_id, name, objective)
                 return
-            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
+            border = C.gradient("─" * 68, *C.RAMP_HI, *C.RAMP_LO)
             print(f"\n  {border}")
-            print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
+            print(f"  {C.PURPLE}▸{C.RST} {C.CYAN2}[{agent_id}]{C.RST} {C.BOLD}{C.CYAN}{name}{C.RST}")
             print(f"  {C.GHOST}{objective}{C.RST}")
             print(f"  {border}")
 
         def show_cmd(agent: str, cmd: str):
-            print(f"  {C.DIM}[{agent}]$ {cmd}{C.RST}")
+            self._vprint(f"  {C.DIM}[{agent}]$ {cmd}{C.RST}")
 
         asi = None
         if use_deepagents:
@@ -1226,20 +1409,27 @@ class CyphexEngine:
             orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
             oracle = AttackOracle(orchestrator=orchestrator)
 
-        def agent_header(agent_id: str, name: str, objective: str):
-            if SOC_UI:
-                ui.render_agent_header(agent_id, name, objective)
-                return
-            border = C.gradient("─" * 68, 0, 200, 200, 100, 50, 180)
-            print(f"\n  {border}")
-            print(f"  {C.CYAN}▸{C.RST} {C.BOLD}{C.CYAN}[{agent_id}]{C.RST} {C.PURP2}{name}{C.RST}")
-            print(f"  {C.GHOST}{objective}{C.RST}")
-            print(f"  {border}")
-
-        def show_cmd(agent: str, cmd: str):
-            print(f"  {C.DIM}[{agent}]$ {cmd}{C.RST}")
-
         async with httpx.AsyncClient(timeout=12, follow_redirects=True) as client:
+            # Agent 01 - Recon (runs first: fingerprint the live target)
+            agent_header("Agent 01", "Recon", "Fingerprint headers and tech hints")
+            context.technologies = []
+            try:
+                show_cmd("Recon", f'curl -sI "{target_url}"')
+                _recon_resp = await client.get(target_url)
+                context.headers.update(dict(_recon_resp.headers))
+                if asi:
+                    asi.ingest_response(target_url, "GET", "", _recon_resp.status_code, _recon_resp.text, dict(_recon_resp.headers))
+            except Exception as exc:
+                self._vprint(f"  {C.Y}[Recon]{C.RST} could not reach {target_url}: {str(exc)[:80]}")
+            server = context.headers.get("server") or context.headers.get("Server")
+            if server:
+                context.technologies.append(f"Server:{server}")
+                print(f"  [Recon] Server: {server}")
+            powered = context.headers.get("x-powered-by") or context.headers.get("X-Powered-By")
+            if powered:
+                context.technologies.append(f"X-Powered-By:{powered}")
+                print(f"  [Recon] X-Powered-By: {powered}")
+
             # Agent 02 - Crawler
             agent_header("Agent 02", "Crawler", "Discover pages, forms, parameters")
             pages = ["/"]
@@ -1264,7 +1454,7 @@ class CyphexEngine:
                 body = resp.text
                 context.all_endpoints.append(url)
                 context.headers.update(dict(resp.headers))
-                print(f"  {C.G}[Crawler]{C.RST} HTTP {resp.status_code} {url}")
+                self._vprint(f"  {C.G}[Crawler]{C.RST} HTTP {resp.status_code} {url}")
 
                 for link in re.findall(r'href=["\'](/[^"\']*)["\']', body, re.I):
                     clean = link.split("?")[0].split("#")[0]
@@ -1278,9 +1468,11 @@ class CyphexEngine:
                     inputs = re.findall(r'name=["\']([^"\']+)["\']', section, re.I)
                     full = f"{target_url}{action}" if action.startswith("/") else action
                     forms_found.append(FormData(action=full, method=method.upper(), inputs=inputs, page=path))
-                    print(f"  {C.Y}[Crawler][FORM]{C.RST} {method.upper()} {full} inputs={inputs}")
+                    self._vprint(f"  {C.Y}[Crawler][FORM]{C.RST} {method.upper()} {full} inputs={inputs}")
 
             context.all_forms = forms_found
+            self.trace.note("crawl surface", f"{len(context.all_endpoints)} pages · {len(forms_found)} forms", _T_OK,
+                            {"pages": len(context.all_endpoints), "forms": len(forms_found)})
             print(f"\n  {C.G}[Crawler][OK]{C.RST} pages={len(context.all_endpoints)} forms={len(forms_found)}")
 
             # ── API Endpoint Probe (for SPAs with no HTML forms) ──────────
@@ -1376,13 +1568,15 @@ class CyphexEngine:
                         api_endpoints_found.append((method, path, resp.status_code, resp.text[:500], body))
                         context.all_endpoints.append(full_url)
                         status_tag = C.G if resp.status_code < 400 else C.Y if resp.status_code < 500 else C.R
-                        print(f"  {status_tag}[API]{C.RST} {method} {path} => HTTP {resp.status_code} ({len(resp.text)} bytes)")
+                        self._vprint(f"  {status_tag}[API]{C.RST} {method} {path} => HTTP {resp.status_code} ({len(resp.text)} bytes)")
                         # Auto-create synthetic forms for login endpoints
                         if body and any(k in path.lower() for k in ("login", "auth")):
                             forms_found.append(FormData(action=full_url, method=method, inputs=list(body.keys()), page=path))
                     else:
-                        print(f"  {C.DIM}[API] {method} {path} => {resp.status_code}{C.RST}")
+                        self._vprint(f"  {C.DIM}[API] {method} {path} => {resp.status_code}{C.RST}")
                 context.all_forms = forms_found
+                self.trace.note("discover APIs", f"{len(api_endpoints_found)} live endpoints", _T_OK,
+                                {"live_apis": len(api_endpoints_found)})
                 print(f"\n  {C.G}[API Discovery][OK]{C.RST} live_apis={len(api_endpoints_found)} synthetic_forms={len(forms_found)}")
 
                 # ── Prune dead routes ──────────────────────────────────────
@@ -1449,9 +1643,49 @@ class CyphexEngine:
                         deduped_get.append(item)
                 _live_get_with_params = deduped_get
 
+            from backend.config.dast_constants import SQLI_PAYLOADS, SQL_ERROR_SIGS
+            # Agent 03 - SQLi
+            agent_header("Agent 03", "Injection (SQLi)", "Probe SQL injection indicators")
+            seen_sqli = set()
+            for form in forms_found:
+                if not form.inputs or form.action in seen_sqli:
+                    continue
+                for payload in SQLI_PAYLOADS:
+                    if form.method == "GET":
+                        q = "&".join([f"{inp}={payload}" for inp in form.inputs])
+                        show_cmd("SQLi", f'curl -s "{form.action}?{q}"')
+                        resp = await client.get(form.action, params={inp: payload for inp in form.inputs})
+                    else:
+                        show_cmd("SQLi", f'curl -s -X POST "{form.action}" -d "{form.inputs[0]}={payload}"')
+                        resp = await client.post(form.action, data={inp: payload for inp in form.inputs})
+
+                    lower = resp.text.lower()
+                    # A 401/403 means the request was blocked (WAF/RASP) before it could
+                    # reach app/DB logic \u2014 that's a defended endpoint, not exploitation
+                    # evidence, so don't run the error-signature check on blocked responses.
+                    blocked = resp.status_code in (401, 403)
+                    matched = [] if blocked else [e for e in SQL_ERROR_SIGS if re.search(e, lower, re.IGNORECASE)]
+                    indicator = bool(matched)
+                    self._vprint(f"  {C.Y}[Agent 03 \u25b6 Reasoning]{C.RST} Injecting SQL tautology into {form.inputs} at {form.action}")
+                    self._vprint(f"  {C.DIM}  Payload:  {payload}{C.RST}")
+                    self._vprint(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                    if indicator:
+                        self._vprint(f"  {C.R}  Decision: SQL error signature matched ({', '.join(matched[:3])}) \u2192 SQLi CONFIRMED \u2713{C.RST}")
+                        context.confirmed_vulns.append(Vuln(
+                            name="[DYNAMIC] SQL Injection",
+                            severity="Critical",
+                            endpoint=f"{form.action} ({form.inputs})",
+                            payload=payload,
+                            confirmed=True,
+                        ))
+                        seen_sqli.add(form.action)
+                        break
+                    elif blocked:
+                        self._vprint(f"  {C.G}  Decision: Request blocked (HTTP {resp.status_code}, WAF/RASP) \u2192 endpoint appears clean{C.RST}")
+                    else:
+                        self._vprint(f"  {C.G}  Decision: No SQL error indicators \u2192 endpoint appears clean{C.RST}")
 
             from backend.config.dast_constants import XSS_PAYLOADS
-
             # Agent 04 - XSS
             agent_header("Agent 04", "XSS", "Probe reflected XSS payload execution paths")
             seen_xss = set()
@@ -1469,11 +1703,11 @@ class CyphexEngine:
                         resp = await client.post(form.action, data={inp: payload for inp in form.inputs})
 
                     reflected = payload in resp.text
-                    print(f"  {C.Y}[Agent 04 \u25b6 Reasoning]{C.RST} Injecting XSS payload into form fields at {form.action}")
-                    print(f"  {C.DIM}  Payload:  {payload[:60]}{C.RST}")
-                    print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                    self._vprint(f"  {C.Y}[Agent 04 \u25b6 Reasoning]{C.RST} Injecting XSS payload into form fields at {form.action}")
+                    self._vprint(f"  {C.DIM}  Payload:  {payload[:60]}{C.RST}")
+                    self._vprint(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                     if reflected:
-                        print(f"  {C.R}  Decision: Payload reflected in response body \u2192 XSS CONFIRMED \u2713{C.RST}")
+                        self._vprint(f"  {C.R}  Decision: Payload reflected in response body \u2192 XSS CONFIRMED \u2713{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] Reflected XSS",
                             severity="High",
@@ -1484,43 +1718,7 @@ class CyphexEngine:
                         seen_xss.add(form_key)
                         break
                     else:
-                        print(f"  {C.G}  Decision: Payload not reflected \u2192 endpoint appears clean{C.RST}")
-
-            from backend.config.dast_constants import SQLI_PAYLOADS, SQL_ERRORS_BASIC
-            # Agent 03 - SQLi
-            agent_header("Agent 03", "Injection (SQLi)", "Probe SQL injection indicators")
-            seen_sqli = set()
-            for form in forms_found:
-                if not form.inputs or form.action in seen_sqli:
-                    continue
-                for payload in SQLI_PAYLOADS:
-                    if form.method == "GET":
-                        q = "&".join([f"{inp}={payload}" for inp in form.inputs])
-                        show_cmd("SQLi", f'curl -s "{form.action}?{q}"')
-                        resp = await client.get(form.action, params={inp: payload for inp in form.inputs})
-                    else:
-                        show_cmd("SQLi", f'curl -s -X POST "{form.action}" -d "{form.inputs[0]}={payload}"')
-                        resp = await client.post(form.action, data={inp: payload for inp in form.inputs})
-
-                    lower = resp.text.lower()
-                    indicator = any(e in lower for e in SQL_ERRORS_BASIC) or payload.lower() in lower
-                    print(f"  {C.Y}[Agent 03 \u25b6 Reasoning]{C.RST} Injecting SQL tautology into {form.inputs} at {form.action}")
-                    print(f"  {C.DIM}  Payload:  {payload}{C.RST}")
-                    print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
-                    if indicator:
-                        matched = [e for e in SQL_ERRORS_BASIC if e in lower]
-                        print(f"  {C.R}  Decision: SQL error keywords found ({', '.join(matched[:3])}) \u2192 SQLi CONFIRMED \u2713{C.RST}")
-                        context.confirmed_vulns.append(Vuln(
-                            name="[DYNAMIC] SQL Injection",
-                            severity="Critical",
-                            endpoint=f"{form.action} ({form.inputs})",
-                            payload=payload,
-                            confirmed=True,
-                        ))
-                        seen_sqli.add(form.action)
-                        break
-                    else:
-                        print(f"  {C.G}  Decision: No SQL error indicators \u2192 endpoint appears clean{C.RST}")
+                        self._vprint(f"  {C.G}  Decision: Payload not reflected \u2192 endpoint appears clean{C.RST}")
 
             from backend.config.dast_constants import DEFAULT_CREDS
             # Agent 05 - Auth
@@ -1534,11 +1732,11 @@ class CyphexEngine:
                     resp = await client.post(form.action, data={user_field: u, pass_field: p})
                     lower = resp.text.lower()
                     success = any(k in lower for k in ("token", "welcome", "dashboard", "success"))
-                    print(f"  {C.Y}[Agent 05 \u25b6 Reasoning]{C.RST} Trying default credentials {u}:{p} on {form.action}")
-                    print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                    self._vprint(f"  {C.Y}[Agent 05 \u25b6 Reasoning]{C.RST} Trying default credentials {u}:{p} on {form.action}")
+                    self._vprint(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                     if success:
                         matched = [k for k in ("token", "welcome", "dashboard", "success") if k in lower]
-                        print(f"  {C.R}  Decision: Auth success indicator found ('{matched[0]}') \u2192 DEFAULT CREDS CONFIRMED \u2713{C.RST}")
+                        self._vprint(f"  {C.R}  Decision: Auth success indicator found ('{matched[0]}') \u2192 DEFAULT CREDS CONFIRMED \u2713{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] Default Credentials",
                             severity="Critical",
@@ -1548,39 +1746,7 @@ class CyphexEngine:
                         ))
                         break
                     else:
-                        print(f"  {C.G}  Decision: No success indicator \u2192 credentials rejected{C.RST}")
-
-            from backend.config.dast_constants import LFI_TARGETS, LFI_PAYLOADS, FILE_PARAM_KEYWORDS
-            # Agent 07 - LFI
-            agent_header("Agent 07", "LFI", "Try file traversal payloads")
-            lfi_targets = LFI_TARGETS.copy()
-            # Inject source-discovered routes with file/path params
-            for r in _live_file_routes:
-                for p in r.get("params", []):
-                    if p.lower() in FILE_PARAM_KEYWORDS:
-                        for pl in LFI_PAYLOADS:
-                            lfi_targets.append(f"{r['path']}?{p}={pl}")
-            for suffix in lfi_targets:
-                full = f"{target_url}{suffix}"
-                show_cmd("LFI", f'curl -s "{full}"')
-                try:
-                    resp = await client.get(full)
-                except Exception:
-                    continue
-                hit = "root:x:0:0" in resp.text
-                print(f"  {C.Y}[Agent 07 \u25b6 Reasoning]{C.RST} Testing path traversal: {suffix}")
-                print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
-                if hit:
-                    print(f"  {C.R}  Decision: /etc/passwd content found \u2192 LFI CONFIRMED \u2713{C.RST}")
-                    context.confirmed_vulns.append(Vuln(
-                        name="[DYNAMIC] Local File Inclusion",
-                        severity="Critical",
-                        endpoint=full,
-                        payload="../../../etc/passwd",
-                        confirmed=True,
-                    ))
-                else:
-                    print(f"  {C.G}  Decision: No file content leaked \u2192 endpoint clean{C.RST}")
+                        self._vprint(f"  {C.G}  Decision: No success indicator \u2192 credentials rejected{C.RST}")
 
             from backend.config.dast_constants import CMDI_TARGETS, CMDI_INJECT_PAYLOADS
             # Agent 06 - CMDi
@@ -1603,10 +1769,10 @@ class CyphexEngine:
                 except Exception:
                     continue
                 hit = any(k in resp.text.lower() for k in ("uid=", "gid=", "root", "www-data", "nt authority"))
-                print(f"  {C.Y}[Agent 06 \u25b6 Reasoning]{C.RST} Testing command injection via GET: {suffix}")
-                print(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                self._vprint(f"  {C.Y}[Agent 06 \u25b6 Reasoning]{C.RST} Testing command injection via GET: {suffix}")
+                self._vprint(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                 if hit:
-                    print(f"  {C.R}  Decision: OS command output detected \u2192 CMDi CONFIRMED \u2713{C.RST}")
+                    self._vprint(f"  {C.R}  Decision: OS command output detected \u2192 CMDi CONFIRMED \u2713{C.RST}")
                     context.confirmed_vulns.append(Vuln(
                         name="[DYNAMIC] Command Injection",
                         severity="Critical",
@@ -1615,7 +1781,39 @@ class CyphexEngine:
                         confirmed=True,
                     ))
                 else:
-                    print(f"  {C.G}  Decision: No OS output \u2192 endpoint clean{C.RST}")
+                    self._vprint(f"  {C.G}  Decision: No OS output \u2192 endpoint clean{C.RST}")
+
+            from backend.config.dast_constants import LFI_TARGETS, LFI_PAYLOADS, FILE_PARAM_KEYWORDS
+            # Agent 07 - LFI
+            agent_header("Agent 07", "LFI", "Try file traversal payloads")
+            lfi_targets = LFI_TARGETS.copy()
+            # Inject source-discovered routes with file/path params
+            for r in _live_file_routes:
+                for p in r.get("params", []):
+                    if p.lower() in FILE_PARAM_KEYWORDS:
+                        for pl in LFI_PAYLOADS:
+                            lfi_targets.append(f"{r['path']}?{p}={pl}")
+            for suffix in lfi_targets:
+                full = f"{target_url}{suffix}"
+                show_cmd("LFI", f'curl -s "{full}"')
+                try:
+                    resp = await client.get(full)
+                except Exception:
+                    continue
+                hit = "root:x:0:0" in resp.text
+                self._vprint(f"  {C.Y}[Agent 07 \u25b6 Reasoning]{C.RST} Testing path traversal: {suffix}")
+                self._vprint(f"  {C.DIM}  Response: HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                if hit:
+                    self._vprint(f"  {C.R}  Decision: /etc/passwd content found \u2192 LFI CONFIRMED \u2713{C.RST}")
+                    context.confirmed_vulns.append(Vuln(
+                        name="[DYNAMIC] Local File Inclusion",
+                        severity="Critical",
+                        endpoint=full,
+                        payload="../../../etc/passwd",
+                        confirmed=True,
+                    ))
+                else:
+                    self._vprint(f"  {C.G}  Decision: No file content leaked \u2192 endpoint clean{C.RST}")
 
             # Agent 08 - Logic/CORS
             agent_header("Agent 08", "Logic", "Check insecure CORS and basic authz gaps")
@@ -1623,10 +1821,10 @@ class CyphexEngine:
             try:
                 head = await client.get(target_url, headers={"Origin": "https://evil.example"})
                 acao = head.headers.get("Access-Control-Allow-Origin", "")
-                print(f"  {C.Y}[Agent 08 \u25b6 Reasoning]{C.RST} Sending spoofed Origin header to test CORS policy")
-                print(f"  {C.DIM}  Access-Control-Allow-Origin: {acao or 'not-set'}{C.RST}")
+                self._vprint(f"  {C.Y}[Agent 08 \u25b6 Reasoning]{C.RST} Sending spoofed Origin header to test CORS policy")
+                self._vprint(f"  {C.DIM}  Access-Control-Allow-Origin: {acao or 'not-set'}{C.RST}")
                 if acao in ("*", "https://evil.example"):
-                    print(f"  {C.R}  Decision: Server reflects/wildcards origin \u2192 CORS MISCONFIGURATION CONFIRMED \u2713{C.RST}")
+                    self._vprint(f"  {C.R}  Decision: Server reflects/wildcards origin \u2192 CORS MISCONFIGURATION CONFIRMED \u2713{C.RST}")
                     context.confirmed_vulns.append(Vuln(
                         name="[DYNAMIC] CORS Misconfiguration",
                         severity="High",
@@ -1635,29 +1833,9 @@ class CyphexEngine:
                         confirmed=True,
                     ))
                 else:
-                    print(f"  {C.G}  Decision: CORS policy properly restrictive{C.RST}")
+                    self._vprint(f"  {C.G}  Decision: CORS policy properly restrictive{C.RST}")
             except Exception:
                 pass
-
-            # Agent 11 - Supply chain quick check
-            agent_header("Agent 11", "Supply Chain", "Check exposed dependency manifests")
-            for manifest in ("/package.json", "/requirements.txt"):
-                full = f"{target_url}{manifest}"
-                show_cmd("SupplyChain", f'curl -s -o /dev/null -w "%{{http_code}}" "{full}"')
-                try:
-                    resp = await client.get(full)
-                except Exception:
-                    continue
-                if resp.status_code == 200 and len(resp.text) > 20:
-                    context.confirmed_vulns.append(Vuln(
-                        name=f"[DYNAMIC] Exposed Manifest {manifest}",
-                        severity="High",
-                        endpoint=full,
-                        confirmed=True,
-                    ))
-                    print(f"  {C.R}[SupplyChain][CONFIRMED]{C.RST} exposed {manifest}")
-                else:
-                    print(f"  [SupplyChain] {manifest} status={resp.status_code}")
 
             from backend.config.dast_constants import IDOR_PATHS
             # ── Agent 09 — IDOR Prober ─────────────────────────────────
@@ -1679,13 +1857,13 @@ class CyphexEngine:
                     try:
                         resp = await client.get(full)
                         responses.append((test_id, resp.status_code, len(resp.text)))
-                        print(f"  {C.DIM}[IDOR] GET {base_path}{test_id} => HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
+                        self._vprint(f"  {C.DIM}[IDOR] GET {base_path}{test_id} => HTTP {resp.status_code} ({len(resp.text)} bytes){C.RST}")
                     except Exception:
                         continue
                 ok_responses = [r for r in responses if r[1] == 200 and r[2] > 20]
                 if len(ok_responses) >= 2:
-                    print(f"  {C.Y}[Agent 09 > Reasoning]{C.RST} Multiple sequential IDs return data without authentication.")
-                    print(f"  {C.Y}  Decision:{C.RST} {len(ok_responses)} IDs accessible => {C.R}IDOR CONFIRMED{C.RST}")
+                    self._vprint(f"  {C.Y}[Agent 09 > Reasoning]{C.RST} Multiple sequential IDs return data without authentication.")
+                    self._vprint(f"  {C.Y}  Decision:{C.RST} {len(ok_responses)} IDs accessible => {C.R}IDOR CONFIRMED{C.RST}")
                     context.confirmed_vulns.append(Vuln(
                         name="[DYNAMIC] IDOR — Sequential ID Enumeration",
                         severity="High",
@@ -1694,7 +1872,7 @@ class CyphexEngine:
                         confirmed=True,
                     ))
                 elif ok_responses:
-                    print(f"  {C.DIM}[IDOR] Only 1 ID responded — not enough for confirmed IDOR{C.RST}")
+                    self._vprint(f"  {C.DIM}[IDOR] Only 1 ID responded — not enough for confirmed IDOR{C.RST}")
 
             from backend.config.dast_constants import SSRF_ENDPOINTS, SSRF_GET_ENDPOINTS, URL_PARAM_KEYWORDS, SSRF_INTERNAL_PAYLOADS
             # ── Agent 10 — SSRF Prober ─────────────────────────────────
@@ -1717,10 +1895,10 @@ class CyphexEngine:
                 try:
                     resp = await client.post(full, json=body)
                     has_internal = any(k in resp.text.lower() for k in ("127.0.0.1", "localhost", "ami-id", "instance-id", "<html", "<!doctype"))
-                    print(f"  {C.DIM}[SSRF] POST {path} => HTTP {resp.status_code} internal_data={'yes' if has_internal else 'no'}{C.RST}")
+                    self._vprint(f"  {C.DIM}[SSRF] POST {path} => HTTP {resp.status_code} internal_data={'yes' if has_internal else 'no'}{C.RST}")
                     if resp.status_code == 200 and has_internal:
-                        print(f"  {C.Y}[Agent 10 > Reasoning]{C.RST} Server fetched internal URL and returned content.")
-                        print(f"  {C.R}  Decision: SSRF CONFIRMED — server made request to {body['url']}{C.RST}")
+                        self._vprint(f"  {C.Y}[Agent 10 > Reasoning]{C.RST} Server fetched internal URL and returned content.")
+                        self._vprint(f"  {C.R}  Decision: SSRF CONFIRMED — server made request to {body['url']}{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] SSRF — Server-Side Request Forgery",
                             severity="Critical",
@@ -1744,11 +1922,31 @@ class CyphexEngine:
                             payload=suffix.split("url=")[-1],
                             confirmed=True,
                         ))
-                        print(f"  {C.R}[SSRF][CONFIRMED]{C.RST} internal content returned")
+                        self._vprint(f"  {C.R}[SSRF][CONFIRMED]{C.RST} internal content returned")
                     else:
-                        print(f"  {C.DIM}[SSRF] GET {suffix} => {resp.status_code}{C.RST}")
+                        self._vprint(f"  {C.DIM}[SSRF] GET {suffix} => {resp.status_code}{C.RST}")
                 except Exception:
                     continue
+
+            # Agent 11 - Supply chain quick check
+            agent_header("Agent 11", "Supply Chain", "Check exposed dependency manifests")
+            for manifest in ("/package.json", "/requirements.txt"):
+                full = f"{target_url}{manifest}"
+                show_cmd("SupplyChain", f'curl -s -o /dev/null -w "%{{http_code}}" "{full}"')
+                try:
+                    resp = await client.get(full)
+                except Exception:
+                    continue
+                if resp.status_code == 200 and len(resp.text) > 20:
+                    context.confirmed_vulns.append(Vuln(
+                        name=f"[DYNAMIC] Exposed Manifest {manifest}",
+                        severity="High",
+                        endpoint=full,
+                        confirmed=True,
+                    ))
+                    self._vprint(f"  {C.R}[SupplyChain][CONFIRMED]{C.RST} exposed {manifest}")
+                else:
+                    self._vprint(f"  [SupplyChain] {manifest} status={resp.status_code}")
 
             from backend.config.dast_constants import SDE_PATHS, SDE_INDICATORS
             # ── Agent 12 — Sensitive Data Exposure ─────────────────────
@@ -1769,9 +1967,9 @@ class CyphexEngine:
                     if resp.status_code == 200 and len(resp.text) > 20:
                         hits = [ind for ind in sde_indicators if ind.lower() in resp.text.lower()]
                         if hits:
-                            print(f"  {C.Y}[Agent 12 > Reasoning]{C.RST} Endpoint {path} returns sensitive configuration data.")
-                            print(f"  {C.Y}  Detected keys:{C.RST} {', '.join(hits[:5])}")
-                            print(f"  {C.R}  Decision: DATA EXPOSURE CONFIRMED{C.RST}")
+                            self._vprint(f"  {C.Y}[Agent 12 > Reasoning]{C.RST} Endpoint {path} returns sensitive configuration data.")
+                            self._vprint(f"  {C.Y}  Detected keys:{C.RST} {', '.join(hits[:5])}")
+                            self._vprint(f"  {C.R}  Decision: DATA EXPOSURE CONFIRMED{C.RST}")
                             context.confirmed_vulns.append(Vuln(
                                 name="[DYNAMIC] Sensitive Data Exposure",
                                 severity="Critical",
@@ -1780,9 +1978,9 @@ class CyphexEngine:
                                 confirmed=True,
                             ))
                         else:
-                            print(f"  {C.DIM}[SDE] {path} => HTTP 200 but no sensitive keys found{C.RST}")
+                            self._vprint(f"  {C.DIM}[SDE] {path} => HTTP 200 but no sensitive keys found{C.RST}")
                     else:
-                        print(f"  {C.DIM}[SDE] {path} => HTTP {resp.status_code}{C.RST}")
+                        self._vprint(f"  {C.DIM}[SDE] {path} => HTTP {resp.status_code}{C.RST}")
                 except Exception:
                     continue
 
@@ -1804,8 +2002,8 @@ class CyphexEngine:
                     resp = await client.post(full, json=body)
                     hit = any(ind in resp.text.lower() for ind in cmdi_indicators)
                     if hit:
-                        print(f"  {C.Y}[Agent 13 > Reasoning]{C.RST} OS command output detected in response.")
-                        print(f"  {C.R}  Decision: COMMAND INJECTION CONFIRMED{C.RST}")
+                        self._vprint(f"  {C.Y}[Agent 13 > Reasoning]{C.RST} OS command output detected in response.")
+                        self._vprint(f"  {C.R}  Decision: COMMAND INJECTION CONFIRMED{C.RST}")
                         context.confirmed_vulns.append(Vuln(
                             name="[DYNAMIC] Command Injection (API)",
                             severity="Critical",
@@ -1815,7 +2013,7 @@ class CyphexEngine:
                         ))
                         break
                     else:
-                        print(f"  {C.DIM}[CMDi] POST {path} => {resp.status_code} (no OS output){C.RST}")
+                        self._vprint(f"  {C.DIM}[CMDi] POST {path} => {resp.status_code} (no OS output){C.RST}")
                 except Exception:
                     continue
 
@@ -1837,7 +2035,7 @@ class CyphexEngine:
                         jwt_pattern = re.findall(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', body_text)
                         if jwt_pattern:
                             jwt_tokens_found.extend(jwt_pattern[:2])
-                            print(f"  {C.G}[JWT]{C.RST} Token found in response from {form.action} (creds: {u}:{p})")
+                            self._vprint(f"  {C.G}[JWT]{C.RST} Token found in response from {form.action} (creds: {u}:{p})")
                             break
                     except Exception:
                         continue
@@ -1855,14 +2053,14 @@ class CyphexEngine:
                         try:
                             header = json.loads(base64.urlsafe_b64decode(header_b64))
                             payload_data = json.loads(base64.urlsafe_b64decode(payload_b64))
-                            print(f"  {C.Y}[Agent 14 \u25b6 Reasoning]{C.RST} Decoded JWT token without verification")
-                            print(f"  {C.DIM}  Header:  {json.dumps(header)}{C.RST}")
-                            print(f"  {C.DIM}  Payload: {json.dumps(payload_data)[:120]}{C.RST}")
+                            self._vprint(f"  {C.Y}[Agent 14 \u25b6 Reasoning]{C.RST} Decoded JWT token without verification")
+                            self._vprint(f"  {C.DIM}  Header:  {json.dumps(header)}{C.RST}")
+                            self._vprint(f"  {C.DIM}  Payload: {json.dumps(payload_data)[:120]}{C.RST}")
 
                             # Check for dangerous algorithm
                             alg = header.get("alg", "")
                             if alg.lower() == "none":
-                                print(f"  {C.R}  Decision: Algorithm 'none' \u2192 JWT BYPASS CONFIRMED \u2713{C.RST}")
+                                self._vprint(f"  {C.R}  Decision: Algorithm 'none' \u2192 JWT BYPASS CONFIRMED \u2713{C.RST}")
                                 context.confirmed_vulns.append(Vuln(
                                     name="[DYNAMIC] JWT Algorithm None Bypass",
                                     severity="Critical",
@@ -1871,7 +2069,7 @@ class CyphexEngine:
                                     confirmed=True,
                                 ))
                             elif "role" in payload_data or "admin" in str(payload_data).lower():
-                                print(f"  {C.Y}  Decision: Role/admin claim in JWT payload \u2192 potential privilege escalation{C.RST}")
+                                self._vprint(f"  {C.Y}  Decision: Role/admin claim in JWT payload \u2192 potential privilege escalation{C.RST}")
                                 context.confirmed_vulns.append(Vuln(
                                     name="[DYNAMIC] JWT Role Escalation Risk",
                                     severity="High",
@@ -1880,35 +2078,168 @@ class CyphexEngine:
                                     confirmed=True,
                                 ))
                             else:
-                                print(f"  {C.G}  Decision: JWT structure appears standard ({alg}){C.RST}")
+                                self._vprint(f"  {C.G}  Decision: JWT structure appears standard ({alg}){C.RST}")
                         except Exception:
-                            print(f"  {C.DIM}[JWT] Could not decode token{C.RST}")
+                            self._vprint(f"  {C.DIM}[JWT] Could not decode token{C.RST}")
             else:
-                print(f"  {C.DIM}[JWT] No JWT tokens found in any endpoint responses{C.RST}")
+                self._vprint(f"  {C.DIM}[JWT] No JWT tokens found in any endpoint responses{C.RST}")
 
-            # Agent 01 - Recon summary
-            agent_header("Agent 01", "Recon", "Fingerprint headers and tech hints")
-            context.technologies = []
-            server = context.headers.get("server") or context.headers.get("Server")
-            if server:
-                context.technologies.append(f"Server:{server}")
-                print(f"  [Recon] Server: {server}")
-            powered = context.headers.get("x-powered-by") or context.headers.get("X-Powered-By")
-            if powered:
-                context.technologies.append(f"X-Powered-By:{powered}")
-                print(f"  [Recon] X-Powered-By: {powered}")
+            # ── DeepAgents attack swarm (phase 15) ─────────────────────
+            # Runs AFTER the fast probes 01–14 and BEFORE Council so the
+            # council validates static + fast-DAST + deep findings together.
+            # Gated on --deepagents / `/deep`; plain `/scan` skips it.
+            if not use_deepagents:
+                print(
+                    f"\n  {C.DIM}[DeepAgents] swarm skipped — run with "
+                    f"{C.RST}{C.NEON}--deepagents{C.RST}{C.DIM} (or {C.RST}{C.NEON}/deep{C.RST}{C.DIM}) "
+                    f"to add the 13-agent oracle-guided phase.{C.RST}"
+                )
+            if use_deepagents:
+                from backend.deepagents import (
+                    DeepSQLiAgent, DeepXSSAgent, DeepCMDiAgent, DeepAuthAgent,
+                    DeepIDORAgent, DeepSSRFAgent, DeepSSTIAgent,
+                    DeepPathTraversalAgent, DeepXXEAgent, DeepBusinessLogicAgent,
+                    DeepPromptInjectionAgent, DeepRaceConditionAgent,
+                    DeepMassAssignmentAgent,
+                )
+                agents_to_run = [
+                    DeepSQLiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepXSSAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepCMDiAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepAuthAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepIDORAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepSSRFAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepSSTIAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepPathTraversalAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepXXEAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepBusinessLogicAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    # ── Merged from update_y1: LLM prompt injection (OWASP LLM01),
+                    #    TOCTOU race conditions, and mass assignment (CWE-915) ──
+                    DeepPromptInjectionAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepRaceConditionAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                    DeepMassAssignmentAgent(self.scan_id, target_url, attack_graph, asi, oracle),
+                ]
 
-            if COUNCIL_AVAILABLE and context.confirmed_vulns:
+                total = len(agents_to_run)
+                # No wall-clock cap on the swarm: every agent runs its full
+                # oracle-guided loop to completion, so all `total` agents get a
+                # turn no matter how slow the local models are on this hardware.
+                # A previous phase/per-agent budget capped the total time, but a
+                # single cumulative wall let the first ~4 agents consume it and
+                # deterministically starved the last 9 to zero — the opposite of
+                # what a full swarm should do. Termination is still guaranteed
+                # without a timer: each agent is internally bounded
+                # (MAX_HYPOTHESES × MAX_ATTEMPTS_PER_HYPOTHESIS), and every HTTP
+                # probe and Ollama call keeps its own per-request timeout, which
+                # is an inter-chunk stall budget catching a genuinely wedged
+                # socket or hung model — not a cap on how long real work may take.
+                # The swarm runs in parallel groups (like a real red team fans
+                # out): agents in a group run concurrently, groups run in order.
+                # Within a group their fast HTTP probes overlap while the shared
+                # per-model oracle lock serialises same-model LLM inference, so
+                # they never thrash local VRAM. Grouping is by class name so the
+                # split is stable; any agent not named here runs solo at the end
+                # rather than being dropped.
+                GROUP_PLAN = [
+                    ("DeepSQLiAgent", "DeepXSSAgent", "DeepAuthAgent"),
+                    ("DeepPathTraversalAgent", "DeepCMDiAgent", "DeepSSRFAgent",
+                     "DeepIDORAgent", "DeepSSTIAgent", "DeepXXEAgent"),
+                    ("DeepBusinessLogicAgent",),
+                    ("DeepPromptInjectionAgent", "DeepRaceConditionAgent",
+                     "DeepMassAssignmentAgent"),
+                ]
+                by_name = {a.__class__.__name__: a for a in agents_to_run}
+                groups = [[by_name[n] for n in names if n in by_name]
+                          for names in GROUP_PLAN]
+                placed = {n for names in GROUP_PLAN for n in names}
+                extra = [a for a in agents_to_run if a.__class__.__name__ not in placed]
+                if extra:
+                    groups.append(extra)
+                groups = [g for g in groups if g]
+                idx_of = {id(a): i for i, a in enumerate(agents_to_run, 1)}
+
+                if SOC_UI:
+                    ui.render_deepagents_plan(groups, total)
+
+                async def _run_agent(agent):
+                    agent_header(
+                        f"DeepAgent {idx_of[id(agent)]}/{total}",
+                        f"{agent.__class__.__name__} — {agent.PRIMARY_VULN_CLASS}",
+                        "Oracle-Guided Hypothesis Testing",
+                    )
+                    short = agent.__class__.__name__.replace("Deep", "").replace("Agent", "")
+                    try:
+                        res = await agent.run(context)
+                        self._emit("deepagent_result", agent=agent.__class__.__name__,
+                                   vulns_found=len(res.vulns))
+                        self.trace.note(short, f"{len(res.vulns)} confirmed" if res.vulns else "clean",
+                                        _T_OK, {"vulns": len(res.vulns)})
+                        context.confirmed_vulns.extend(res.vulns)
+                        if res.vulns:
+                            print(f"  {C.NEON}✓{C.RST} {C.BOLD}{agent.__class__.__name__}{C.RST} "
+                                  f"confirmed {C.R}{len(res.vulns)} vuln(s){C.RST}")
+                        return len(res.vulns)
+                    except Exception as e:
+                        # Confirmed findings accumulate live on agent.vulns, so a
+                        # crash mid-run keeps whatever it already nailed down.
+                        # (CancelledError is BaseException, not Exception, so a
+                        # real Ctrl+C still propagates and aborts the scan.)
+                        salvaged = list(getattr(agent, "vulns", []) or [])
+                        if salvaged:
+                            context.confirmed_vulns.extend(salvaged)
+                        self._emit("deepagent_error", agent=agent.__class__.__name__,
+                                   error=str(e)[:200], salvaged=len(salvaged))
+                        self.trace.note(short, f"error: {str(e)[:40]}", _T_FAIL,
+                                        {"salvaged": len(salvaged)})
+                        note = (f" (kept {len(salvaged)} confirmed vuln(s) found first)"
+                                if salvaged else "")
+                        print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: "
+                              f"{str(e)[:100]}{note}")
+                        return len(salvaged)
+
+                for gi, group in enumerate(groups, 1):
+                    if SOC_UI:
+                        ui.render_deepagents_group(gi, len(groups), group)
+                    counts = await asyncio.gather(*[_run_agent(a) for a in group],
+                                                  return_exceptions=True)
+                    found = sum(c for c in counts if isinstance(c, int))
+                    if SOC_UI:
+                        ui.render_deepagents_group_result(gi, found)
+                    else:
+                        print(f"    [OK] Group {gi}: {found or 'No'} vuln(s) found")
+                    if attack_graph.edges:
+                        print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
+
+                # Keep the graph on the context so later steps (Security
+                # Report) can reference it without threading a new param
+                # through the whole scan() call chain.
+                context.attack_graph = attack_graph
+                if SOC_UI:
+                    ui.render_attack_graph(attack_graph)
+                elif attack_graph.edges:
+                    print(f"\n  {C.BOLD}{C.CYAN}◈ ATTACK GRAPH{C.RST} — {len(attack_graph.edges)} chain(s) across {len(attack_graph.nodes)} node(s)")
+                    for i, e in enumerate(attack_graph.edges, 1):
+                        print(f"  {i:>2}. [{e.priority}] {e.source}  ──{e.action}──▶  {e.target}")
+
+            # The council debates only DYNAMIC findings (probe/LLM-inferred, so
+            # false-positive-prone). STATIC findings are deterministic source-
+            # pattern matches from Semgrep + the built-in scanner — the exact
+            # findings the patch phase repairs — so they are NEVER put to a
+            # local-model vote: a wrong "false positive" verdict there would
+            # delete a real, patchable vuln and silently zero out the after-patch
+            # score. (This is what the header always said — "validating dynamic
+            # findings" — the code just used to debate the static ones too.)
+            static_keep, to_validate = _partition_for_council(context.confirmed_vulns)
+            if COUNCIL_AVAILABLE and to_validate:
                 try:
                     agent_header("Council", "Multi-Model Debate", "Validating dynamic findings against false positives")
                     debater = DebateProtocol()
-                    original_count = len(context.confirmed_vulns)
-                    validated_vulns = await debater.debate_batch(context.confirmed_vulns)
-
-                    discarded = original_count - len(validated_vulns)
-                    context.confirmed_vulns = validated_vulns
-                    print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} findings. {C.Y}Discarded {discarded} false positives.{C.RST}")
-                except Exception as e:
+                    validated_vulns = await debater.debate_batch(to_validate)
+                    discarded = len(to_validate) - len(validated_vulns)
+                    context.confirmed_vulns = static_keep + validated_vulns
+                    print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} dynamic finding(s), "
+                          f"kept {len(static_keep)} static. {C.Y}Discarded {discarded} false positive(s).{C.RST}")
+                except Exception:
                     print(f"\n  {C.Y}[COUNCIL][SKIP]{C.RST} Ollama not available — keeping all {len(context.confirmed_vulns)} findings unvalidated")
                     print(f"  {C.DIM}Start Ollama for AI false-positive filtering: ollama serve{C.RST}")
 
@@ -1942,57 +2273,8 @@ class CyphexEngine:
             except ImportError:
                 pass  # cyphex package not installed — skip DAST tools
 
-            # ── 13 DeepAgents — Adaptive Oracle-Guided DAST ──────────────────
-            if use_deepagents:
-                print()
-                print(f"  {C.CYAN}{'─'*70}{C.RST}")
-                print(f"  {C.BOLD}{C.CYAN}⬡ DEEPAGENTS  — 13-Agent Autonomous Swarm{C.RST}")
-                print(f"  {C.GHOST}SQLi · XSS · CMDi · Auth · IDOR · SSRF · SSTI · XXE")
-                print(f"  PathTraversal · BusinessLogic · PromptInjection · Race · MassAssign{C.RST}")
-                print(f"  {C.CYAN}{'─'*70}{C.RST}\n")
-                try:
-                    import sys as _sys
-                    _project_root = os.path.dirname(os.path.abspath(__file__))
-                    _backend_root = os.path.join(_project_root, "backend")
-                    # Ensure all 3 path roots are available:
-                    #   project_root/          → backend.reasoning.*, backend.deepagents.*
-                    #   project_root/backend/  → reasoning.*, deepagents.*, config.*
-                    #   project_root/backend/backend/ → orchestrator, models, agents, immune
-                    for _p in [_project_root, _backend_root, os.path.join(_backend_root, "backend")]:
-                        if _p not in _sys.path:
-                            _sys.path.insert(0, _p)
-
-
-                    from orchestrator import AgentOrchestrator as _DeepOrchestrator
-
-                    # Cognee memory is optional — DeepAgents run fine without it
-                    _memory = None
-                    try:
-                        from reasoning.cognee_memory import get_memory as _get_memory
-                        _memory = _get_memory(self.scan_id, target_url)
-                        await _memory.initialize()
-                    except Exception as _mem_err:
-                        print(f"  {C.DIM}[DeepAgents] Memory unavailable ({str(_mem_err)[:60]}) — running without Cognee{C.RST}")
-
-                    _deep_orch = _DeepOrchestrator(
-                        scan_id=self.scan_id,
-                        target_url=target_url,
-                        source_dir=getattr(self, "source_dir", "") or "",
-                        cognee_memory=_memory,
-                        event_callback=None,
-                    )
-                    context = await _deep_orch.execute_agents(context)
-                    deep_count = len(context.confirmed_vulns)
-                    print(f"\n  {C.G}[DEEPAGENTS][OK]{C.RST} Swarm complete — {deep_count} total confirmed vulns\n")
-                except Exception as _de:
-                    import traceback as _tb
-                    print(f"  {C.Y}[DEEPAGENTS][SKIP]{C.RST} Orchestrator error: {str(_de)[:120]}")
-                    print(f"  {C.DIM}{_tb.format_exc()[-400:]}{C.RST}")
-                    print(f"  {C.DIM}Ensure Ollama is running: ollama serve{C.RST}\n")
-
-
-
-
+            self.trace.note("confirm exploitable", f"{len(context.confirmed_vulns)} confirmed", _T_OK,
+                            {"endpoints": len(context.all_endpoints), "confirmed": len(context.confirmed_vulns)})
             print(f"\n  {C.G}[SCAN][OK]{C.RST} endpoints={len(context.all_endpoints)} forms={len(forms_found)} vulns={len(context.confirmed_vulns)}")
 
         return context
@@ -2041,7 +2323,7 @@ class CyphexEngine:
 
             # ── Print summary table ─────────────────────────────────────────────
             _SEV_COL = {
-                "Critical": C.R, "High": "\033[91m", "Medium": C.Y,
+                "Critical": C.FLAME, "High": C.R, "Medium": C.Y,
                 "Low": C.B, "Info": C.DIM,
             }
             print(f"\n  {'HOST':<18} {'HOSTNAME':<20} {'RISK':<8} PORTS")
@@ -2108,12 +2390,20 @@ class CyphexEngine:
         # ── Try loading existing genome for this target ──
         target_hash = hashlib.md5(context.target_url.encode()).hexdigest()[:12]
         genome_path = os.path.join(cyphex_config.GENOME_STORAGE_DIR, f"genome_{target_hash}")
+        _loaded_prior = False
         if os.path.exists(genome_path + ".pkl"):
             try:
                 genome = BehavioralGenome.load(genome_path)
+                _loaded_prior = True
                 print(f"  {C.G}[OK]{C.RST} Loaded existing genome for this target (continuing evolution)")
             except Exception:
                 genome = BehavioralGenome()
+        self.trace.note(
+            "genome source",
+            "resumed from prior scan" if _loaded_prior else "fresh genome",
+            _T_OK,
+            {"resumed": _loaded_prior},
+        )
 
         # Only build when the genome has no profiles yet. A freshly loaded genome
         # already carries its profiles/models/attack-history, so re-building here
@@ -2122,10 +2412,74 @@ class CyphexEngine:
         if not genome.endpoint_profiles:
             genome.build_from_scan(context)
         print(f"  {C.G}[OK]{C.RST} Genome built: {len(genome.endpoint_profiles)} endpoints")
+        self.trace.note("profile endpoints", f"{len(genome.endpoint_profiles)} endpoints",
+                        _T_OK, {"endpoints": len(genome.endpoint_profiles)})
 
         controller = EvolutionController()
         controller.genome = genome  # Use loaded/built genome
-        results = await controller.run_evolution(context, generations=generations, payloads_per_gen=30)
+
+        # Per-generation trace. run_evolution() has always accepted this
+        # callback; nothing passed one, so the adversarial loop — the single
+        # most interesting thing CYPHEX does — ran as an opaque wait with a
+        # few emoji prints. Each generation now becomes a traced step
+        # carrying the real measured numbers, so the climb from a leaky
+        # first generation to a converged one is visible live AND survives
+        # into the durable event log for /status.
+        async def _on_generation(result):
+            try:
+                gen = getattr(result, "generation", 0)
+                blocked = getattr(result, "payloads_blocked", 0)
+                total = getattr(result, "payloads_generated", 0)
+                rate = getattr(result, "block_rate", 0.0) or 0.0
+                bypassed = getattr(result, "payloads_bypassed", 0)
+                tactics = list(getattr(result, "red_mutations_applied", []) or [])[:3]
+                learned = list(getattr(result, "new_features_learned", []) or [])
+                # A generation that blocks everything is converged; one that
+                # leaks is the interesting case a maintainer wants flagged.
+                status = _T_OK if rate >= 0.99 else (_T_WARN if rate < 0.75 else _T_OK)
+                detail = f"blocked {blocked}/{total} · {rate * 100:.1f}%"
+                if tactics:
+                    detail += f" · red: {', '.join(tactics)}"
+                self.trace.note(
+                    f"generation {gen}", detail, status,
+                    {
+                        "generation": gen,
+                        "block_rate": round(float(rate), 4),
+                        "blocked": blocked,
+                        "bypassed": bypassed,
+                        "payloads": total,
+                        "red_tactics": tactics,
+                        "blue_retrained": len(learned),
+                        "duration_s": round(float(getattr(result, "duration_seconds", 0.0) or 0.0), 2),
+                    },
+                )
+            except Exception:
+                pass
+
+        results = await controller.run_evolution(
+            context, generations=generations, payloads_per_gen=30,
+            on_generation_complete=_on_generation,
+            # The controller's own per-generation narration duplicates the
+            # traced steps the callback above already produces, so quiet it
+            # unless --verbose. Default stays True for other callers
+            # (demo_immune_system.py exists to show exactly that output).
+            verbose=self.verbose,
+        )
+
+        try:
+            rates = [getattr(r, "block_rate", 0.0) or 0.0 for r in (results or [])]
+            if rates:
+                converged = next((i for i, r in enumerate(rates) if r >= 0.99), None)
+                self.trace.note(
+                    "co-evolution",
+                    (f"converged at generation {converged}" if converged is not None
+                     else f"final block rate {rates[-1] * 100:.1f}%"),
+                    _T_OK if rates[-1] >= 0.9 else _T_WARN,
+                    {"block_rates": [round(float(r), 4) for r in rates],
+                     "converged_at": converged, "generations": len(rates)},
+                )
+        except Exception:
+            pass
 
         # ── Save genome for next scan ──
         try:
@@ -2246,26 +2600,16 @@ class CyphexEngine:
         med = sum(1 for v in vulns if v.severity == "Medium")
         low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
         total = len(vulns)
-        score = max(0, 100 - crit * 25 - high * 10 - med * 5 - low)
-        # Diminishing returns: duplicate findings of same severity don't stack fully
-        import math
-        penalty = 0
-        if crit: penalty += 20 + 10 * math.log2(1 + crit)  # ~20 first, +10 per doubling
-        if high: penalty += 10 + 8 * math.log2(1 + high)   # ~10 first, +8 per doubling
-        if med:  penalty += 3 + 4 * math.log2(1 + med)
-        if low:  penalty += 1 + 2 * math.log2(1 + low)
-        score = max(0, min(100, round(100 - penalty)))
+        score = security_score(crit, high, med, low)
 
-        if score >= 80:
-            sc_rich, sc_label = "green", "SECURE"
-        elif score >= 60:
-            sc_rich, sc_label = "cyan", "FAIR"
-        elif score >= 40:
-            sc_rich, sc_label = "yellow", "AT RISK"
-        elif score >= 20:
-            sc_rich, sc_label = "red", "POOR"
-        else:
-            sc_rich, sc_label = "red bold", "CRITICAL"
+        # Label/band comes from scoring.score_band() — the single source of
+        # truth for the 20/40/60/80 cutoffs; only the rich colour per label
+        # is local to this render site.
+        sc_label, _tier = _score_band(score)
+        sc_rich = {
+            "SECURE": "green", "FAIR": "cyan", "AT RISK": "yellow",
+            "POOR": "red", "CRITICAL": "red bold",
+        }[sc_label]
 
         # Score panel
         bar_filled = int(score / 100 * 30)
@@ -2327,6 +2671,18 @@ class CyphexEngine:
                 table.add_row(str(i), sev_display, vuln_type, cwe, endpoint)
             console.print(table)
 
+        # Tie the findings above back to the exploit sequence that chained
+        # them (full detail was already shown once at the end of the dynamic
+        # scan step — this is a compact cross-reference, not a re-render).
+        attack_graph = getattr(self.context, "attack_graph", None)
+        if attack_graph and getattr(attack_graph, "edges", None):
+            top = attack_graph.edges[0]
+            console.print(
+                f"  [dim]◈ Exploit sequence:[/dim] [cyan]{len(attack_graph.edges)} chain(s)[/cyan] "
+                f"[dim]discovered during the dynamic scan (top: {top.source} ──{top.action}──▶ {top.target}, "
+                f"privilege reached: {getattr(attack_graph, 'privilege_level', 'none')})[/dim]"
+            )
+
         if COUNCIL_AVAILABLE and vulns:
             try:
                 analyzer = AnalysisCouncil()
@@ -2373,12 +2729,53 @@ class CyphexEngine:
                 }
                 for v in vulns
             ],
+            "attack_graph": self._attack_graph_summary(),
+        }
+
+    def _attack_graph_summary(self):
+        """Serialize the DeepAgents AttackGraph (if the swarm ran) into the
+        JSON report so downstream consumers (judge artifacts, dashboards) get
+        the exploit sequence as structured data, not just a printed table."""
+        attack_graph = getattr(self.context, "attack_graph", None) if self.context else None
+        if not attack_graph:
+            return None
+        return {
+            "privilege_level": getattr(attack_graph, "privilege_level", "none"),
+            "creds_harvested": len(getattr(attack_graph, "confirmed_creds", []) or []),
+            "tokens_harvested": len(getattr(attack_graph, "confirmed_tokens", []) or []),
+            "nodes_touched": list(getattr(attack_graph, "nodes", {}).keys()),
+            "chains": [
+                {"seq": i, "source": e.source, "action": e.action, "target": e.target, "priority": e.priority}
+                for i, e in enumerate(getattr(attack_graph, "edges", []) or [], 1)
+            ],
         }
 
     def _save_report(self, report, filepath):
         with open(filepath, 'w') as f:
             json.dump(report, f, indent=2)
         print(f"  {C.G}[OK]{C.RST} Report saved to {filepath}")
+
+    def _write_html_report(self, report):
+        """Write the visual HTML report for this scan and print an openable
+        file:// link. Best-effort — a report-render failure never fails a scan
+        that already completed. Before/after posture come off the engine, set
+        by the patch phase."""
+        try:
+            from report_html import write_report_html
+            html_path = write_report_html(
+                report,
+                score_before=getattr(self, "_score_before", None),
+                score_after=getattr(self, "_post_patch_score", None),
+                patches_applied=getattr(self, "_patches_applied", None),
+                patched=getattr(self, "_patched_details", None),
+                remaining=len(getattr(self, "_post_patch_remaining", []) or []),
+                target=getattr(self, "repo_url", None) or getattr(self, "local_path", None),
+            )
+            print(f"\n  {C.G}[OK]{C.RST} {C.BOLD}Visual report{C.RST}  "
+                  f"{C.CY}file://{html_path}{C.RST}")
+            print(f"  {C.DIM}open it →{C.RST} {C.NEON}open \"{html_path}\"{C.RST}")
+        except Exception as e:
+            print(f"  {C.Y}[SKIP]{C.RST} HTML report: {str(e)[:80]}")
 
     def _save_judge_artifacts(self, report: dict):
         """Save deterministic judge artifacts in JSON, Markdown, and SARIF."""
@@ -2449,20 +2846,18 @@ class CyphexEngine:
                 tracer = RouteTracer(self.source_dir)
                 tracer.resolve_dast_vulns(vulns)
             except Exception as e:
-                console.print(f"[dim]  Route tracer unavailable or failed: {str(e)}[/dim]")
+                self._vconsole(f"[dim]  Route tracer unavailable or failed: {str(e)}[/dim]")
 
         # Calculate BEFORE score
-        import math
         crit_b = sum(1 for v in vulns if v.severity == "Critical")
         high_b = sum(1 for v in vulns if v.severity == "High")
         med_b  = sum(1 for v in vulns if v.severity == "Medium")
         low_b  = sum(1 for v in vulns if v.severity in ("Low", "Info"))
-        penalty_b = 0
-        if crit_b: penalty_b += 20 + 10 * math.log2(1 + crit_b)
-        if high_b: penalty_b += 10 + 8 * math.log2(1 + high_b)
-        if med_b:  penalty_b += 3 + 4 * math.log2(1 + med_b)
-        if low_b:  penalty_b += 1 + 2 * math.log2(1 + low_b)
-        score_before = max(0, min(100, round(100 - penalty_b)))
+        score_before = security_score(crit_b, high_b, med_b, low_b)
+        # Stashed so _final_banner can record the before/after pair in the
+        # scan_score event — a run's score is only meaningful next to where
+        # it started.
+        self._score_before = score_before
 
         # ═══════════════════════════════════════════════════════════════
         # V2 PIPELINE: Vectorless RAG + Grounded Reasoning
@@ -2506,9 +2901,11 @@ class CyphexEngine:
                 _kt = _kt_builder.build()
                 self._tree_navigator = get_navigator(_kt, getattr(_kt_builder, "cwe_index", None))
                 if self._tree_navigator:
-                    console.print("  [green]✓[/green] Knowledge Tree navigator ready (CWE fix-recipe enrichment)")
+                    self._vconsole("  [green]✓[/green] Knowledge Tree navigator ready (CWE fix-recipe enrichment)")
+                    if SOC_UI:
+                        ui.render_knowledge_graph(_kt, getattr(_kt_builder, "cwe_index", None))
             except Exception as _e:
-                console.print(f"[dim]Knowledge Tree navigator unavailable (non-fatal): {type(_e).__name__}[/dim]")
+                self._vconsole(f"[dim]Knowledge Tree navigator unavailable (non-fatal): {type(_e).__name__}[/dim]")
 
             # Show the code tree
             tree_lines = []
@@ -2534,7 +2931,7 @@ class CyphexEngine:
             deps = indexer.get_dependency_info()
             framework = detect_framework(deps)
             if framework:
-                console.print(f"  [green]✓[/green] Detected framework: [bold]{framework}[/bold]")
+                self._vconsole(f"  [green]✓[/green] Detected framework: [bold]{framework}[/bold]")
 
             # Init manifest + patch memory.
             # patch_memory persists to <dir>/.cyphex/patch_memory.json. Point it
@@ -2546,8 +2943,8 @@ class CyphexEngine:
             _mem_dir = os.path.abspath(self.local_path) if getattr(self, "local_path", None) else self.source_dir
             manifest = PatchManifest(self.source_dir)
             patch_memory = PatchMemory(_mem_dir)
-            console.print(f"  [green]✓[/green] Patch manifest: .cyphex/patches.json")
-            console.print(f"  [green]✓[/green] Patch memory: {os.path.join(_mem_dir, '.cyphex', 'patch_memory.json')}")
+            self._vconsole(f"  [green]✓[/green] Patch manifest: .cyphex/patches.json")
+            self._vconsole(f"  [green]✓[/green] Patch memory: {os.path.join(_mem_dir, '.cyphex', 'patch_memory.json')}")
 
         # ── Session Memory + Agent Reasoning ──
         session = None
@@ -2594,7 +2991,15 @@ class CyphexEngine:
 
             # ── Session Memory Panel ──
             is_returning = prior_scans > 0 or prior_lessons > 0
-            repo_name = (getattr(self, "repo_url", "") or self.source_dir or "unknown").split("/")[-1].replace(".git", "")
+            # os.path.basename, not .split("/")[-1] — repo_url is always
+            # forward-slash (a URL) so both work there, but a local Windows
+            # scan's source_dir is backslash-separated, and split("/") finds
+            # no "/" at all in that case, so it fell back to the ENTIRE
+            # absolute path instead of just the folder name. basename()
+            # handles both separators correctly on every platform.
+            repo_name = os.path.basename(
+                (getattr(self, "repo_url", "") or self.source_dir or "unknown").rstrip("/\\")
+            ).replace(".git", "")
             session_status = "[bold green]🔄 RETURNING SESSION[/bold green] — prior context loaded" if is_returning else "[yellow]🆕 NEW SESSION[/yellow] — building context from scratch"
             
             session_info = (
@@ -2672,6 +3077,7 @@ class CyphexEngine:
 
         patch_council = PatchCouncil(thread_id=thread_id) if COUNCIL_AVAILABLE else None
         patched_files = []
+        self._patched_details = []   # {file, cwe, vuln_type} per applied patch, for the HTML report
         verified_count = 0
         template_count = 0
         skipped = 0
@@ -2683,6 +3089,27 @@ class CyphexEngine:
         # PASS does. Keyed on the Vuln object's identity since `p["vuln"] is v` for
         # the same object drawn from `vulns` below.
         remediated_vuln_ids = set()
+
+        def _record_patch_failure(p, idx, fix_source, fixed_code, why):
+            """Persist a FAILED patch attempt into session memory.
+
+            Both the apply gate and the verification gate call this, so
+            patches_failed and the "what NOT to do" lessons reflect every
+            rejection, not just the ones that survived long enough to be
+            verified.
+            """
+            if not (session and REASONING_AVAILABLE):
+                return
+            session.add_entry(ReasoningEntry(
+                vuln_id=f"vuln_{idx:03d}", cwe=p["cwe"], file=p["rel_path"],
+                line=p["line_num"], strategy_used=fix_source, verdict="FAIL",
+                patch_hash=hashlib.sha256(fixed_code.encode()).hexdigest()[:12],
+                fix_source=fix_source,
+            ))
+            session.add_lesson(
+                f"{p['cwe']} in {os.path.basename(p['rel_path'])}: a {fix_source} fix FAILED "
+                f"({why}) — try a different remediation approach"
+            )
 
 
 
@@ -2782,7 +3209,7 @@ class CyphexEngine:
                 })
 
         if dynamic_only:
-            console.print(f"[dim]  {len(dynamic_only)} dynamic/runtime findings (no source file to auto-patch)[/dim]")
+            self._vconsole(f"[dim]  {len(dynamic_only)} dynamic/runtime findings (no source file to auto-patch)[/dim]")
 
         # ── Phase 1.3: Deduplicate findings at the same (file, line) ──
         # Two findings pointing at the same source line would otherwise produce
@@ -2790,14 +3217,22 @@ class CyphexEngine:
         # severity per location.
         _sev_rank = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Info": 0}
         _deduped: dict[tuple, dict] = {}
+        # Every finding that shared a location, including the ones dropped here.
+        # A dropped sibling is fixed by the surviving patch, so it MUST clear
+        # from the score too — otherwise a patched line keeps being penalised
+        # forever by its own duplicate and score_after is permanently understated.
+        _loc_members: dict[tuple, list[int]] = {}
         for p in patchable:
             loc_key = (p["rel_path"], p["line_num"])
+            _loc_members.setdefault(loc_key, []).append(id(p["vuln"]))
             existing = _deduped.get(loc_key)
             if existing is None or _sev_rank.get(p["vuln"].severity, 0) > _sev_rank.get(existing["vuln"].severity, 0):
                 _deduped[loc_key] = p
         if len(_deduped) < len(patchable):
-            console.print(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
+            self._vconsole(f"[dim]  Deduplicated {len(patchable) - len(_deduped)} overlapping finding(s) at shared locations.[/dim]")
         patchable = list(_deduped.values())
+        for loc_key, p in _deduped.items():
+            p["sibling_ids"] = _loc_members.get(loc_key, [id(p["vuln"])])
 
         if PATCH_V2_AVAILABLE and self.source_dir:
             try:
@@ -2825,13 +3260,13 @@ class CyphexEngine:
                     p["kb_strategy"] = strategy.pattern if strategy else ""
                     p["kb_anti_patterns"] = "; ".join(anti[:4]) if anti else ""
 
-                console.print(f"[dim]  RAG context enabled: imports + function window + CWE strategy + related files.[/dim]")
+                self._vconsole(f"[dim]  RAG context enabled: imports + function window + CWE strategy + related files.[/dim]")
                 # Per-vuln quality summary
                 fn_count  = sum(1 for p in patchable if p.get("extraction_quality") == "function")
                 win_count = sum(1 for p in patchable if p.get("extraction_quality") == "window")
                 kb_count  = sum(1 for p in patchable if p.get("kb_strategy"))
                 sec_count = sum(1 for p in patchable if p.get("secure_example"))
-                console.print(
+                self._vconsole(
                     f"  [cyan]RAG:[/cyan] {fn_count} function-level extractions, "
                     f"{win_count} window fallbacks, "
                     f"{kb_count} CWE-KB strategies, "
@@ -2848,9 +3283,17 @@ class CyphexEngine:
 
         # ── Phase 2: Batch generate with ENRICHED context ──
         batch_results = None
+        # Always defined (possibly empty) so Phase 3's reflexion-retry glue can
+        # safely check `i < len(vuln_inputs)` even on a scan where patch_council
+        # was unavailable and this block never ran.
+        vuln_inputs = []
         if patch_council and len(patchable) > 0:
             try:
                 vuln_inputs = []
+                # The first cognee recall of a scan also pays the one-time cold
+                # vector-DB load; give only that call the larger cold budget so
+                # it stops timing out and logging a spurious error every scan.
+                _cognee_cold = True
                 for p in patchable:
                     # The applier overwrites EXACTLY the window [start_l+1, end_l]
                     # (== p["snippet"]), so the model must rewrite that window and
@@ -2905,14 +3348,37 @@ class CyphexEngine:
 
                     memory_hint = ""
                     if COGNEE_AVAILABLE:
+                        # Only the first recall of the scan gets the cold budget;
+                        # flip the flag before the await so exactly one call pays it.
+                        _recall_budget = (cyphex_config.COGNEE_RECALL_COLD_TIMEOUT_S
+                                          if _cognee_cold
+                                          else cyphex_config.COGNEE_RECALL_TIMEOUT_S)
+                        _was_cold = _cognee_cold
+                        _cognee_cold = False
                         try:
                             hits = await asyncio.wait_for(
                                 cognee_memory.recall_similar_fixes(p["cwe"], p.get("snippet_fn", p["snippet"])),
-                                timeout=cyphex_config.COGNEE_RECALL_TIMEOUT_S,
+                                timeout=_recall_budget,
                             )
                             memory_hint = cognee_memory.format_hint(hits)
-                        except Exception:
+                            self._emit("cognee_recall_result", ok=True, hits=len(hits))
+                        except Exception as _e:
                             memory_hint = ""
+                            # recall_similar_fixes() never raises — it returns []
+                            # on any internal failure — so the only exception that
+                            # reaches here is asyncio.TimeoutError from wait_for,
+                            # whose str() is empty and rendered a blank line in the
+                            # health panel's RECENT ERRORS. Record the exception
+                            # TYPE and which budget was hit so a maintainer can
+                            # tell a (now rare) cold-start timeout apart from a
+                            # real warm-path failure.
+                            if isinstance(_e, (asyncio.TimeoutError, TimeoutError)):
+                                detail = (f"TimeoutError: recall exceeded "
+                                          f"{_recall_budget:.0f}s "
+                                          f"({'cold' if _was_cold else 'warm'} vector-load budget)")
+                            else:
+                                detail = f"{type(_e).__name__}: {str(_e)[:180]}"
+                            self._emit("cognee_recall_result", ok=False, error=detail)
 
                     vuln_inputs.append({
                         "vuln_name": p["vuln_type"], "cwe": p["cwe"],
@@ -2940,7 +3406,7 @@ class CyphexEngine:
                             f"  [{p['cwe']:10s}] {p['rel_path']:30s} "
                             f"ctx=[bold]{q:8s}[/bold] KB={has_kb} imp={has_imp}{strat}"
                         )
-                    console.print(Panel(
+                    self._vconsole(Panel(
                         "[bold]RAG Context → Model Prompt Assembly:[/bold]\n"
                         "[dim]Each vuln gets: function body + file imports + KB recipe + repo secure pattern[/dim]\n\n"
                         + "\n".join(enrich_lines),
@@ -2951,8 +3417,8 @@ class CyphexEngine:
 
                 batch_results = await patch_council.generate_and_validate_batch(vuln_inputs)
             except Exception as e:
-                console.print(f"[yellow]⚠ Batch council error: {str(e)[:80]}.[/yellow]")
-                console.print(f"[cyan]  → Per-vuln fallback will only generate patches that weren't cached.[/cyan]")
+                self._vconsole(f"[yellow]⚠ Batch council error: {str(e)[:80]}.[/yellow]")
+                self._vconsole(f"[cyan]  → Per-vuln fallback will only generate patches that weren't cached.[/cyan]")
                 batch_results = None
 
 
@@ -2960,6 +3426,15 @@ class CyphexEngine:
         # during the loop and drained once afterwards (see the drain block below)
         # so the slow cognify() never stalls interactive remediation.
         cognee_jobs = []
+
+        # Grounded-reflexion round budget for THIS scan's hardware tier — same
+        # table the status banner above already claims to use (it was a
+        # hand-duplicated dict, disconnected from anything real; this is the
+        # actual function). 1 round == today's exact behaviour (single
+        # attempt, no retry) when reflexion isn't available at all.
+        max_reflexion_rounds = (
+            rounds_for_tier(getattr(self, "_hw_tier", "mid")) if REFLEXION_AVAILABLE else 1
+        )
 
         # ── Phase 3: Present each patch — template → council → verify → apply ──
         for i, p in enumerate(patchable):
@@ -2969,21 +3444,21 @@ class CyphexEngine:
             sev_color = sev_colors.get(v.severity, "white")
             sev_icon = sev_icons.get(v.severity, "●")
             
-            console.print(f"\n[bold bright_cyan]{'━' * 70}[/bold bright_cyan]")
-            console.print(
+            self._vconsole(f"\n[bold bright_cyan]{'━' * 70}[/bold bright_cyan]")
+            self._vconsole(
                 f"[bold][{i+1}/{len(patchable)}] {sev_icon} {p['vuln_type']}[/bold] "
                 f"[{sev_color}]({v.severity})[/{sev_color}]"
             )
-            console.print(f"[bold]File:[/bold] [cyan]{p['rel_path']}:{p['line_num']}[/cyan]")
+            self._vconsole(f"[bold]File:[/bold] [cyan]{p['rel_path']}:{p['line_num']}[/cyan]")
             if use_v2:
-                console.print(f"[dim]Context: {p.get('ctx_quality','window')} extraction | CWE: {p['cwe']} | Lang: {p.get('lang','?')}[/dim]")
+                self._vconsole(f"[dim]Context: {p.get('ctx_quality','window')} extraction | CWE: {p['cwe']} | Lang: {p.get('lang','?')}[/dim]")
 
-            console.print(f"\n[bold]Vulnerable Code:[/bold]")
+            self._vconsole(f"\n[bold]Vulnerable Code:[/bold]")
             for j in range(p["start_l"], min(p["end_l"], len(p["lines"]))):
                 ln = j + 1
                 marker = "->" if ln == p["line_num"] else "  "
                 line_content = p["lines"][j].rstrip() if j < len(p["lines"]) else ""
-                console.print(f"  {marker} {ln:4} | {line_content[:120]}")
+                self._vconsole(f"  {marker} {ln:4} | {line_content[:120]}")
 
             # ── Step A0: exact patch-memory cache (verified fix for
             #    structurally-identical code) — the fastest path, no LLM and no
@@ -2998,7 +3473,7 @@ class CyphexEngine:
                 if cached and str(cached.get("patch", "")).strip():
                     fixed = str(cached["patch"]).strip()
                     fix_source = "memory"
-                    console.print(Panel(
+                    self._vconsole(Panel(
                         f"[bold green]✓ Reused a previously VERIFIED fix from patch memory (no AI needed)[/bold green]\n"
                         f"[dim]CWE: {p['cwe']} | reuse #{cached.get('reuse_count', 0)} | "
                         f"strategy: {cached.get('strategy', '?')}[/dim]",
@@ -3013,7 +3488,7 @@ class CyphexEngine:
                     fixed = template_result
                     fix_source = "template"
                     template_count += 1
-                    console.print(Panel(
+                    self._vconsole(Panel(
                         f"[bold green]✓ Deterministic template fix applied (no AI needed)[/bold green]\n"
                         f"[dim]CWE: {p['cwe']} | Transform: regex-based[/dim]",
                         title="◈ TEMPLATE ENGINE", border_style="green"
@@ -3050,9 +3525,9 @@ class CyphexEngine:
                                 f"[{verdict_color}]{verdict_text}[/{verdict_color}]",
                                 a.get("reason", "")
                             )
-                        console.print(vote_table)
+                        self._vconsole(vote_table)
                         if dissent:
-                            console.print(Panel(
+                            self._vconsole(Panel(
                                 "\n".join(f"[red]•[/red] {r}" for r in dissent),
                                 title="Dissenting Reasons", border_style="red"
                             ))
@@ -3087,12 +3562,12 @@ class CyphexEngine:
                         )
                         skipped += 1
                         continue
-                    console.print(
+                    self._vconsole(
                         f"[yellow][COUNCIL-DISSENT][/yellow] {justifications} — deferring to the "
                         f"objective verification gate (re-scan + syntax + rollback)."
                     )
 
-                console.print(Panel(
+                self._vconsole(Panel(
                     f"[bold red]Root Cause:[/bold red] {analysis}\n\n"
                     f"[bold green]Justifications:[/bold green] {justifications}",
                     title="Vulnerability Analysis", border_style="cyan", padding=(1, 2)
@@ -3113,7 +3588,7 @@ class CyphexEngine:
                 if ol.strip(): diff_text.append(f"- {ol[:120]}\n", style="red")
             for nl in fixed.split("\n"):
                 if nl.strip(): diff_text.append(f"+ {nl[:120]}\n", style="green")
-            console.print(Panel(diff_text, title=f"Proposed Changes ({fix_source.upper()})", border_style="yellow"))
+            self._vconsole(Panel(diff_text, title=f"Proposed Changes ({fix_source.upper()})", border_style="yellow"))
 
             # ── User approval ──
             # Treat a non-TTY stdin (piped / CI) as non-interactive too — otherwise
@@ -3122,7 +3597,7 @@ class CyphexEngine:
             # verify_static gates the score, so auto-apply here is safe.
             if self.non_interactive or not sys.stdin.isatty():
                 choice = "y"
-                console.print(f"[dim]non-interactive mode: auto applying patch[/dim]")
+                self._vconsole(f"[dim]non-interactive mode: auto applying patch[/dim]")
             else:
                 print(f"\n  {C.Y}Apply this patch? (y/n/q):{C.RST} ", end="")
                 try:
@@ -3135,114 +3610,178 @@ class CyphexEngine:
                 console.print(f"[dim][SKIPPED][/dim]\n")
                 continue
 
-            # ── Step C: Apply using V2 applier (with backup + syntax check) ──
+            # ── Step C+D: Apply + Verify, with grounded-reflexion retry (V2 only) ──
             original_content = open(p["filepath"], "r", encoding="utf-8", errors="ignore").read()
 
             if use_v2:
-                # Apply over the SAME 1-indexed inclusive range that was shown to the
-                # operator in the "Vulnerable Code" / diff panels above (start_l/end_l,
-                # 0-indexed with end_l exclusive) — not just the single vuln line —
-                # otherwise the other lines in the displayed window are left untouched
-                # while `fixed` (which may span multiple lines) only replaces one line.
-                apply_result = apply_patch(p["filepath"], p["start_l"] + 1, p["end_l"], fixed)
-                if not apply_result.success:
-                    console.print(f"[bold red][REJECTED][/bold red] Apply failed: {apply_result.error}")
-                    skipped += 1
-                    continue
-                if not apply_result.parse_valid:
-                    console.print(f"[bold red][REJECTED][/bold red] Syntax error in patched file — rolling back")
-                    rollback(p["filepath"], original_content)
-                    skipped += 1
-                    continue
-            else:
-                # Legacy apply
-                import tempfile
-                ext = os.path.splitext(p["filepath"])[1].lower()
-                test_lines = p["lines"].copy()
-                for j in range(p["start_l"], p["end_l"]):
-                    test_lines[j] = ""
-                test_lines[p["start_l"]] = fixed + "\n"
-                test_content = "".join(test_lines)
-                syntax_passed = True
-                if ext in ['.js', '.ts', '.py']:
-                    with tempfile.NamedTemporaryFile(suffix=ext, mode='w', delete=False, encoding='utf-8') as tf:
-                        tf.write(test_content); tf_name = tf.name
-                    try:
-                        cmd = ["node", "-c", tf_name] if ext in ['.js', '.ts'] else ["python", "-m", "py_compile", tf_name]
-                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-                        if result.returncode != 0: syntax_passed = False
-                    except Exception: pass
-                    finally:
-                        if os.path.exists(tf_name): os.unlink(tf_name)
-                if not syntax_passed:
-                    console.print(f"[bold red][REJECTED][/bold red] Syntax error in proposed patch")
-                    skipped += 1; continue
-                lines = p["lines"]
-                for j in range(p["start_l"], p["end_l"]): lines[j] = ""
-                lines[p["start_l"]] = fixed + "\n"
-                with open(p["filepath"], "w", encoding="utf-8") as f: f.writelines(lines)
+                async def _reflexion_regenerate(evidence, last_patch, round_num):
+                    """Regenerate `fixed` with the SAME rejection reason a human
+                    reviewer would see, fed back into the prompt.
+                    backend.reasoning.reflexion._build_feedback formats it
+                    identically to what tests/test_reasoning.py already verifies
+                    (rescan / structure / build_error / suppression / blast_radius
+                    keys). Returns "" if regeneration isn't possible or fails —
+                    callers must treat that as "give up", never retry forever."""
+                    if not (REFLEXION_AVAILABLE and patch_council and i < len(vuln_inputs)):
+                        return ""
+                    feedback = _reflexion_feedback(evidence, last_patch, round_num)
+                    retry_dict = dict(vuln_inputs[i])
+                    retry_dict["context"] = f"{retry_dict.get('context', '')}\n\n{feedback}".strip()
+                    self._vconsole(
+                        f"[cyan]↻ Reflexion round {round_num + 2}/{max_reflexion_rounds} for "
+                        f"{p['cwe']} — retrying with grounded feedback...[/cyan]"
+                    )
+                    return await patch_council.generate_patch_light(retry_dict)
 
-            # ── Step D: Verification Gate (V2 only) ──
-            patched_content = open(p["filepath"], "r", encoding="utf-8", errors="ignore").read()
-            verify_verdict = "UNVERIFIED"
+                _give_up = False
+                for _reflex_round in range(max_reflexion_rounds):
+                    is_last_round = (_reflex_round == max_reflexion_rounds - 1)
 
-            if use_v2:
-                loc = p.get("location")
-                # Severity-scaled blast radius: Critical vulns need more room for proper fixes
-                sev_blast_cap = {"Critical": 80, "High": 60, "Medium": 40, "Low": 30}.get(
-                    v.severity, 40
-                )
-                vr = verify_static(
-                    loc, v, self.source_dir,
-                    parse_valid=True,
-                    original_content=original_content,
-                    patched_content=patched_content,
-                    blast_radius_cap=sev_blast_cap,
-                )
-                verify_verdict = vr.verdict
-
-                verdict_color = "green" if vr.verdict == "PASS" else "yellow" if vr.verdict == "UNVERIFIABLE" else "red"
-                verdict_icon = "✅" if vr.verdict == "PASS" else "⚠️" if vr.verdict == "UNVERIFIABLE" else "❌"
-                
-                # Build human-readable check results
-                check = lambda ok: "[green]✓ PASS[/green]" if ok else "[red]✗ FAIL[/red]"
-                console.print(Panel(
-                    f"[bold]{verdict_icon} Verdict: [{verdict_color}]{vr.verdict}[/{verdict_color}][/bold]\n\n"
-                    f"[bold]Sub-checks:[/bold]\n"
-                    f"  {check(vr.finding_gone)}  Finding Gone    — Re-scanned: vulnerability {'eliminated' if vr.finding_gone else 'STILL PRESENT'}\n"
-                    f"  {check(vr.builds)}  Syntax Valid    — Patched code {'compiles' if vr.builds else 'has SYNTAX ERRORS'}\n"
-                    f"  {check(vr.no_suppression)}  No Suppression  — {'Clean fix (no noqa/eslint-disable)' if vr.no_suppression else 'Patch ADDED suppression comments'}\n"
-                    f"  {check(vr.blast_ok)}  Blast Radius    — Diff {'within' if vr.blast_ok else 'EXCEEDS'} {sev_blast_cap}-line cap ({v.severity})\n"
-                    + (f"\n[dim]Evidence: {vr.evidence}[/dim]" if vr.evidence else ""),
-                    title="◈ VERIFICATION GATE", border_style=verdict_color
-                ))
-
-                if vr.verdict == "FAIL":
-                    rollback(p["filepath"], original_content)
-                    console.print(f"[bold red][ROLLED BACK][/bold red] Verification failed — patch reverted")
-                    skipped += 1
-                    # Learn from the FAILURE too. The Session Memory panel promises
-                    # "Successful & failed patches are recorded as lessons", but the
-                    # `continue` here used to skip the recorder below — so
-                    # patches_failed stayed 0 and no "what NOT to do" lesson was ever
-                    # captured. Record it before bailing.
-                    if session and REASONING_AVAILABLE:
-                        session.add_entry(ReasoningEntry(
-                            vuln_id=f"vuln_{i:03d}", cwe=p["cwe"], file=p["rel_path"],
-                            line=p["line_num"], strategy_used=fix_source, verdict="FAIL",
-                            patch_hash=hashlib.sha256(fixed.encode()).hexdigest()[:12],
-                            fix_source=fix_source,
-                        ))
-                        _why = "finding still present" if not getattr(vr, "finding_gone", True) else "syntax/blast-radius check"
-                        session.add_lesson(
-                            f"{p['cwe']} in {os.path.basename(p['rel_path'])}: a {fix_source} fix FAILED "
-                            f"verification ({_why}) — try a different remediation approach"
+                    # ── Step C: Apply using V2 applier (with backup + syntax check) ──
+                    # Apply over the SAME 1-indexed inclusive range that was shown to
+                    # the operator in the "Vulnerable Code" / diff panels above
+                    # (start_l/end_l, 0-indexed with end_l exclusive) — not just the
+                    # single vuln line — otherwise the other lines in the displayed
+                    # window are left untouched while `fixed` (which may span
+                    # multiple lines) only replaces one line.
+                    apply_result = apply_patch(p["filepath"], p["start_l"] + 1, p["end_l"], fixed)
+                    if not apply_result.success or not apply_result.parse_valid:
+                        if apply_result.success:
+                            console.print(f"[bold red][REJECTED][/bold red] Syntax error in patched file — rolling back")
+                            rollback(p["filepath"], original_content)
+                        else:
+                            console.print(f"[bold red][REJECTED][/bold red] Apply failed: {apply_result.error}")
+                        if not is_last_round:
+                            _apply_evidence = {"build_error": apply_result.error or "patch produced invalid syntax"}
+                            if apply_result.structure_error:
+                                _apply_evidence["structure"] = apply_result.structure_error
+                            new_fixed = await _reflexion_regenerate(_apply_evidence, fixed, _reflex_round)
+                            if new_fixed:
+                                fixed = new_fixed
+                                # The round-1 fix may have come from memory/template
+                                # (fix_source set in Step A/A0 above); a reflexion
+                                # retry is always a fresh LLM generation, so from
+                                # here on attribute it correctly — memory/template
+                                # provenance would otherwise wrongly survive onto a
+                                # patch they had nothing to do with (patch_memory
+                                # writes, session lessons, the reasoning tree).
+                                fix_source = "council"
+                                continue
+                        skipped += 1
+                        # A patch rejected at APPLY time is a failure too. Only the
+                        # verification gate used to record one, so patches_failed
+                        # stayed 0 after a syntax rollback and the next scan learned
+                        # nothing from it.
+                        _record_patch_failure(
+                            p, i, fix_source, fixed,
+                            apply_result.error or "patch produced invalid syntax",
                         )
+                        # A memory-sourced patch that just failed a hard, deterministic
+                        # gate (structural integrity, or syntax) is a POISONED cache
+                        # entry, not a one-off bad model output — it was stored once
+                        # under "verified" and would otherwise be replayed verbatim on
+                        # every future scan forever. Purge it so the next scan falls
+                        # back to real generation instead of repeating the same break.
+                        if fix_source == "memory" and patch_memory:
+                            patch_memory.invalidate(p["cwe"], p.get("snippet_fn", p["snippet"]))
+                            self._vconsole(
+                                f"[dim]  ⚠ poisoned patch-memory entry for {p['cwe']} purged — "
+                                f"will regenerate next time[/dim]"
+                            )
+                        _give_up = True
+                        break
+
+                    # ── Step D: Verification Gate ──
+                    patched_content = open(p["filepath"], "r", encoding="utf-8", errors="ignore").read()
+                    loc = p.get("location")
+                    # Severity-scaled blast radius: Critical vulns need more room for proper fixes
+                    sev_blast_cap = {"Critical": 80, "High": 60, "Medium": 40, "Low": 30}.get(
+                        v.severity, 40
+                    )
+                    vr = verify_static(
+                        loc, v, self.source_dir,
+                        parse_valid=True,
+                        original_content=original_content,
+                        patched_content=patched_content,
+                        blast_radius_cap=sev_blast_cap,
+                    )
+                    verify_verdict = vr.verdict
+                    self._emit("patch_verdict", cwe=p["cwe"], file=p["rel_path"], verdict=vr.verdict)
+                    # The Verify Gate verdict is the single most important
+                    # traceable event in the pipeline — it is what decides
+                    # whether a "fix" counts. Status maps so a maintainer
+                    # scanning the trace sees rollbacks and unverifiables
+                    # without reading detail text.
+                    self.trace.note(
+                        f"verify {p['cwe']}",
+                        f"{vr.verdict} · {os.path.basename(p['rel_path'])}",
+                        {"PASS": _T_OK, "FAIL": _T_FAIL}.get(vr.verdict, _T_WARN),
+                        {"cwe": p["cwe"], "file": p["rel_path"], "verdict": vr.verdict},
+                    )
+
+                    verdict_color = "green" if vr.verdict == "PASS" else "yellow" if vr.verdict == "UNVERIFIABLE" else "red"
+                    verdict_icon = "✅" if vr.verdict == "PASS" else "⚠️" if vr.verdict == "UNVERIFIABLE" else "❌"
+
+                    # Build human-readable check results
+                    check = lambda ok: "[green]✓ PASS[/green]" if ok else "[red]✗ FAIL[/red]"
+                    self._vconsole(Panel(
+                        f"[bold]{verdict_icon} Verdict: [{verdict_color}]{vr.verdict}[/{verdict_color}][/bold]\n\n"
+                        f"[bold]Sub-checks:[/bold]\n"
+                        f"  {check(vr.finding_gone)}  Finding Gone    — Re-scanned: vulnerability {'eliminated' if vr.finding_gone else 'STILL PRESENT'}\n"
+                        f"  {check(vr.builds)}  Syntax Valid    — Patched code {'compiles' if vr.builds else 'has SYNTAX ERRORS'}\n"
+                        f"  {check(vr.no_suppression)}  No Suppression  — {'Clean fix (no noqa/eslint-disable)' if vr.no_suppression else 'Patch ADDED suppression comments'}\n"
+                        f"  {check(vr.blast_ok)}  Blast Radius    — Diff {'within' if vr.blast_ok else 'EXCEEDS'} {sev_blast_cap}-line cap ({v.severity})\n"
+                        f"  {check(vr.structure_ok)}  Structure Preserved — {'No route/fn/class removed' if vr.structure_ok else 'A route/fn/class was DELETED'}\n"
+                        + (f"\n[dim]Evidence: {vr.evidence}[/dim]" if vr.evidence else ""),
+                        title="◈ VERIFICATION GATE", border_style=verdict_color
+                    ))
+
+                    if vr.verdict == "FAIL":
+                        rollback(p["filepath"], original_content)
+                        console.print(f"[bold red][ROLLED BACK][/bold red] Verification failed — patch reverted")
+                        # Learn from the FAILURE too. The Session Memory panel promises
+                        # "Successful & failed patches are recorded as lessons", but the
+                        # `continue` here used to skip the recorder below — so
+                        # patches_failed stayed 0 and no "what NOT to do" lesson was ever
+                        # captured. Record it before bailing.
+                        _why = (
+                            "finding still present" if not getattr(vr, "finding_gone", True)
+                            else "route/function/class deleted" if not getattr(vr, "structure_ok", True)
+                            else "syntax/blast-radius check"
+                        )
+                        if not is_last_round:
+                            new_fixed = await _reflexion_regenerate(vr.evidence, fixed, _reflex_round)
+                            if new_fixed:
+                                fixed = new_fixed
+                                fix_source = "council"  # see the apply-gate retry above
+                                continue
+                        skipped += 1
+                        _record_patch_failure(p, i, fix_source, fixed, f"verification: {_why}")
+                        # Same poisoned-cache purge as the apply-time rejection above —
+                        # this branch is reached when the patch DID apply and DID pass
+                        # syntax, but verify_static's independent structure check (or
+                        # rescan) still caught it. Equally poisoned, equally must not
+                        # survive to the next scan.
+                        if fix_source == "memory" and patch_memory:
+                            patch_memory.invalidate(p["cwe"], p.get("snippet_fn", p["snippet"]))
+                            self._vconsole(
+                                f"[dim]  ⚠ poisoned patch-memory entry for {p['cwe']} purged — "
+                                f"will regenerate next time[/dim]"
+                            )
+                        _give_up = True
+                        break
+
+                    # PASS or UNVERIFIABLE — settled, stop retrying.
+                    break
+
+                if _give_up:
                     continue
 
                 verified_count += 1 if vr.verdict == "PASS" else 0
                 if vr.verdict == "PASS":
-                    remediated_vuln_ids.add(id(v))
+                    # Clear every finding that pointed at this exact line, not
+                    # only the highest-severity one we kept in Phase 1.3.
+                    remediated_vuln_ids.update(p.get("sibling_ids") or [id(v)])
 
                 # Record in manifest
                 if manifest:
@@ -3314,8 +3853,50 @@ class CyphexEngine:
                     tree.final_patch = fixed[:1000]
                     tree.verdict = vr.verdict
                     save_tree(tree, self.source_dir)
+            else:
+                # Legacy apply — no reflexion retry (no verify_static gate to
+                # ground a retry against in this path; single attempt, as always).
+                import tempfile
+                ext = os.path.splitext(p["filepath"])[1].lower()
+                test_lines = p["lines"].copy()
+                for j in range(p["start_l"], p["end_l"]):
+                    test_lines[j] = ""
+                test_lines[p["start_l"]] = fixed + "\n"
+                test_content = "".join(test_lines)
+                syntax_passed = True
+                if ext in ['.js', '.ts', '.py']:
+                    with tempfile.NamedTemporaryFile(suffix=ext, mode='w', delete=False, encoding='utf-8') as tf:
+                        tf.write(test_content); tf_name = tf.name
+                    try:
+                        # sys.executable, not the literal "python" — many Linux
+                        # distros (Debian/Ubuntu w/o python-is-python3, Arch,
+                        # current Alpine) and macOS since Catalina have no bare
+                        # "python" on PATH at all. A FileNotFoundError here was
+                        # silently swallowed by the except below, leaving
+                        # syntax_passed at its default True — i.e. the
+                        # syntax-safety gate silently never ran before a patch
+                        # was written to disk. Same fix already used correctly
+                        # two lines away at the static-server fallback (~1088).
+                        cmd = ["node", "-c", tf_name] if ext in ['.js', '.ts'] else [sys.executable, "-m", "py_compile", tf_name]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                        if result.returncode != 0: syntax_passed = False
+                    except Exception: pass
+                    finally:
+                        if os.path.exists(tf_name): os.unlink(tf_name)
+                if not syntax_passed:
+                    console.print(f"[bold red][REJECTED][/bold red] Syntax error in proposed patch")
+                    skipped += 1; continue
+                lines = p["lines"]
+                for j in range(p["start_l"], p["end_l"]): lines[j] = ""
+                lines[p["start_l"]] = fixed + "\n"
+                with open(p["filepath"], "w", encoding="utf-8") as f: f.writelines(lines)
 
             patched_files.append(p["rel_path"])
+            self._patched_details.append({
+                "file": p["rel_path"],
+                "cwe": p.get("cwe", ""),
+                "vuln_type": p.get("vuln_type", ""),
+            })
             console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']} [dim]({fix_source})[/dim]\n")
 
             # NOTE: Disabled write-back to original source directory.
@@ -3334,7 +3915,7 @@ class CyphexEngine:
         # lancedb/graph dataset. This runs after all patches are shown/applied,
         # so a slow local-LLM extraction never blocks remediation.
         if cognee_jobs:
-            console.print(
+            self._vconsole(
                 f"[dim]Persisting {len(cognee_jobs)} verified fix(es) into cross-project memory "
                 f"(cognee) — this runs post-remediation…[/dim]"
             )
@@ -3346,8 +3927,10 @@ class CyphexEngine:
                         timeout=cyphex_config.COGNEE_REMEMBER_TIMEOUT_S,
                     )
                     _persisted += 1
+                    self._emit("cognee_persist_result", ok=True)
                 except (asyncio.TimeoutError, TimeoutError):
-                    console.print(
+                    self._emit("cognee_persist_result", ok=False, reason="timeout")
+                    self._vconsole(
                         f"[dim]cognee remember skipped: timed out after "
                         f"{cyphex_config.COGNEE_REMEMBER_TIMEOUT_S:.0f}s "
                         f"(cognify LLM extraction too slow)[/dim]"
@@ -3355,7 +3938,8 @@ class CyphexEngine:
                 except Exception as e:
                     # str(e) is empty for many cognee/asyncio errors — show the
                     # type so "remember skipped:" is never a blank, useless line.
-                    console.print(f"[dim]cognee remember skipped: {type(e).__name__}: {e}[/dim]")
+                    self._emit("cognee_persist_result", ok=False, error=str(e)[:200])
+                    self._vconsole(f"[dim]cognee remember skipped: {type(e).__name__}: {e}[/dim]")
             console.print(f"[dim]cognee memory: {_persisted}/{len(cognee_jobs)} fix(es) persisted.[/dim]")
 
         # ── Summary Panel ──
@@ -3396,8 +3980,13 @@ class CyphexEngine:
             console.print(Panel(
                 f"[bold]Thread ID:[/bold]        [cyan]{thread_id}[/cyan]\n"
                 f"[bold]Session:[/bold]          {saved_path}\n"
-                f"[bold]Patches recorded:[/bold] {session.model_context.get('patches_applied', 0)}\n"
-                f"[bold]Verified:[/bold]         {session.model_context.get('patches_verified', 0)}\n"
+                f"[bold]This scan:[/bold]        {len(patched_files)} applied · {verified_count} verified · {skipped} skipped\n"
+                f"[bold]Lifetime:[/bold]        "
+                f"{session.model_context.get('patches_attempted', 0)} attempted · "
+                f"{session.model_context.get('patches_applied', 0)} applied "
+                f"[dim](all scans of this repo)[/dim]\n"
+                f"[bold]Lifetime verified:[/bold] {session.model_context.get('patches_verified', 0)}  "
+                f"[bold]failed:[/bold] {session.model_context.get('patches_failed', 0)}\n"
                 f"[bold]Lessons learned:[/bold]  {len(session.model_context.get('lessons', []))}"
                 + reasoning_stats +
                 f"\n\n[dim]Session persisted — will be loaded on next scan for continuity[/dim]",
@@ -3416,13 +4005,8 @@ class CyphexEngine:
         high_a = sum(1 for v in remaining if v.severity == "High")
         med_a  = sum(1 for v in remaining if v.severity == "Medium")
         low_a  = sum(1 for v in remaining if v.severity in ("Low", "Info"))
-        penalty_a = 0
-        # MUST use the SAME coefficients as score_before (20/10, 10/8, 3/4, 1/2)
-        if crit_a: penalty_a += 20 + 10 * math.log2(1 + crit_a)
-        if high_a: penalty_a += 10 + 8 * math.log2(1 + high_a)
-        if med_a:  penalty_a += 3 + 4 * math.log2(1 + med_a)
-        if low_a:  penalty_a += 1 + 2 * math.log2(1 + low_a)
-        score_after = max(0, min(100, round(100 - penalty_a)))
+        # Same function as score_before — not a hand-copied set of coefficients.
+        score_after = security_score(crit_a, high_a, med_a, low_a)
         # Final guard: 0 patches ⇒ 0 improvement
         if not patched_files:
             score_after = score_before
@@ -3433,14 +4017,19 @@ class CyphexEngine:
 
         bar_b = int(score_before / 100 * 25)
         bar_a = int(score_after / 100 * 25)
-        sc_b_color = "red" if score_before < 40 else "yellow" if score_before < 70 else "green"
-        sc_a_color = "red" if score_after < 40 else "yellow" if score_after < 70 else "green"
+        # Same thresholds as terminal_ui.score_color / _verdict, so a score is
+        # never yellow here and "FAIR" in the banner.
+        def _band(sc):
+            return "red" if sc < 40 else "yellow" if sc < 60 else "cyan" if sc < 80 else "green"
+        sc_b_color = _band(score_before)
+        sc_a_color = _band(score_after)
 
         console.print(Panel(
             f"  [bold]Before Patching:[/bold]  [{sc_b_color}]{'█' * bar_b}{'░' * (25 - bar_b)}  {score_before}/100[/{sc_b_color}]\n"
             f"  [bold]After Patching:[/bold]   [{sc_a_color}]{'█' * bar_a}{'░' * (25 - bar_a)}  {score_after}/100[/{sc_a_color}]\n\n"
             f"  [bold]Improvement:[/bold]  [{delta_color}]{delta_str} points[/{delta_color}]  │  "
-            f"Patched: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]\n\n"
+            f"Cleared: [green]{len(vulns) - len(remaining)}[/green]/{len(vulns)}  "
+            f"Applied: [green]{len(patched_files)}[/green]  Remaining: [yellow]{len(remaining)}[/yellow]\n\n"
             f"  [bold]Remaining Vulnerabilities:[/bold]\n"
             f"    🔴 Critical: {crit_a}    🟠 High: {high_a}    🟡 Medium: {med_a}    🟢 Low: {low_a}\n\n"
             f"  [dim]Score = 100 − severity-weighted penalties (higher = safer)[/dim]\n"
@@ -3456,7 +4045,19 @@ class CyphexEngine:
         # the banner reads getattr(self, '_patches_applied', 0) == 0/0 APPLIED even
         # though patches were actually applied (contradicting the PATCH SUMMARY).
         self._patches_applied = len(patched_files)
-        self._patches_total = len(patched_files) + skipped
+        # Denominator = every finding that actually entered the patch loop.
+        # applied+skipped silently omitted findings that were never attempted
+        # (runtime-only, or collapsed into a sibling at the same line), so a
+        # scan that confirmed 7 vulnerabilities could report "2/3 APPLIED".
+        self._patches_total = len(patchable)
+        self._patches_unpatchable = len(dynamic_only)
+        _killed = [v for v in vulns if id(v) in remediated_vuln_ids]
+        self._killed_counts = (
+            sum(1 for v in _killed if v.severity == "Critical"),
+            sum(1 for v in _killed if v.severity == "High"),
+            sum(1 for v in _killed if v.severity == "Medium"),
+            sum(1 for v in _killed if v.severity in ("Low", "Info")),
+        )
 
         if patched_files and self.repo_url and not self.non_interactive:
             print(f"\n  {C.Y}Push patches to GitHub? (y/n):{C.RST} ", end="")
@@ -3495,12 +4096,20 @@ class CyphexEngine:
 
         # 1. Try Ollama (local model)
         try:
+            if MASCOT:
+                # Covers the otherwise-silent gap between issuing the request
+                # and the first response headers arriving; handed off to the
+                # Rich "Thinking" Live panel below the moment headers land, so
+                # the two redraw loops never run at the same time.
+                mascot.thinking(f"{model_name} — contacting Ollama...")
             async with httpx.AsyncClient(timeout=90) as client:
                 async with client.stream(
                     "POST",
                     "http://127.0.0.1:11434/api/generate",
                     json={"model": model_name, "prompt": prompt, "stream": True}
                 ) as resp:
+                    if MASCOT:
+                        mascot.stop()
                     if resp.status_code == 200:
                         raw = ""
                         thinking_text = ""
@@ -3539,6 +4148,8 @@ class CyphexEngine:
                                 "patch_safety": "Review manually before merge.",
                             }
         except Exception as e:
+            if MASCOT:
+                mascot.error("Ollama unavailable")
             console.print(f"  [yellow][INFO] Ollama unavailable ({str(e)[:50]}). Using built-in patch rules.[/yellow]")
 
         # 2. Fallback: Rule-based patches (works 100% offline)
@@ -3718,6 +4329,28 @@ class CyphexEngine:
             print(f"  {C.R}[ERR]{C.RST} Push failed: {e}")
 
     def _final_banner(self):
+        self._emit("scan_end")
+        # Close the final waypoint and print the full waypoint trace before
+        # the score banner, so the run ends with "here is everything that
+        # happened and how long each part took" rather than only a number.
+        try:
+            self.trace.end_waypoint()
+            if getattr(self.trace, "waypoints", None):
+                import trace_deck
+                trace_deck.render_trace_summary(self.trace)
+        except Exception:
+            pass
+        # Settle the footer buddy on the outcome; the REPL repaints the idle
+        # footer on its next turn (standalone runs release it at exit).
+        try:
+            import footer_dock
+            from backend.observability.trace import FAIL as _TRACE_FAIL
+            failed = any(w.derived_status() == _TRACE_FAIL
+                         for w in getattr(self.trace, "waypoints", []))
+            footer_dock.stop_task()
+            footer_dock.set_state("error" if failed else "success")
+        except Exception:
+            pass
         # Cleanup Docker Compose if used
         if hasattr(self, '_docker_compose_dir') and self._docker_compose_dir:
             try:
@@ -3745,32 +4378,46 @@ class CyphexEngine:
             high = sum(1 for v in vulns if v.severity == "High")
             med = sum(1 for v in vulns if v.severity == "Medium")
             low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
-            import math
-            penalty = 0
-            if crit: penalty += 20 + 10 * math.log2(1 + crit)
-            if high: penalty += 10 + 8 * math.log2(1 + high)
-            if med:  penalty += 3 + 4 * math.log2(1 + med)
-            if low:  penalty += 1 + 2 * math.log2(1 + low)
-            score = max(0, min(100, round(100 - penalty)))
+            score = security_score(crit, high, med, low)
 
         endpoints = len(self.context.all_endpoints) if self.context else 0
         pa = getattr(self, '_patches_applied', 0)
         pt = getattr(self, '_patches_total', 0)
 
+        # Record the outcome, not just render it. Until now the score existed
+        # only as pixels in this banner — so nothing could answer "what did
+        # the last five runs score?" or "did this change make things worse?".
+        # Emitting it makes the run comparable to every other run, which is
+        # what turns a pile of sandboxes into a history.
+        self._emit(
+            "scan_score",
+            score=int(score),
+            score_before=getattr(self, "_score_before", None),
+            critical=int(crit), high=int(high), medium=int(med), low=int(low),
+            patches_applied=int(pa), patches_total=int(pt),
+            endpoints=int(endpoints),
+            elapsed_s=round(float(elapsed), 1),
+            target=str(getattr(self, "repo_url", None) or getattr(self, "local_path", None) or ""),
+        )
+
         if SOC_UI:
             ui.render_final_banner(score, crit, high, med, low, elapsed,
-                                   self.scan_id, pa, pt, endpoints)
+                                   self.scan_id, pa, pt, endpoints,
+                                   killed=getattr(self, "_killed_counts", None),
+                                   unpatchable=getattr(self, "_patches_unpatchable", 0))
             return
 
-        # Fallback: original ANSI rendering
-        if score >= 80:   sc, sc_label = C.NEON, "SECURE"
-        elif score >= 60: sc, sc_label = C.CYAN, "FAIR"
-        elif score >= 40: sc, sc_label = C.Y, "AT RISK"
-        elif score >= 20: sc, sc_label = C.R, "POOR"
-        else:             sc, sc_label = C.FLAME, "CRITICAL"
+        # Fallback: original ANSI rendering. Label/band from scoring.score_band()
+        # — the single source of truth for the 20/40/60/80 cutoffs; only the
+        # ANSI colour per label is local to this render site.
+        sc_label, _tier = _score_band(score)
+        sc = {
+            "SECURE": C.NEON, "FAIR": C.CYAN, "AT RISK": C.Y,
+            "POOR": C.R, "CRITICAL": C.FLAME,
+        }[sc_label]
         total = crit + high + med + low
-        border = C.gradient("━" * 72, 138, 43, 226, 0, 255, 255)
-        border2 = C.gradient("━" * 72, 0, 255, 255, 138, 43, 226)
+        border = C.gradient("━" * 72, *C.RAMP_LO, *C.RAMP_HI)
+        border2 = C.gradient("━" * 72, *C.RAMP_HI, *C.RAMP_LO)
         print(f"\n{border}")
         print(f"  {C.NEON}✓{C.RST} {C.BOLD}{C.CYAN}CYPHEX SCAN COMPLETE{C.RST}")
         print(f"{border2}\n")

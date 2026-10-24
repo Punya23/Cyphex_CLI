@@ -18,13 +18,18 @@ import shutil
 import subprocess
 import platform
 
-# Fix Windows terminal encoding for rich characters like ✓
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+# Fix terminal encoding for rich characters like ✓ whenever it isn't already
+# UTF-8 — not just on Windows. A win32-only gate here left any POSIX box with
+# a non-UTF-8 locale (LANG=C, minimal Docker images, most CI runners) with no
+# protection at all against the Unicode this CLI and its render_* dependents
+# print unconditionally.
+try:
+    if not (sys.stdout.encoding or "").lower().startswith("utf"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if not (sys.stderr.encoding or "").lower().startswith("utf"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 # Ensure project root is in path so existing modules resolve
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
@@ -37,16 +42,18 @@ if _BACKEND_DIR not in sys.path:
 
 def _setup_tools():
     """Auto-install optional security tools for enhanced scanning."""
-    # Cyber palette
-    CY = "\033[38;2;0;255;255m"
-    P2 = "\033[38;2;161;100;255m"
-    GH = "\033[38;2;100;100;120m"
-    SL = "\033[38;2;140;150;170m"
-    NE = "\033[38;2;57;255;20m"
-    FL = "\033[38;2;255;69;0m"
-    BD = "\033[1m"
-    RS = "\033[0m"
-    YL = "\033[93m"
+    import ui_palette as P
+    CY = P.fg(P.PHOS)       # brand — wordmark / accents
+    P2 = P.fg(P.REF)        # active / high emphasis
+    GH = P.fg(P.LABEL)      # captions / dim text
+    SL = P.fg(P.READOUT)    # prose
+    NE = P.fg(P.OK)         # success
+    FL = P.fg(P.WARN)       # critical / failure
+    BD = P.ANSI.BOLD
+    RS = P.ANSI.RST
+    YL = P.fg(P.CAUT)       # warning / medium
+    RAMP_HI = P.rgb(P.PHOS)       # gradient rule endpoints
+    RAMP_LO = P.rgb(P.PHOS_DIM)
 
     def _grad(text, r1, g1, b1, r2, g2, b2):
         out = []
@@ -59,7 +66,7 @@ def _setup_tools():
         out.append(RS)
         return "".join(out)
 
-    border = _grad("━" * 56, 0, 255, 255, 138, 43, 226)
+    border = _grad("━" * 56, *RAMP_HI, *RAMP_LO)
     print(f"\n{border}")
     print(f"  {CY}{BD}◈ CYPHEX{RS} {SL}— One-Time Setup{RS}")
     print(f"{border}\n")
@@ -67,10 +74,26 @@ def _setup_tools():
     installed = []
     skipped = []
 
-    # 1. Semgrep (Python package — cross-platform)
+    # 1. Semgrep (Python package — NOT actually cross-platform: upstream
+    #    doesn't support native Windows, only Linux/macOS/WSL. doctor.py's
+    #    _check_binary() already special-cases Windows via `wsl semgrep
+    #    --version`; mirror that here instead of a plain `pip install` that
+    #    just fails with a generic error on native Windows.
     if shutil.which("semgrep"):
         print(f"  {NE}✓{RS} {SL}Semgrep already installed{RS}")
         skipped.append("semgrep")
+    elif os.name == "nt":
+        print(f"  {CY}⏳{RS} {SL}Installing Semgrep inside WSL (no native Windows support upstream)...{RS}")
+        try:
+            subprocess.run(
+                ["wsl", "pip", "install", "semgrep", "--quiet"],
+                check=True, timeout=120
+            )
+            print(f"  {NE}✓{RS} {SL}Semgrep installed inside WSL{RS}")
+            installed.append("semgrep")
+        except Exception as e:
+            print(f"  {FL}✗{RS} Semgrep needs WSL on Windows and it isn't available here: {e}")
+            print(f"  {SL}  Install WSL (wsl --install), then re-run `cyphex setup`.{RS}")
     else:
         print(f"  {CY}⏳{RS} {SL}Installing Semgrep (5000+ SAST rules)...{RS}")
         try:
@@ -108,11 +131,19 @@ def _setup_tools():
                 _install_nuclei_binary(system, machine, installed)
 
         elif system == "linux":
-            # Linux — try apt, then binary
-            if shutil.which("apt-get"):
+            # Linux — try apt, then binary. Already running as root (common
+            # inside a container) or sudo simply not installed (minimal
+            # containers) both need to skip straight to the binary fallback
+            # instead of invoking sudo — it can hang waiting for a password
+            # prompt with nowhere to go when this runs non-interactively
+            # (e.g. via cx.py's /setup, with no guaranteed controlling tty).
+            already_root = hasattr(os, "geteuid") and os.geteuid() == 0
+            apt_cmd = ["apt-get", "install", "-y", "nuclei"] if already_root \
+                else (["sudo", "apt-get", "install", "-y", "nuclei"] if shutil.which("sudo") else None)
+            if shutil.which("apt-get") and apt_cmd:
                 try:
                     subprocess.run(
-                        ["sudo", "apt-get", "install", "-y", "nuclei"],
+                        apt_cmd,
                         check=True, timeout=120, capture_output=True
                     )
                     print(f"  {NE}✓{RS} {SL}Nuclei installed via apt{RS}")
@@ -212,7 +243,7 @@ def _setup_tools():
         print(f"  {YL}⚠{RS} {SL}Docker not found — needed for full-stack scanning{RS}")
         print("    Install from: https://www.docker.com/products/docker-desktop/")
 
-    border = _grad("━" * 56, 138, 43, 226, 0, 255, 255)
+    border = _grad("━" * 56, *RAMP_LO, *RAMP_HI)
     print(f"\n{border}")
     print(f"  {NE}✓{RS} {BD}Setup complete:{RS} {CY}{len(installed)} installed{RS}, {SL}{len(skipped)} already present{RS}")
     print(f"  {GH}Run '{CY}cyphex doctor{GH}' to verify everything{RS}")
@@ -354,7 +385,52 @@ def _launch_workspace():
     cx.run_workspace()
 
 
+def _run_panel(name: str, argv: list) -> None:
+    """Route `cyphex verify|status|benchmark` to cx.py's existing handlers.
+
+    One implementation, two entry points: these panels used to be reachable
+    only from `cx <cmd>` and the workspace's `/verify` `/status` `/benchmark`,
+    while README, llms.txt and docs/ all documented them as `cyphex <cmd>` —
+    which argparse rejected outright ("invalid choice").
+
+    Called BEFORE parse_args(): argparse cannot forward an option-looking
+    tail (`--ci`, `--selftest`, `--watch`) through a subparser — even
+    nargs=REMAINDER lets the parent parser claim a leading `--flag` and die
+    with "unrecognized arguments". Handing the raw tail to cx.py's own shlex
+    parsing keeps every flag behaving identically on both entry points.
+    """
+    # Imported here, not at module scope, for the same reason cx.py defers its
+    # own heavy imports: `cyphex --help` must stay fast.
+    try:
+        import cx
+    except Exception as e:
+        print(f"Could not load the CYPHEX panels: {e}")
+        print("Run from the project directory, or reinstall with: pip install -e .")
+        sys.exit(1)
+
+    rest = " ".join(argv)
+    if name == "verify":
+        # _cmd_verify returns an int only under --ci, and that int IS the CI
+        # verdict (0 healthy / 1 degraded / 2 unusable). It has to become the
+        # process exit code or the gate is decorative.
+        code = cx._cmd_verify(rest)
+        if code is not None:
+            sys.exit(code)
+    elif name == "status":
+        cx._cmd_status(rest)
+    elif name == "runs":
+        cx._cmd_runs(rest)
+    else:
+        cx._cmd_benchmark(rest)
+
+
 def main():
+    # Pre-parse intercept — see _run_panel's docstring for why these three
+    # cannot go through argparse.
+    if len(sys.argv) > 1 and sys.argv[1] in ("verify", "status", "runs", "benchmark"):
+        _run_panel(sys.argv[1], sys.argv[2:])
+        return
+
     parser = argparse.ArgumentParser(
         prog="cyphex",
         description="CYPHEX — AI Security Scanner with Adversarial Immune System. "
@@ -400,6 +476,26 @@ def main():
 
     # ── cyphex council-doctor ──
     subparsers.add_parser("council-doctor", help="Check council model status")
+
+    # ── cyphex verify / status / benchmark ──
+    # These three maintainer-facing panels were reachable only from `cx` and
+    # from the workspace's `/verify` `/status` `/benchmark`, while README,
+    # llms.txt and docs/ all documented them as `cyphex <cmd>` — which
+    # argparse rejected outright ("invalid choice"). They are the same
+    # handlers cx.py already ships; argparse.REMAINDER forwards the flag
+    # tail verbatim so `--selftest` / `--ci` / `--json` / `--watch` keep
+    # working identically on both entry points.
+    for _name, _help in (
+        ("verify", "Verify Gate maintainability panel "
+                   "[path] [--selftest] [--ci] [--json out.json] [--watch [s]]"),
+        ("status", "System observability panel — last scan's phases, agents, errors "
+                   "[path] [--json out.json] [--watch [s]]"),
+        ("runs", "Recorded scan runs, newest first — status, score, verified "
+                 "[N] [--json out.json]"),
+        ("benchmark", "Immune-system benchmark "
+                      "[--data corpus.csv] [--threshold N] [--json out.json]"),
+    ):
+        subparsers.add_parser(_name, help=_help, add_help=False)
 
     args = parser.parse_args()
 
@@ -453,6 +549,7 @@ def main():
         sys.path.insert(0, _PROJECT_ROOT)
         from cyphex_cli import council_doctor
         asyncio.run(council_doctor())
+
 
     else:
         parser.print_help()
