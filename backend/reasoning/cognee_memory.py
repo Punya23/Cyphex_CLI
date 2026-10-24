@@ -355,8 +355,10 @@ class CyphexMemory:
             return
 
         try:
-            with open(kb_path, "r", encoding="utf-8") as f:
-                kb = json.load(f)
+            def _read_kb():
+                with open(kb_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            kb = await asyncio.to_thread(_read_kb)
 
             for entry in kb.get("entries", []):
                 await cognee.remember(

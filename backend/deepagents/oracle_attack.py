@@ -348,8 +348,8 @@ class Decision:
 
 def _extract_json(text: str) -> Optional[dict]:
     """Extract the outermost {...} JSON object from a string."""
-    # Strip markdown fences
-    clean = re.sub(r"```(?:json)?|```", "", text).strip()
+    # Strip markdown fences — "(?:json)?" is already optional, so this alone matches a bare ```` too.
+    clean = re.sub(r"```(?:json)?", "", text).strip()
     start = clean.find("{")
     if start == -1:
         return None

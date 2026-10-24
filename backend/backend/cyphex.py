@@ -257,13 +257,23 @@ async def _run_scan(target: str, mode: str, flags: dict):
         print(f"\n  {YL}Scan interrupted{R}")
         report = {"error": "interrupted"}
 
-    # Save report
-    output_file = flags["output"] or os.path.join(
-        config.WORKING_DIR, scan_id, "report.json"
-    )
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2, default=str)
+    # Save report. --output is LLM/user-supplied: resolve it under WORKING_DIR and refuse
+    # anything that escapes (../, an absolute path elsewhere) rather than trust it as-is.
+    default_file = os.path.join(config.WORKING_DIR, scan_id, "report.json")
+    if flags["output"]:
+        base = os.path.realpath(config.WORKING_DIR)
+        output_file = os.path.realpath(os.path.join(base, flags["output"]))
+        if output_file != base and not output_file.startswith(base + os.sep):
+            print(f"\n  {RD}Refusing to write outside {config.WORKING_DIR}: {flags['output']}{R}")
+            output_file = default_file
+    else:
+        output_file = default_file
+
+    def _write_report():
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, default=str)
+    await asyncio.to_thread(_write_report)
     print(f"\n  {GR}Report saved → {output_file}{R}")
 
     return report
@@ -376,7 +386,7 @@ async def shell():
 
     while True:
         try:
-            line = input(f"\n  {CY}⊕ cx{R} {DIM}▶{R}  ").strip()
+            line = (await asyncio.to_thread(input, f"\n  {CY}⊕ cx{R} {DIM}▶{R}  ")).strip()
         except (EOFError, KeyboardInterrupt):
             print(f"\n  {DIM}Interrupted. Type /exit to quit.{R}")
             continue

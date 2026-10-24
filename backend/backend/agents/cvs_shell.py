@@ -100,7 +100,7 @@ async def execute_cvs_command(command: str, cwd: str, timeout: int) -> Dict[str,
     exit_code = 0
     
     try:
-        async with httpx.AsyncClient(verify=False, follow_redirects=follow, timeout=req_timeout, auth=auth) as client:
+        async with httpx.AsyncClient(verify=not args.insecure, follow_redirects=follow, timeout=req_timeout, auth=auth) as client:
             req = client.build_request(method, args.url, headers=headers, content=args.data)
             resp = await client.send(req)
             
@@ -112,12 +112,23 @@ async def execute_cvs_command(command: str, cwd: str, timeout: int) -> Dict[str,
             if args.head:
                 stdout = headers_text
             elif args.output and args.output != '/dev/null':
-                # Write body to file, stdout gets write-out format only
+                # Write body to file, stdout gets write-out format only.
+                # -o is LLM/agent-supplied: resolve against cwd and refuse anything that
+                # escapes it (../, an absolute path, a symlink out) rather than trust it.
                 import os as _os
-                _os.makedirs(_os.path.dirname(args.output) or '.', exist_ok=True)
-                with open(args.output, 'w', encoding='utf-8') as _f:
-                    _f.write(resp.text)
-                stdout = ""
+                out_path = _os.path.realpath(_os.path.join(cwd, args.output))
+                cwd_real = _os.path.realpath(cwd)
+                if out_path != cwd_real and not out_path.startswith(cwd_real + _os.sep):
+                    stderr = f"curl: (23) Failed writing body: refusing to write outside {cwd}"
+                    exit_code = 23
+                    stdout = ""
+                else:
+                    def _write():
+                        _os.makedirs(_os.path.dirname(out_path) or '.', exist_ok=True)
+                        with open(out_path, 'w', encoding='utf-8') as _f:
+                            _f.write(resp.text)
+                    await asyncio.to_thread(_write)
+                    stdout = ""
             elif args.output == '/dev/null':
                 # Discard body (like -o /dev/null)
                 stdout = ""

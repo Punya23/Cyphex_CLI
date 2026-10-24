@@ -136,6 +136,14 @@ class AgentOrchestrator:
         self.council = council
         self.feedback = FeedbackLoop()
         self._emit = event_callback
+        # Fire-and-forget asyncio.create_task() results must be referenced somewhere, or the
+        # event loop only holds a weak ref and can GC the task mid-run (asyncio docs' own warning).
+        self._background_tasks: set = set()
+
+    def _fire_and_forget(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # ===================================================
     # TIER 1: DETERMINISTIC TOOLS (Semgrep + Nuclei)
@@ -343,7 +351,7 @@ class AgentOrchestrator:
                     calc = SecurityPostureCalculator()
                     sps = calc.calculate(context)
                     # Use asyncio.create_task if _emit is an async callback
-                    asyncio.create_task(self._emit({
+                    self._fire_and_forget(self._emit({
                         "type": "security_score_update",
                         "score": sps.score,
                         "grade": sps.grade,
@@ -370,7 +378,7 @@ class AgentOrchestrator:
 
             # Rebuild Cognee graph between groups (fire-and-forget — don't block next group)
             if self.memory and group_vulns:
-                asyncio.create_task(self._rebuild_memory_background())
+                self._fire_and_forget(self._rebuild_memory_background())
             print()
 
         # ===============================================================
