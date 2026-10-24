@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
@@ -33,14 +34,59 @@ from backend.services.service_discovery import _normalize, discover_outbound_edg
 GITHUB_API = "https://api.github.com"
 
 
+def _token_file() -> Path:
+    """Same ~/.cyphex/ convention and env-var override as
+    cyphex/notify.py's webhook store, for a user who pasted a token with
+    /github token instead of using GITHUB_TOKEN or gh."""
+    return Path(os.environ.get("CYPHEX_GITHUB_TOKEN_FILE")
+                or Path.home() / ".cyphex" / "github_token")
+
+
+def save_token(token: str) -> None:
+    """Persist a manually-entered token for future sessions. chmod 600 —
+    tighter than webhooks.json gets, since a GitHub token is a stronger
+    secret than a chat webhook URL; best-effort on a platform where chmod
+    doesn't apply (Windows) or isn't permitted."""
+    path = _token_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(token.strip(), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def load_saved_token() -> str:
+    try:
+        return _token_file().read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def clear_saved_token() -> bool:
+    """True if a saved token existed and was removed."""
+    path = _token_file()
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+
 def resolve_github_token() -> str:
-    """GITHUB_TOKEN env var first; otherwise the token `gh` already holds
-    from `gh auth login` — a personal developer who authenticated gh once
-    and never set up a separate PAT gets org discovery for free. Never
-    raises: gh missing, not logged in, or timing out all just mean no
-    token, and every caller already treats an empty token as "skip org
-    discovery", never an error."""
+    """Three sources, most explicit first: GITHUB_TOKEN env var, then a
+    token the user manually entered with /github token (saved via
+    save_token — ranks above the automatic gh fallback since the user
+    chose it on purpose), then whatever `gh` already holds from
+    `gh auth login`. Never raises: any source being absent, gh missing, not
+    logged in, or timing out, all just mean no token — every caller already
+    treats an empty return as "skip org discovery", never an error."""
     token = os.environ.get("GITHUB_TOKEN", "")
+    if token:
+        return token
+    token = load_saved_token()
     if token:
         return token
     try:

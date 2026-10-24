@@ -955,7 +955,7 @@ COMMAND_DECK = [
     ("/models", "", "List available local Ollama models"),
     ("/webhook", "[link]", "Connect Google Chat / Slack — scan updates & PR approvals go there"),
     ("", "flags", "/webhook remove [n|all]  — or just paste the link"),
-    ("/github", "[login]", "Check or connect GitHub auth — needed for org-wide sibling discovery"),
+    ("/github", "[login|token|clear]", "Check or connect GitHub auth — needed for org-wide sibling discovery"),
     ("/history", "", "Recent intercepts this session"),
     ("/clear", "", "Repaint the canopy"),
     ("/help", "", "This command deck"),
