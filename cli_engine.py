@@ -221,6 +221,21 @@ WORK_DIR = os.path.join(os.path.dirname(__file__), "backend", "sandboxes")
 os.makedirs(WORK_DIR, exist_ok=True)
 
 
+def _exclude_network_findings(vulns):
+    """Drop "[NETWORK]" findings before computing a security score.
+
+    _run_network_scan() port-scans the WHOLE local subnet ("auto"
+    discovery), not just this scan's own sandbox — a "[NETWORK]" finding
+    can be an unrelated device on the user's LAN (their own router's
+    Telnet, another machine's SSH, ...). Those can never get a source
+    file because they aren't even part of the app being scanned, so
+    counting them toward the score permanently capped it regardless of how
+    well the actual application code was patched. They stay visible in the
+    SECURITY REPORT step and the final banner's raw counts; this only
+    controls what "this app's patchable/scoreable vulnerabilities" means."""
+    return [v for v in vulns if not str(getattr(v, "name", "")).startswith("[NETWORK]")]
+
+
 def _partition_for_council(vulns):
     """Split findings for the council's false-positive debate into
     (static_keep, to_validate). STATIC findings ([STATIC] prefix) are
@@ -2805,10 +2820,11 @@ class CyphexEngine:
 
     async def _print_report(self, duration):
         vulns = self.context.confirmed_vulns
-        crit = sum(1 for v in vulns if v.severity == "Critical")
-        high = sum(1 for v in vulns if v.severity == "High")
-        med = sum(1 for v in vulns if v.severity == "Medium")
-        low = sum(1 for v in vulns if v.severity in ("Low", "Info"))
+        scoreable = _exclude_network_findings(vulns)
+        crit = sum(1 for v in scoreable if v.severity == "Critical")
+        high = sum(1 for v in scoreable if v.severity == "High")
+        med = sum(1 for v in scoreable if v.severity == "Medium")
+        low = sum(1 for v in scoreable if v.severity in ("Low", "Info"))
         total = len(vulns)
         score = security_score(crit, high, med, low)
 
@@ -3064,7 +3080,7 @@ class CyphexEngine:
         # none with a resolvable source location) still completed this
         # phase, it just found nothing to verify.
         self._step("9/10", "VERIFY + SECURITY SCORE  (Council Review · Verify Gate)")
-        vulns = list(self.context.confirmed_vulns)
+        vulns = _exclude_network_findings(self.context.confirmed_vulns)
         if not vulns:
             print(f"  {C.G}No vulnerabilities to patch.{C.RST}")
             return
@@ -4618,7 +4634,7 @@ class CyphexEngine:
             med = sum(1 for v in remaining if v.severity == "Medium")
             low = sum(1 for v in remaining if v.severity in ("Low", "Info"))
         else:
-            vulns = self.context.confirmed_vulns if self.context else []
+            vulns = _exclude_network_findings(self.context.confirmed_vulns if self.context else [])
             crit = sum(1 for v in vulns if v.severity == "Critical")
             high = sum(1 for v in vulns if v.severity == "High")
             med = sum(1 for v in vulns if v.severity == "Medium")
