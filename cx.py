@@ -387,7 +387,7 @@ QUICK_HELP = f"""
 COMMANDS = [
     "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
     "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/verify", "/status", "/runs", "/doctor",
-    "/models", "/webhook", "/github", "/version", "/history", "/clear", "/exit", "/quit", "/help",
+    "/models", "/llm", "/webhook", "/github", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
 def _completer(text, state):
@@ -1282,6 +1282,84 @@ def _cmd_github(arg: str):
     _dim("whole group together. No token -> that repo is scanned alone, as normal.")
 
 
+def _llm_provider():
+    # Loaded by path (stdlib-only module), same reason as _notify(): sys.path shadowing in this process.
+    import importlib.util
+    if "cyphex_llm_provider" not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            "cyphex_llm_provider", os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend", "llm_provider.py"))
+        sys.modules["cyphex_llm_provider"] = mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return sys.modules["cyphex_llm_provider"]
+
+
+def _cmd_llm(arg: str):
+    """Use your own OpenAI-compatible LLM (a hosted API or a self-hosted SLM) instead of local Ollama."""
+    prov = _llm_provider()
+    parts = arg.split()
+    sub = parts[0].lower() if parts else ""
+
+    if sub in ("local", "off", "clear", "remove"):
+        _ok("Back to local Ollama.") if prov.clear() else _warn("No saved hosted LLM to remove.")
+        if os.environ.get("CYPHEX_LLM_BASE_URL"):
+            _warn("CYPHEX_LLM_* environment variables are still set and override this.")
+        return
+
+    cfg = prov.load()
+    if not parts or sub == "status":
+        print(f"\n  {C.CYAN}{C.BOLD}LLM provider{C.RST}")
+        if prov.active():
+            src = "environment" if os.environ.get("CYPHEX_LLM_BASE_URL") else "saved by /llm"
+            print(f"  {C.NEON}●{C.RST} Hosted: {prov.label(cfg)}  {C.GREY}key {prov.mask(cfg.get('api_key', ''))} · {src}{C.RST}")
+            if len(prov.all_models(cfg)) > 1:
+                print(f"  {C.GREY}  council review also uses: {', '.join(prov.all_models(cfg)[1:])}{C.RST}")
+        else:
+            print(f"  {C.NEON}●{C.RST} Local Ollama {C.GREY}(default){C.RST}")
+        _dim("Use your own:  /llm set   (or  /llm <base-url> <api-key> [model])   ·   Test:  /llm test   ·   Back to local:  /llm local")
+        return
+
+    if sub == "test":
+        if not prov.active():
+            return _warn("No hosted LLM configured. Use /llm set")
+        res = prov.check(cfg["base_url"], cfg.get("api_key", ""), cfg["model"])
+        _ok(f"Working: {prov.label(cfg)} replied '{res['reply']}'") if res["ok"] else _err(res["error"])
+        return
+
+    if sub == "set":
+        parts = parts[1:]
+    interactive = not parts
+    try:
+        import getpass
+        url = parts[0] if parts else input("  Base URL (e.g. https://api.openai.com/v1): ").strip()
+        key = parts[1] if len(parts) > 1 else getpass.getpass("  API key (hidden; Enter if the server needs none): ").strip()
+        model = parts[2] if len(parts) > 2 else ""
+    except (EOFError, KeyboardInterrupt):
+        return _warn("Cancelled.")
+    _spinner("Testing the connection…")
+    res = prov.check(url, key, model)
+    if not res["ok"]:
+        return _err(res["error"])
+    extra = []
+    if interactive:
+        try:
+            if not model and len(res["models"]) > 1:
+                print(f"  {C.GREY}Models: {', '.join(res['models'][:12])}{' …' if len(res['models']) > 12 else ''}{C.RST}")
+                pick = input(f"  Model [Enter = {res['model']}]: ").strip()
+                if pick and pick != res["model"]:
+                    res = prov.check(url, key, pick)
+                    if not res["ok"]:
+                        return _err(res["error"])
+            second = input("  Extra model for council review (optional, Enter to skip): ").strip()
+            extra = [second] if second and second != res["model"] else []
+        except (EOFError, KeyboardInterrupt):
+            return _warn("Cancelled.")
+    cfg = {"base_url": res["base_url"], "api_key": key, "model": res["model"], "extra_models": extra}
+    prov.save(cfg)
+    _ok(f"Connected: {prov.label(cfg)}  (key {prov.mask(key)})")
+    _warn(f"Scans will now send code snippets and findings to {prov.label(cfg).split(' via ')[-1]}. "
+          f"Use /llm local to go back to Ollama.")
+
+
 def _cmd_models():
     """List available Ollama models."""
     print()
@@ -1405,6 +1483,9 @@ def _handle(line: str):
 
         case "/models":
             _cmd_models()
+
+        case "/llm":
+            _cmd_llm(arg)
 
         case "/webhook" | "/webhooks":
             _cmd_webhook(arg)

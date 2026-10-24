@@ -81,6 +81,10 @@ from immune.mutation_engine import MutationEngine
 from immune.evolution_controller import EvolutionController
 from models.scan import ScanContext, FormData, ParamData, Vuln
 from cyphex import notify as buddy
+try:  # user-configured OpenAI-compatible LLM (/llm); inactive unless configured
+    from backend import llm_provider
+except ImportError:
+    import llm_provider
 from config import config as cyphex_config
 
 try:
@@ -748,7 +752,8 @@ class CyphexEngine:
             docker_hint = "docker.com/products/docker-desktop"
         tools.append(("Docker", docker_ok, docker_hint))
 
-        # Ollama
+        # Ollama (skipped entirely when the user brought their own hosted LLM via /llm)
+        hosted = llm_provider.active()
         ollama_ok = False
         ollama_models = []
         try:
@@ -758,7 +763,7 @@ class CyphexEngine:
         except Exception:
             pass
 
-        if not ollama_ok and shutil.which("ollama"):
+        if not hosted and not ollama_ok and shutil.which("ollama"):
             print(f"  {C.GHOST}│{C.RST}  {C.Y}⚠ Ollama server offline — auto-starting...{C.RST}")
             if sys.platform == "darwin":
                 subprocess.run(["open", "-a", "Ollama"], capture_output=True)
@@ -788,7 +793,9 @@ class CyphexEngine:
         except Exception:
             pass
             
-        if not ollama_ok:
+        if hosted:
+            tools.append(("LLM", True, llm_provider.label()))
+        elif not ollama_ok:
             tools.append(("Ollama", False, "ollama.com (AI council + patching)"))
         else:
             model_str = f"{len(ollama_models)} model(s)" if ollama_models else "no models"
