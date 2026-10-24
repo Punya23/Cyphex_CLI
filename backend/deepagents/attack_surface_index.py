@@ -41,6 +41,15 @@ class AttackSurfaceIndex:
         self.error_signatures: list[str] = []   # SQL errors, stack traces, etc.
         self.confirmed_creds: list[tuple] = []  # (user, pwd, endpoint)
         self.detected_technologies: set[str] = set()
+        # Phase 2 (microservice VAPT): set by cli_engine via
+        # set_service_context() when this scan's target is one node of a
+        # Phase 1 ServiceGraph. None for an ordinary single-service scan.
+        self.service_graph = None
+        self.current_service: str = ""
+
+    def set_service_context(self, service_graph, current_service: str) -> None:
+        self.service_graph = service_graph
+        self.current_service = current_service or ""
 
     def ingest_response(self, url: str, method: str, body: str,
                         status: int, response_body: str, headers: dict = None):
@@ -164,5 +173,23 @@ class AttackSurfaceIndex:
         if self.confirmed_creds:
             lines.append("")
             lines.append(f"Credentials obtained: {len(self.confirmed_creds)}")
-            
+
+        if self.service_graph and self.current_service:
+            downstream = [
+                e for e in self.service_graph.edges
+                if e.source == self.current_service and e.target
+            ]
+            if downstream:
+                lines.append("")
+                lines.append(
+                    f"Known downstream services (this target, '{self.current_service}', "
+                    f"calls these — a credential or token confirmed here may also be "
+                    f"accepted there):"
+                )
+                for e in downstream[:5]:
+                    node = self.service_graph.nodes.get(e.target)
+                    routes = ", ".join(node.routes[:3]) if node and node.routes else "no known routes"
+                    base = node.base_url if node else "?"
+                    lines.append(f"  -> {e.target} ({base}): {routes}")
+
         return "\n".join(lines)

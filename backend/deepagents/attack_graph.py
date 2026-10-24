@@ -36,6 +36,11 @@ class AttackGraph:
         self.privilege_level: str = "none"                       # none → user → admin
         # Priority queue: agent class name → list of override targets
         self.priority_targets: Dict[str, List[str]] = {}
+        # Phase 2 (microservice VAPT): set by cli_engine alongside this
+        # AttackGraph's construction when the scan target is one node of a
+        # Phase 1 ServiceGraph. None for an ordinary single-service scan.
+        self.service_graph = None
+        self.current_service: str = ""
 
     def get_node(self, url: str) -> AttackNode:
         if url not in self.nodes:
@@ -138,6 +143,35 @@ class AttackGraph:
                 action="rce_full_compromise",
                 priority="critical",
             ))
+
+        # ── Credential/token → cross-service pivot (Phase 2 microservice VAPT) ──
+        # Deterministic, same as every other chain here — no LLM guessing an
+        # absolute URL. If this (or an earlier) finding handed us a reusable
+        # credential and the static ServiceGraph shows THIS service calls
+        # another one, propose actually testing it there: target is a real
+        # absolute URL (base_url + route), not a path on this host.
+        if (self.service_graph and self.current_service
+                and (self.confirmed_creds or self.confirmed_tokens)):
+            pivoted = getattr(self, "_pivoted_targets", None)
+            if pivoted is None:
+                pivoted = self._pivoted_targets = set()
+            for edge in self.service_graph.edges:
+                if edge.source != self.current_service or not edge.target:
+                    continue
+                target_node = self.service_graph.nodes.get(edge.target)
+                if not target_node or not target_node.base_url:
+                    continue
+                for route in (target_node.routes[:3] or [""]):
+                    url = target_node.base_url.rstrip("/") + route
+                    if url in pivoted:
+                        continue
+                    pivoted.add(url)
+                    chains.append(AttackEdge(
+                        source=finding.endpoint,
+                        target=url,
+                        action="cross_service_pivot",
+                        priority="critical",
+                    ))
 
         # Sort chains: critical first
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}

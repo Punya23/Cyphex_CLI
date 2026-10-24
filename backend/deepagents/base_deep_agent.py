@@ -132,6 +132,8 @@ class BaseDeepAgent:
                             f"[green]Attack chain discovered:[/green] "
                             f"{edge.action} {edge.source} → {edge.target}"
                         )
+                        if edge.action == "cross_service_pivot":
+                            await self._probe_cross_service(edge, context)
 
         return AgentResult(
             agent=self.__class__.__name__,
@@ -194,6 +196,57 @@ class BaseDeepAgent:
         except Exception as e:
             elapsed = time.time() - t0
             return 0, str(e), elapsed, {}
+
+    async def _probe_cross_service(self, edge, context: ScanContext) -> None:
+        """Phase 2 microservice VAPT: the AttackGraph just proposed a
+        cross_service_pivot edge — edge.target is a real absolute URL
+        (base_url + route) on a sibling service. Fire ONE deterministic
+        follow-up request there carrying whatever credential/token this scan
+        has already confirmed, and report it if that service accepts it
+        (authorization not isolated between services). Defensive like every
+        other network call in this class: if the sibling service isn't
+        actually reachable (common until Phase 3's shared deploy exists),
+        this is a silent no-op, never a scan failure."""
+        headers = {}
+        auth = None
+        if self.graph.confirmed_tokens:
+            headers["Authorization"] = f"Bearer {self.graph.confirmed_tokens[-1]}"
+        elif self.graph.confirmed_creds:
+            user, pwd, _source = self.graph.confirmed_creds[-1]
+            auth = (user, pwd)
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                res = await client.get(edge.target, headers=headers, auth=auth)
+        except Exception:
+            return
+
+        if res.status_code and res.status_code < 400:
+            vuln = Vuln(
+                name="Cross-Service Credential Reuse",
+                cwe="CWE-284",
+                severity="High",
+                cvss_score=7.5,
+                endpoint=edge.target,
+                confirmed=True,
+                evidence=res.text[:300],
+                description=(
+                    f"A credential/token confirmed on {edge.source} was accepted "
+                    f"by {edge.target} (HTTP {res.status_code}). Authorization is "
+                    f"not isolated between services — a compromise of one service "
+                    f"reaches the other."
+                ),
+                fix=(
+                    "Scope tokens/credentials to one service (per-service secrets, "
+                    "short-lived service-to-service tokens, mutual TLS) instead of "
+                    "a shared identity every service accepts."
+                ),
+            )
+            self.vulns.append(vuln)
+            console.print(
+                f"[red]Cross-service pivot confirmed:[/red] {edge.source} → {edge.target} "
+                f"(HTTP {res.status_code})"
+            )
 
     async def _record_evidence(self, context: ScanContext, request: HttpRequest,
                                 status: int, body: str) -> None:
