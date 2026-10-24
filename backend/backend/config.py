@@ -73,6 +73,7 @@ class CyphexConfig:
 
     # ─── Immune System / Co-Evolution ───
     GENOME_BLOCK_THRESHOLD: float = 0.7      # Anomaly score above this = BLOCK
+    GENOME_CHALLENGE_THRESHOLD: float = 0.3  # ...above this but below BLOCK = CHALLENGE (log, don't block)
     EVOLUTION_GENERATIONS: int = 10           # Default generations per run
     EVOLUTION_PAYLOADS_PER_GEN: int = 20      # Payloads per generation
     GENOME_STORAGE_DIR: str = ""              # Where to save genome state
@@ -120,10 +121,13 @@ class CyphexConfig:
             self.WORKING_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "workdir")
             os.makedirs(self.WORKING_DIR, exist_ok=True)
 
-        # Set genome storage dir
+        # Set genome storage dir. Env override matters for production: the default is
+        # relative to the installed package's own directory, which is rarely where a
+        # deployed container/host wants to keep (or bake in) its genome files.
+        self.GENOME_STORAGE_DIR = os.getenv("CYPHEX_GENOME_STORAGE_DIR", self.GENOME_STORAGE_DIR)
         if not self.GENOME_STORAGE_DIR:
             self.GENOME_STORAGE_DIR = os.path.join(self.WORKING_DIR, "genomes")
-            os.makedirs(self.GENOME_STORAGE_DIR, exist_ok=True)
+        os.makedirs(self.GENOME_STORAGE_DIR, exist_ok=True)
 
 
 # Global config singleton
