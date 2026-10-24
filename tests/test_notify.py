@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -90,7 +91,8 @@ def test_connect_saves_and_scans_use_it(monkeypatch, tmp_path):
     res = n.connect(CHAT)
     assert res == {"ok": True, "label": "Google Chat · spaces/AAA"}
     assert n.webhook_urls() == [CHAT]  # a later scan (even another process) picks it up
-    assert oct((tmp_path / "hooks.json").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # Windows has no POSIX file modes
+        assert oct((tmp_path / "hooks.json").stat().st_mode & 0o777) == "0o600"
 
 
 def test_connect_rejected_or_insecure_is_not_saved(monkeypatch, tmp_path):
