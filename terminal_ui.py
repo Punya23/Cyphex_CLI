@@ -953,6 +953,8 @@ COMMAND_DECK = [
     ("/netwatch", "", "Behavioural network flow monitor (Ctrl+C to stop)"),
     ("/netaudit", "<host>", "Oracle-guided audit of one network host"),
     ("/models", "", "List available local Ollama models"),
+    ("/webhook", "[link]", "Connect Google Chat / Slack — scan updates & PR approvals go there"),
+    ("", "flags", "/webhook remove [n|all]  — or just paste the link"),
     ("/history", "", "Recent intercepts this session"),
     ("/clear", "", "Repaint the canopy"),
     ("/help", "", "This command deck"),

@@ -118,6 +118,8 @@ def main():
     scan_p.add_argument("--generations", type=int, default=10)
     scan_p.add_argument("--output", help="Save report to file")
     scan_p.add_argument("--no-patch", action="store_true", help="Skip patching")
+    scan_p.add_argument("--notify-webhook", action="append", metavar="URL",
+                        help="Slack / Google Chat incoming-webhook URL (repeatable)")
     scan_p.add_argument(
         "--judge",
         action="store_true",
@@ -335,6 +337,8 @@ def main():
         if not args.repo and not args.path:
             print(f"{C.R}Error: Provide --repo or --path{C.RST}")
             return
+        if args.notify_webhook:
+            os.environ["CYPHEX_WEBHOOK_URLS"] = ",".join(args.notify_webhook)
         _clear()
         # Engine prints its own full banner — don't double-print here
         CyphexEngine = _load_engine()
