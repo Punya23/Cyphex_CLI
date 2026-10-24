@@ -32,6 +32,8 @@ The default pytest config deselects `-m integration` (those need a live Ollama).
 | `trace_deck.py` | Live per-phase trace deck + end-of-scan summary. |
 | `nl_router.py` | Plain English → slash command, guardrailed, local Ollama. |
 | `deck_input.py` | Raw-mode single-line editor behind the REPL's boxed input field. |
+| `footer_dock.py` | Pinned bottom footer (status rail + input box + the TV-head buddy, whose faces are the `assets/mascot/expr_*` expressions) via a terminal scroll region; the scan child adopts it through `CYPHEX_DOCK` and pins its hero panel on top of it (`pin_header`; bottom-anchored because a region not starting at row 1 drops scrolled lines instead of saving them to scrollback). No-op without a POSIX TTY. |
+| `ui_palette.py` | **Sole** source of every UI colour (BLOOD SIGNAL roles). `tests/test_palette.py` fails on a hex or truecolor literal anywhere else. |
 | `mascot*.py` | Tiered terminal pixel-art mascot (8 modules). Always imported defensively. |
 | `terminal_ui.py` | All Rich rendering. Every `render_*` function. |
 | `scoring.py` | **Sole** source of truth for the 0-100 posture score. |
@@ -78,7 +80,7 @@ UTF-8 forcing must key off `sys.stdout.encoding`, not the platform — a POSIX b
 | Change what counts as a verified fix | `backend/patch/verifier.py` — then update `tests/test_verifier.py` |
 | Add a maintainer-facing metric | `backend/patch/verify_health.py` → `terminal_ui.py::render_verify_health()` |
 | Add a telemetry event | `self._emit("name", **fields)` in `cli_engine.py`; consume in `backend/observability/health.py` |
-| Add a slash command | `cx.py`: `_cmd_X()` + `COMMANDS` list + `_handle()` case + `main()` argv branch + both help texts. If it should also be a `cyphex <cmd>`, add it to `cyphex/cli.py` — see invariant 8 |
+| Add a slash command | `cx.py`: `_cmd_X()` + `COMMANDS` list + `_handle()` case + `main()` argv branch + a row in `terminal_ui.COMMAND_DECK` (drives both `/help` and the `/` popup; `<arg>` = required, `[arg]` = optional) + `QUICK_HELP`. Path-taking commands also go in `cx._PATH_CMDS` so their argument gets the file picker. If it should also be a `cyphex <cmd>`, add it to `cyphex/cli.py` — see invariant 8 |
 | Add a Rich panel | `terminal_ui.py` — follow `render_verify_health()`'s shape; use `_box(c)` |
 | Change the score | `scoring.py` only |
 | Add a patch template | `backend/patch/templates.py` |

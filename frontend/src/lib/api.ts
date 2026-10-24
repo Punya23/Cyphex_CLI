@@ -44,6 +44,16 @@ export async function startScan(
   return res.json();
 }
 
+/** Kill a running scan on the backend so the next run can start. */
+export async function stopScan(scanId: string): Promise<{ scan_id: string; status: string }> {
+  const res = await fetch(`${API_BASE}/api/scan/${scanId}/stop`, {
+    method: 'POST',
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
 export async function getScan(scanId: string): Promise<ScanMeta> {
   const res = await fetch(`${API_BASE}/api/scan/${scanId}`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`API error: ${res.status}`);
@@ -63,7 +73,7 @@ export async function listScans(): Promise<{ scans: ScanMeta[] }> {
 export async function uploadSandbox(
   file: File,
   onProgress?: (pct: number) => void,
-): Promise<{ sandbox_id: string; port: number; url: string; status: string; error?: string }> {
+): Promise<{ sandbox_id: string; port: number; url: string; status: string; app_file?: string; error?: string }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${API_BASE}/api/sandbox/upload`);

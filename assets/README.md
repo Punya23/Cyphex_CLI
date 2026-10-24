@@ -1,14 +1,24 @@
 # `assets/`
 
-Source art for the terminal mascot, plus the QA render corpus used to check that
-it still looks right after a renderer change.
+Source art for the terminal mascot, the design reference it was drawn from, the QA
+render corpus used to check it still looks right after a renderer change, and the
+README's captured panel screenshots.
 
 | Path | Holds |
 |---|---|
+| `buddy_sheet.png` | **Design reference.** The undamaged sheet — every pose, expression, loop animation and size variant in one image. The `mascot/` PNGs were sliced out of a WhatsApp-compressed copy of this; keep this one as the ground truth for what the art is *supposed* to look like |
+| `buddy_hero.png` | README hero. Rebuilt on its native ~96×102 pixel grid, quantized to 10 flat colours (no blur), stored 2× NEAREST at 192×204 and shown at `width="96"` — an exact 1:1 / 2:1 scale, so browsers never resample it soft. `mascot/hero.png` is the damaged source |
 | `mascot/` | Source PNGs — one per pose/expression, plus `size_16/32/64.png` reference sheets and `hero.png` |
 | `mascot/remastered/` | Output of the repair pass (see below). What actually gets rendered |
 | `qa/` | Rendered PNGs, one per `state × column-width`, for visual diffing |
 | `mascot_qa_halfblock_*.png` | Half-block backend spot checks |
+| `panel_verify.png` · `panel_status.png` | Captured `cyphex verify --selftest` and `cyphex status` panels, embedded in the root README. Regenerate from live repo state — never hand-edit |
+| `banner.png` · `architecture.png` | README wordmark and architecture diagram |
+
+> The two `buddy_*.png` files are **README art, not render input.** Nothing loads them
+> at runtime. `buddy_sheet.png` is the undamaged target a future remaster pass compares
+> against; `buddy_hero.png` shows the character as designed rather than as the terminal
+> renderer currently manages.
 
 Nothing here is imported at scan time. The mascot is decorative and every
 loading path is defensive — a missing asset or a missing Pillow drops a render
@@ -74,9 +84,8 @@ mascot.open_companion_window()    # opt-in: the mascot in its own terminal
 `cx.py`'s `_spinner()` is the main consumer, and it fully stops and erases the
 mascot before returning — the status line must never be left half-drawn.
 
-Colour across the whole UI is a single hue, **MONO SIGNAL RED**; severity and
-hierarchy are carried by brightness inside that hue rather than by different
-colours.
+The UI palette (**BLOOD SIGNAL**, in `ui_palette.py`) is separate from the sprite
+palette: the mascot art keeps its own six designed reds in `mascot_remaster.py`.
 
 ## Regenerating
 
