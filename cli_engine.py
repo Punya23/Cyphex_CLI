@@ -240,6 +240,16 @@ class CyphexEngine:
         self.source_dir = None
         self.service_graph = None   # backend.services.ServiceGraph, set if the
                                      # scan target is a monorepo of microservices
+        # Phase 3: when a multi-service scan runs each node through
+        # _dynamic_scan() in a loop, these hold ONE AttackGraph/ASI/Oracle
+        # reused across every call, so a credential confirmed on service A
+        # is still known when service B is scanned next (what makes Phase
+        # 2's cross_service_pivot land on a live target). A normal
+        # single-service scan never sets these — _dynamic_scan constructs
+        # its own fresh triple exactly as before.
+        self._shared_attack_graph = None
+        self._shared_asi = None
+        self._shared_oracle = None
         self.sandbox_info = None
         self.context = None
         self.vulns = []
@@ -368,32 +378,47 @@ class CyphexEngine:
 
         # Step 3: Deploy sandbox
         self._step("3/9", "DEPLOYING SANDBOX")
-        target_url = await self._deploy(self.source_dir)
-        if not target_url:
-            return
 
-        # Step 3b: Network Security Scan (optional, --network flag)
-        # Runs AFTER the Docker sandbox is deployed so the container's freshly
-        # published app+DB ports are live on the host when the subnet sweep runs.
-        # (Running it before deploy would sweep a network where the target's
-        # ports are still closed — the scan would miss the very thing we deploy.)
-        if network_scan:
-            self._step("3b/9", "NETWORK SECURITY SCAN")
-            await self._run_network_scan()
+        # Phase 3 microservice VAPT: a monorepo of >=2 services gets deployed
+        # together on one Docker network and scanned service-by-service with
+        # a shared attack graph, instead of the single-target flow below.
+        # Falls through to that flow (unchanged) if Docker isn't available or
+        # nothing came up.
+        multi_context = None
+        if self.service_graph and len(self.service_graph.nodes) >= 2:
+            multi_context = await self._multi_service_dynamic_scan(use_deepagents=use_deepagents)
 
-        # Step 4: Dynamic scan (crawl + attack)
-        self._step("4/9", "DYNAMIC VULNERABILITY SCAN")
-        if target_url == "offline_mode":
-            print(f"  {C.Y}[WARN] Sandbox deployment failed. Skipping dynamic scan. Proceeding with static vulnerabilities.{C.RST}")
-            self.context = ScanContext(target_url="http://offline.local")
-            # Inject static endpoints so the Genome can still train profiles
-            for v in file_vulns:
-                ep_path = v.endpoint.split(":")[0]
-                if ep_path not in self.context.all_endpoints:
-                    self.context.all_endpoints.append(ep_path)
+        if multi_context is not None:
+            self._step("4/9", "DYNAMIC VULNERABILITY SCAN (multi-service)")
+            self.context = multi_context
+            self.context.confirmed_vulns.extend(file_vulns)
         else:
-            self.context = await self._dynamic_scan(target_url, use_deepagents=use_deepagents)
-        self.context.confirmed_vulns.extend(file_vulns)
+            target_url = await self._deploy(self.source_dir)
+            if not target_url:
+                return
+
+            # Step 3b: Network Security Scan (optional, --network flag)
+            # Runs AFTER the Docker sandbox is deployed so the container's freshly
+            # published app+DB ports are live on the host when the subnet sweep runs.
+            # (Running it before deploy would sweep a network where the target's
+            # ports are still closed — the scan would miss the very thing we deploy.)
+            if network_scan:
+                self._step("3b/9", "NETWORK SECURITY SCAN")
+                await self._run_network_scan()
+
+            # Step 4: Dynamic scan (crawl + attack)
+            self._step("4/9", "DYNAMIC VULNERABILITY SCAN")
+            if target_url == "offline_mode":
+                print(f"  {C.Y}[WARN] Sandbox deployment failed. Skipping dynamic scan. Proceeding with static vulnerabilities.{C.RST}")
+                self.context = ScanContext(target_url="http://offline.local")
+                # Inject static endpoints so the Genome can still train profiles
+                for v in file_vulns:
+                    ep_path = v.endpoint.split(":")[0]
+                    if ep_path not in self.context.all_endpoints:
+                        self.context.all_endpoints.append(ep_path)
+            else:
+                self.context = await self._dynamic_scan(target_url, use_deepagents=use_deepagents)
+            self.context.confirmed_vulns.extend(file_vulns)
 
         # Merge network findings (if netmap ran in step 3b)
         if hasattr(self, "_network_vulns") and self._network_vulns:
@@ -1407,6 +1432,50 @@ class CyphexEngine:
         except Exception:
             return []
 
+    # Step 3/4, microservice path: deploy every detected service on one
+    # Docker network, then run the normal per-target dynamic scan once per
+    # service, sharing one AttackGraph/ASI/Oracle across the loop.
+    async def _multi_service_dynamic_scan(self, use_deepagents=False):
+        """Phase 3 microservice VAPT. Returns a merged ScanContext on
+        success, or None if the multi-service path can't run at all (no
+        Docker, or zero services came up) — the caller falls back to the
+        existing single-target _deploy()/_dynamic_scan() flow unchanged.
+        Always tears down every container + the network it created, even on
+        an exception mid-scan."""
+        from backend.services.multi_deploy import deploy_service_graph, teardown_service_graph
+
+        print(f"  {C.G}[OK]{C.RST} Deploying {len(self.service_graph.nodes)} service(s) "
+              f"on one Docker network...")
+        deploy_result = await deploy_service_graph(self.source_dir, self.service_graph, self.scan_id)
+        if deploy_result.get("error"):
+            print(f"  {C.Y}[SKIP]{C.RST} Multi-service deploy: {deploy_result['error']}")
+            return None
+        if deploy_result["failed"]:
+            print(f"  {C.Y}[WARN]{C.RST} {len(deploy_result['failed'])} service(s) failed to "
+                  f"deploy: {', '.join(deploy_result['failed'])} — scanning the rest.")
+        if not deploy_result["deployed"]:
+            print(f"  {C.Y}[WARN]{C.RST} No service came up — falling back to single-target scan.")
+            teardown_service_graph(deploy_result)
+            return None
+
+        live_nodes = [self.service_graph.nodes[name] for name in deploy_result["deployed"]]
+        merged_context = ScanContext(target_url=live_nodes[0].base_url)
+        self._shared_attack_graph = self._shared_asi = self._shared_oracle = None
+        try:
+            for node in live_nodes:
+                print(f"\n  {C.G}[OK]{C.RST} Scanning service '{C.CY}{node.name}{C.RST}' "
+                      f"at {node.base_url}")
+                ctx = await self._dynamic_scan(node.base_url, use_deepagents=use_deepagents)
+                merged_context.confirmed_vulns.extend(ctx.confirmed_vulns)
+                merged_context.raw_evidence.extend(ctx.raw_evidence)
+                merged_context.all_endpoints.extend(ctx.all_endpoints)
+                merged_context.all_cookies.update(ctx.all_cookies)
+            merged_context.attack_graph = self._shared_attack_graph
+            return merged_context
+        finally:
+            teardown_service_graph(deploy_result)
+            self._shared_attack_graph = self._shared_asi = self._shared_oracle = None
+
     # Step 4: Dynamic scan
     async def _dynamic_scan(self, target_url, use_deepagents=False):
         """CLI-focused dynamic scan with explicit per-agent visibility."""
@@ -1435,10 +1504,20 @@ class CyphexEngine:
             from backend.deepagents.oracle_attack import AttackOracle
             from backend.council.council_orchestrator import CouncilOrchestrator
             
-            attack_graph = AttackGraph()
-            asi = AttackSurfaceIndex()
-            orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
-            oracle = AttackOracle(orchestrator=orchestrator)
+            # Phase 3: a multi-service scan calls this once per deployed
+            # service and sets _shared_* before the loop so every call
+            # reuses the SAME attack_graph/asi/oracle instead of starting
+            # over — a single-service scan never sets these and gets a
+            # fresh triple exactly as before.
+            if self._shared_attack_graph is not None:
+                attack_graph = self._shared_attack_graph
+                asi = self._shared_asi
+                oracle = self._shared_oracle
+            else:
+                attack_graph = AttackGraph()
+                asi = AttackSurfaceIndex()
+                orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
+                oracle = AttackOracle(orchestrator=orchestrator)
 
             # Phase 2 microservice VAPT: if source_dir turned out to be a
             # monorepo of services (self.service_graph set in Step 1), and
