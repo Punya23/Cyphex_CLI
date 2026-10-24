@@ -78,7 +78,7 @@ async def deploy_service_graph(source_dir: str, graph, scan_id: str) -> dict:
         app_info_by_name[node.name] = _detect_app_type(service_dir)
         dockerfile_path = os.path.join(service_dir, "Dockerfile")
         if not os.path.exists(dockerfile_path):
-            with open(dockerfile_path, "w") as f:
+            with open(dockerfile_path, "w", encoding="utf-8") as f:
                 f.write(_generate_dockerfile(service_dir, app_info_by_name[node.name]))
             generated_dockerfiles.append(dockerfile_path)
 

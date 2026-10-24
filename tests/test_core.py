@@ -185,7 +185,7 @@ class TestConfig:
 
     def test_no_hardcoded_api_key(self):
         config_path = os.path.join(ROOT, "backend", "backend", "config.py")
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             content = f.read()
         assert "csk-" not in content, "Hardcoded Cerebras API key found in config.py!"
 

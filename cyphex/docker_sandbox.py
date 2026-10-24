@@ -156,7 +156,7 @@ async def deploy_docker_sandbox(
     dockerfile_path = os.path.join(source_dir, "Dockerfile")
     generated = False
     if not os.path.exists(dockerfile_path):
-        with open(dockerfile_path, "w") as f:
+        with open(dockerfile_path, "w", encoding="utf-8") as f:
             f.write(_generate_dockerfile(source_dir, app_info))
         generated = True
 
