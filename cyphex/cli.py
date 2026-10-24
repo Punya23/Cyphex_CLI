@@ -457,6 +457,8 @@ def main():
                              help="Deterministic mode for benchmarking (SARIF output)")
     scan_parser.add_argument("--no-patch", action="store_true",
                              help="Skip patch generation step")
+    scan_parser.add_argument("--notify-webhook", action="append", metavar="URL",
+                             help="Slack / Google Chat incoming-webhook URL (repeatable)")
     scan_parser.add_argument("--deepagents", "--deep", action="store_true", dest="deepagents",
                              help="Enable the full DeepAgents Oracle-guided attack swarm (adaptive DAST)")
     scan_parser.add_argument("--network", action="store_true",
@@ -520,10 +522,13 @@ def main():
         if not target:
             scan_parser.error("Provide a target: cyphex scan ./my-app  OR  cyphex scan http://example.com")
 
+        if args.notify_webhook:
+            os.environ["CYPHEX_WEBHOOK_URLS"] = ",".join(args.notify_webhook)
+
         from cli_engine import CyphexEngine
         engine = CyphexEngine()
 
-        is_url = target.startswith("http://") or target.startswith("https://")
+        is_url =target.startswith("http://") or target.startswith("https://")
         is_repo = target.endswith(".git") or (is_url and "github.com" in target)
 
         # Forward the declared flags that were previously parsed and dropped:
