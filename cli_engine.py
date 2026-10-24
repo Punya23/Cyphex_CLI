@@ -336,7 +336,24 @@ class CyphexEngine:
 
         # Step 1: Get source code
         self._step("1/9", "GETTING SOURCE CODE")
-        self.source_dir = await self._get_source(repo_url, local_path, branch)
+
+        # Org-wide microservice discovery: given a single GitHub repo_url,
+        # find its sibling microservices elsewhere in the same org and
+        # assemble them all into this scan's workdir — opt-in via
+        # GITHUB_TOKEN (same env var cyphex/github_hook.py already uses), so
+        # an ordinary scan is completely unaffected. Falls back silently to
+        # the normal single-repo clone on any failure.
+        org_assembly = await self._try_assemble_org(repo_url, branch) if repo_url else None
+        if org_assembly:
+            self.source_dir = os.path.join(WORK_DIR, self.scan_id)
+            siblings = [n for n in org_assembly["cloned"] if n != org_assembly["main_repo"]]
+            if siblings:
+                print(f"  {C.G}[OK]{C.RST} Linked {len(siblings)} sibling repo(s) from "
+                      f"org '{C.CY}{org_assembly['org']}{C.RST}': {', '.join(siblings)}")
+            if org_assembly["failed"]:
+                print(f"  {C.Y}[WARN]{C.RST} Could not clone: {', '.join(org_assembly['failed'])}")
+        else:
+            self.source_dir = await self._get_source(repo_url, local_path, branch)
         if not self.source_dir:
             return
 
@@ -917,6 +934,23 @@ class CyphexEngine:
         return info
 
     # Step 2: Static code analysis
+    async def _try_assemble_org(self, repo_url, branch):
+        """Org-wide microservice discovery for a single GitHub repo_url.
+        Opt-in on GITHUB_TOKEN being set; returns None (caller falls back to
+        the normal single-repo clone) when the token is unset, repo_url
+        isn't a GitHub URL, or discovery fails for any reason — this must
+        never be why a scan can't get its source code."""
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            return None
+        try:
+            from backend.services.github_discovery import discover_and_assemble_org
+            dest = os.path.join(WORK_DIR, self.scan_id)
+            return await discover_and_assemble_org(repo_url, dest, branch or "", token)
+        except Exception as e:
+            print(f"  {C.Y}[SKIP]{C.RST} Org-wide microservice discovery: {str(e)[:80]}")
+            return None
+
     def _detect_microservices(self, source_dir):
         """Phase 1 of microservice VAPT: if this repo is a monorepo of
         services (services.yaml present, or >=2 sibling folders each with
