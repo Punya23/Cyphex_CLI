@@ -14,9 +14,16 @@ Falls back to deterministic pre-flight probes if LLM is unavailable.
 Zero external API cost — runs entirely local through Ollama + agent-reasoning.
 """
 import asyncio
+import json
+import re
 import httpx
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
+
+try:  # user-configured OpenAI-compatible LLM (/llm); inactive unless configured
+    from backend import llm_provider
+except ImportError:
+    import llm_provider
 
 # ── Multi-model role assignments ──────────────────────────────────────────────
 # Each role has a preference list ordered by fitness for the task.
@@ -435,6 +442,22 @@ class AttackOracle:
         model = await _resolve_model_for_role(role)
         strategy = _ROLE_STRATEGY.get(role, "cot")
         print(f"  [DeepAgent:{role}] {model} + {strategy} strategy")
+
+        # A hosted LLM bypasses self.reasoner entirely: CyphexReasoner only calls a model
+        # when the optional agent-reasoning package is installed (rare — pip install agent-reasoning),
+        # and that package talks to Ollama directly, not to an arbitrary OpenAI-compatible endpoint.
+        # self.orchestrator (passed by the real CLI pipeline) is already hosted-LLM-aware; a secondary
+        # caller that constructs AttackOracle() with no orchestrator keeps today's behaviour exactly.
+        if llm_provider.active() and self.orchestrator is not None:
+            try:
+                # orchestrator._call() always returns a parsed dict or raises (never a bare string).
+                return await self.orchestrator._call(
+                    model=model, system=system, prompt=prompt, severity=severity, cwe=cwe,
+                    task_name="Reasoning", show_thinking=False,
+                )
+            except Exception as e:
+                print(f"  [DeepAgent:{role}] hosted LLM failed ({type(e).__name__}) — skipping")
+                return None
 
         async def _run():
             async with _LLM_SEMAPHORE:
