@@ -11,6 +11,7 @@ Usage:
 import asyncio
 import os
 import sys
+import shlex
 import shutil
 import subprocess
 try:
@@ -82,6 +83,14 @@ try:
 except Exception:
     deck_input = None
     RAW_INPUT = False
+
+# Pinned footer (rail + input box + buddy), Claude-Code style. Only used when
+# the raw-mode editor drives input; any other terminal keeps the inline box.
+try:
+    import footer_dock
+except ImportError:
+    footer_dock = None
+
 
 # ── Terminal mascot (optional — _spinner() below just stays a plain line if
 #    unavailable; no-ops itself on non-tty/NO_COLOR either way) ──────────────
@@ -185,7 +194,50 @@ def _input_box_bottom(raw: bool = False):
             pass
 
 
-def _read_command(raw: bool = False) -> str:
+def _dock_rail():
+    if not BOOT_UI:
+        return ""
+    try:
+        width = shutil.get_terminal_size().columns
+        if footer_dock is not None:
+            width -= footer_dock.GUTTER      # the buddy's antenna shares the row
+        return ui.rail_ansi(_session, width)
+    except Exception:
+        return ""
+
+
+def _dock_live(raw: bool) -> bool:
+    """Pin the footer for this turn? Needs the raw editor (it is what paints
+    the box at fixed rows) and a terminal footer_dock accepts. Released again
+    if a turn ever runs without it, so a stale region can't outlive the box."""
+    if footer_dock is None:
+        return False
+    try:
+        if raw and footer_dock.reserve(_dock_rail()):
+            return True
+        footer_dock.release()
+    except Exception:
+        pass
+    return False
+
+
+def _echo_command(line: str):
+    """The box is pinned, so the submitted line would vanish from history on
+    the next turn — echo it into the transcript the way Claude Code does."""
+    if not line:
+        return
+    if BOOT_UI:
+        try:
+            caret, ccol = ui.deck_caret(_session)
+            ui.soc.print(f"[{ccol}]{caret}[/] [{ui.LABEL}]cx ▸[/] [{ui.READOUT}]{line}[/]",
+                         markup=True, highlight=False)
+            return
+        except Exception:
+            pass
+    print(f"{C.GREY}> {line}{C.RST}")
+
+
+def _read_command(raw: bool = False, anchor=None) -> str:
     """Read one command line from the user.
 
     raw=True  → deck_input's raw-mode editor: a complete box while typing,
@@ -200,7 +252,8 @@ def _read_command(raw: bool = False) -> str:
     if raw:
         try:
             return deck_input.read_line(_session, completer=_completer,
-                                        history=_input_history)
+                                        history=_input_history, anchor=anchor,
+                                        suggest=_suggest if anchor else None)
         except (KeyboardInterrupt, EOFError):
             raise                     # the REPL's own arms own these
         except Exception:
@@ -238,20 +291,12 @@ def _print_help():
     print(QUICK_HELP)
 
 
-# ── Colours ── plain-ANSI fallback palette · MONO SIGNAL RED brand ───────────
-# Only used when terminal_ui / rich is unavailable. Mirrors terminal_ui.py's
-# single-hue red ramp so the degraded banner stays on-brand. RED/YEL keep their
-# names as the alert channel, but their VALUES now sit inside the red ramp —
-# a literal red error mark on a red theme reads as body text, so severity is
-# carried by brightness here exactly as it is in terminal_ui.py.
-#
-# The alert marks take the TOP two rungs (APEX for ✗, WARN_HOT for ⚠) plus
-# bold, so the channel is strictly brighter than everything it has to be
-# distinguished from. Placing them mid-ramp does not work: at CAUT the warning
-# mark lands at the same luminance as the muted caption grey (0.172 vs 0.168),
-# and at REF the error mark is byte-identical to NEON, so a failure renders
-# exactly like a command name. Severity ordering here is now strictly
-# monotonic — captions < body < emphasis < warning < error.
+# ── Colours ── plain-ANSI fallback palette ──────────────────────────────────
+# Only used when terminal_ui / rich is unavailable. Values come from
+# ui_palette.py (dependency-free), the same roles terminal_ui uses, so the
+# degraded banner cannot drift from the Rich one. The alert marks are also
+# BOLD: this path has no panels or styled headings, so a bare ⚠ or ✗ in a
+# line of plain text has to carry its own weight.
 #
 # These are raw 24-bit truecolor escapes with no Rich/colorama translation —
 # this class exists specifically for the case where rich itself failed to
@@ -266,31 +311,20 @@ except ImportError:
     pass
 
 
+import ui_palette as _P
+
 C_BOLD = "\033[1m"
 
 
-def _tc(hex_):
-    r, g, b = (int(hex_[i:i + 2], 16) for i in (1, 3, 5))
-    return f"\033[38;2;{r};{g};{b}m"
+_tc = _P.fg
 
 class C:
-    CYAN   = _tc("#D95E62")   # PRIMARY red — wordmark / accents / active
-    NEON   = _tc("#E18E91")   # bright red — command names / high emphasis
-    # Alert channel. Both marks are BOLD, which the rest of the palette is
-    # not, because this path has none of the structure Rich gives the normal
-    # one — no panels, no rules, no styled headings. A bare ⚠ or ✗ sits in a
-    # line of plain terminal text and has to carry its own emphasis, so weight
-    # does the work hue can't in a single-hue theme.
-    #
-    # Bold on the error mark also mirrors terminal_ui's "err": bold WARN. Colour
-    # alone cannot separate it there either: WARN and REF are the same value, so
-    # without the weight an error renders identically to ordinary high-emphasis
-    # text (which is exactly what this fallback did before).
-    RED    = C_BOLD + _tc("#F4E4E1")  # APEX — error mark, peak of the ramp
-    YEL    = C_BOLD + _tc("#EABCB8")  # WARN_HOT — warning mark, one rung below
-    BLUE   = _tc("#D95E62")   # PRIMARY red
-    GREY   = _tc("#8E7174")   # muted red-grey — captions / timestamps
-    MAG    = _tc("#E18E91")   # bright red (legacy alias)
+    CYAN   = _tc(_P.PHOS)             # blood — wordmark / structure
+    NEON   = _tc(_P.REF)              # ice — command names / active
+    RED    = C_BOLD + _tc(_P.WARN)    # arterial — error mark
+    YEL    = C_BOLD + _tc(_P.CAUT)    # amber — warning mark
+    OK     = _tc(_P.OK)               # verified — success
+    GREY   = _tc(_P.LABEL)            # ash — captions / timestamps
     BOLD   = "\033[1m"
     DIM    = "\033[2m"
     RST    = "\033[0m"
@@ -366,6 +400,167 @@ def _completer(text, state):
         return options[state]
     return None
 
+# ── "/" and "@" popup menus — the deck_input read_line(suggest=...) provider ──
+# "/" at the start of the line lists commands (from terminal_ui.COMMAND_DECK,
+# the same table /help renders); "@" anywhere, or the argument of a command
+# that takes a path, lists files under the working directory.
+_PATH_CMDS = {"/scan", "/deep", "/deepagents", "/full", "/verify", "/status",
+              "/benchmark", "/bench"}
+#: Never indexed for "@": VCS/tooling/dependency trees and scan sandboxes —
+#: thousands of files nobody means to pick, and slow to walk.
+_INDEX_SKIP = {".git", "node_modules", ".venv", "venv", "__pycache__",
+               ".mypy_cache", ".pytest_cache", "dist", "build", ".cyphex",
+               ".claude", ".graphify", "graphify-out", "sandboxes", ".next"}
+_INDEX_MAX = 5000          # entries; a bigger tree is still reachable by typing a dir/
+_INDEX_BUDGET_S = 0.3      # wall-clock cap on one walk, so the popup never stalls
+_INDEX_TTL_S = 30.0        # re-walk after this, so new files show up
+_MENU_LIMIT = 50           # matches handed to the popup (it scrolls within them)
+_index_cache = {"cwd": None, "at": 0.0, "items": []}
+
+
+def _file_index():
+    """Relative paths under cwd, breadth-first (shallow entries first, so the
+    cap and the time budget cut the deep tail, not the top level); dirs end
+    with "/"."""
+    cwd = os.getcwd()
+    now = time.monotonic()
+    c = _index_cache
+    if c["cwd"] == cwd and now - c["at"] < _INDEX_TTL_S:
+        return c["items"]
+    items, queue, deadline = [], [""], now + _INDEX_BUDGET_S
+    while queue and len(items) < _INDEX_MAX and time.monotonic() < deadline:
+        rel = queue.pop(0)
+        try:
+            entries = sorted(os.scandir(os.path.join(cwd, rel) if rel else cwd),
+                             key=lambda e: e.name.lower())
+        except OSError:
+            continue
+        for e in entries:
+            if e.name.startswith("."):
+                continue
+            try:
+                is_dir = e.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                if e.name in _INDEX_SKIP:
+                    continue
+                items.append(rel + e.name + "/")
+                queue.append(rel + e.name + "/")
+            else:
+                items.append(rel + e.name)
+    c.update(cwd=cwd, at=now, items=items)
+    return items
+
+
+def _subsequence(q, s):
+    it = iter(s)
+    return all(ch in it for ch in q)
+
+
+def _path_items(q, at):
+    """File suggestions for a partial path `q`. A path-like q ("src/", "./x",
+    "~/Doc") lists that directory; a bare word fuzzy-searches the index."""
+    Sug = deck_input.Suggestion
+    if q == "" or "/" in q or q.startswith(("~", ".")):
+        typed_dir = q[:len(q) - len(os.path.basename(q))]
+        base = os.path.basename(q).lower()
+        target = os.path.expanduser(typed_dir) or "."
+        found = []
+        try:
+            for e in os.scandir(target):
+                if e.name.startswith(".") and not base.startswith("."):
+                    continue
+                if not e.name.lower().startswith(base):
+                    continue
+                try:
+                    is_dir = e.is_dir()
+                except OSError:
+                    continue
+                if is_dir and e.name in _INDEX_SKIP and base != e.name.lower():
+                    continue                  # still reachable by typing it in full
+                found.append(typed_dir + e.name + ("/" if is_dir else ""))
+                if len(found) >= 500:
+                    break
+        except OSError:
+            return []
+        paths = sorted(found, key=lambda p: (not p.endswith("/"), p.lower()))
+    else:
+        ql = q.lower()
+        ranked = []
+        for p in _file_index():
+            name = os.path.basename(p.rstrip("/")).lower()
+            pl = p.lower()
+            if name.startswith(ql):
+                rank = 0
+            elif ql in name:
+                rank = 1
+            elif ql in pl:
+                rank = 2
+            elif _subsequence(ql, pl):
+                rank = 3
+            else:
+                continue
+            ranked.append((rank, len(p), p))
+        paths = [p for _, _, p in sorted(ranked)]
+    out = []
+    for p in paths[:_MENU_LIMIT]:
+        is_dir = p.endswith("/")
+        final = shlex.quote(p) if any(ch.isspace() for ch in p) else p
+        out.append(Sug(p, "directory" if is_dir else "file", final + " ",
+                       False, (("@" if at else "") + p) if is_dir else None))
+    return out
+
+
+def _command_items(q):
+    Sug = deck_input.Suggestion
+    rows = getattr(ui, "COMMAND_DECK", None) if BOOT_UI else None
+    if not rows:
+        rows = [(c, "", "") for c in COMMANDS]
+    ql = q.lower()
+    ranked = []
+    for i, (cmd, arg, desc) in enumerate(rows):
+        if not cmd:
+            continue                          # a "flags" note row, not a command
+        if cmd.startswith(ql):
+            rank = 0
+        elif ql[1:] and ql[1:] in cmd:
+            rank = 1
+        elif len(ql) > 3 and ql[1:] in desc.lower():
+            rank = 2                          # 3+ letters: fewer accidental hits
+        else:
+            continue
+        alias = arg.startswith("/")            # e.g. /exit's "/quit"
+        takes_arg = bool(arg) and not alias
+        required = arg.startswith("<")
+        label = cmd if not takes_arg else f"{cmd} {arg}"
+        # A required argument inserts "cmd " and keeps editing (the file popup
+        # opens for path commands); anything else runs on Enter.
+        ranked.append((rank, i, Sug(label, desc + (f"  (also {arg})" if alias else ""),
+                                    cmd + (" " if required else ""), not required,
+                                    cmd + " " if takes_arg else None)))
+    return [it for _, _, it in sorted(ranked, key=lambda r: (r[0], r[1]))]
+
+
+def _suggest(text, pos):
+    """deck_input suggest= provider: (start, end, [Suggestion]) or None."""
+    before = text[:pos]
+    if before.startswith("/") and not any(ch.isspace() for ch in before):
+        end = len(text.split(None, 1)[0]) if text.strip() else pos
+        return 0, max(end, pos), _command_items(before)
+    start = max(before.rfind(" "), before.rfind("\t")) + 1
+    nxt = text.find(" ", pos)
+    end = len(text) if nxt < 0 else nxt
+    token = text[start:pos]
+    if token.startswith("@"):
+        return start, end, _path_items(token[1:], at=True)
+    first = before.split(None, 1)[0] if before.strip() else ""
+    if (first.lower() in _PATH_CMDS and before[:start].strip() == first
+            and not token.startswith("-")):
+        return start, end, _path_items(token, at=False)
+    return None
+
+
 if readline:
     readline.set_completer(_completer)
     readline.parse_and_bind("tab: complete")
@@ -430,6 +625,15 @@ def _run_cyphex(args: list[str]):
     """Delegate to the existing cyphex_cli.py with the given args."""
     script = os.path.join(os.path.dirname(__file__), "cyphex_cli.py")
     cmd = [sys.executable, script] + args
+    if footer_dock is not None:
+        # Static here; a scan child adopts the footer and animates it itself
+        # (two processes animating the same rows would interleave paints).
+        what = next((a for a in args if not a.startswith("-")), "")
+        try:
+            footer_dock.start_task(f"running {os.path.basename(what) or what}".strip(),
+                                   state="working", animate=False)
+        except Exception:
+            pass
     try:
         subprocess.run(cmd)
     except KeyboardInterrupt:
@@ -779,7 +983,7 @@ def _cmd_verify(arg: str):
     if ci:
         code = compute_gate_exit_code(report)
         label = {0: "PASS — gate healthy", 1: "DEGRADED", 2: "UNUSABLE"}[code]
-        color = C.NEON if code == 0 else (C.YEL if code == 1 else C.RED)
+        color = C.OK if code == 0 else (C.YEL if code == 1 else C.RED)
         print(f"\n  {color}{C.BOLD}[CI] Verify Gate: {label} (exit {code}){C.RST}")
         return code
     return None
@@ -1105,30 +1309,56 @@ def _repl():
     _show_header()
 
     while True:
-        # Persistent deck: repaint the status rail before each prompt so posture
-        # is always honest. Static snapshot per turn — the animated deck only
-        # runs inside rich.Live during operations, never against readline.
-        _deck()
         # ONE decision per turn, threaded through all four calls below: either
         # deck_input's editor paints the whole box (walls up while typing), or
         # _input_box_top/_input_box_bottom do (walls up after Enter). The
         # submitted field looks the same either way; only the live one differs.
         raw = _raw_input_live()
-        _input_box_top(raw)
+        docked = _dock_live(raw)
+        anchor = None
+        if docked:
+            # Pinned footer: rail + buddy + box live below the scroll region,
+            # so output scrolls above them instead of carrying them away.
+            try:
+                anchor = footer_dock.begin_input(_dock_rail())
+            except Exception:
+                anchor = None
+            if anchor is None:          # footer failed: this turn goes inline
+                docked = False
+                try:
+                    footer_dock.release()
+                except Exception:
+                    pass
+        if not docked:
+            # Persistent deck: repaint the status rail before each prompt so
+            # posture is always honest. Static snapshot per turn.
+            _deck()
+            _input_box_top(raw)
         try:
-            line = _read_command(raw).strip()
+            line = _read_command(raw, anchor).strip()
         except KeyboardInterrupt:
             # Ctrl+C → new line, don't quit
-            _input_box_bottom(raw)
-            print()
+            if docked:
+                footer_dock.end_input()
+            else:
+                _input_box_bottom(raw)
+                print()
             continue
         except EOFError:
             # Ctrl+D → quit
-            _input_box_bottom(raw)
+            if docked:
+                footer_dock.end_input()
+                footer_dock.release()
+            else:
+                _input_box_bottom(raw)
             _goodbye()
             break
 
-        _input_box_bottom(raw)
+        if docked:
+            footer_dock.end_input()
+            _echo_command(line)
+        else:
+            _input_box_bottom(raw)
         _handle(line)
 
 

@@ -36,6 +36,11 @@ except Exception:         # terminal_ui not importable in this context
     def _themed_console(**kw): return Console(**kw)
 console = _themed_console()
 
+# Severity → colour for plain markup lines. From ui_palette (dependency-free)
+# rather than terminal_ui, which may not be importable here.
+import ui_palette as _pal
+_SEV_HEX = {"Critical": _pal.WARN, "High": _pal.HIGH, "Medium": _pal.CAUT, "Low": _pal.LOW}
+
 # Security posture scoring — zero-dependency module, always importable
 # regardless of whether the rich-based SOC UI below is available. This is
 # the ONLY place the score formula and its 20/40/60/80 presentation bands
@@ -178,41 +183,21 @@ except ImportError:
 # others use PATCH_V2_AVAILABLE; both should reflect the same flag.
 PATCH_PIPELINE_AVAILABLE = PATCH_V2_AVAILABLE
 
-class C:
-    """Premium cyber-themed color palette — turquoise/purple/black."""
-    # ── Core palette ──
-    RST    = "\033[0m"
-    BOLD   = "\033[1m"
-    DIM    = "\033[2m"
-    ITALIC = "\033[3m"
-    ULINE  = "\033[4m"
-    # ── MONO SIGNAL RED — names kept, values mirror terminal_ui.py's ramp ──
-    # One hue; severity/hierarchy carried by BRIGHTNESS, never by a second hue.
-    R  = "\033[38;2;225;142;145m"   # bright — error / high
-    G  = "\033[38;2;217;94;98m"     # PRIMARY — success / engaged
-    Y  = "\033[38;2;193;78;91m"     # mid — warning / medium
-    B  = "\033[38;2;142;113;116m"   # muted — info / low
-    M  = "\033[38;2;225;142;145m"   # bright (legacy alias)
-    CY = "\033[38;2;217;94;98m"     # PRIMARY (legacy alias)
-    W  = "\033[38;2;225;208;210m"   # readout — primary prose
-    # ── True-color ramp ──
-    CYAN   = "\033[38;2;217;94;98m"      # PRIMARY — wordmark / structure
-    CYAN2  = "\033[38;2;193;78;91m"      # mid — caution / secondary
-    PURPLE = "\033[38;2;109;44;49m"      # dim — borders, rails, low emphasis
-    PURP2  = "\033[38;2;225;142;145m"    # bright — high emphasis / active
-    NEON   = "\033[38;2;217;94;98m"      # PRIMARY — success
-    FLAME  = "\033[38;2;234;188;184m"    # peak — critical (brightest = urgent)
-    GHOST  = "\033[38;2;142;113;116m"    # muted — captions / dim text
-    SLATE  = "\033[38;2;225;208;210m"    # readout — secondary prose
-    # Backgrounds
-    BG_DARK   = "\033[48;2;10;8;9m"      # VOID — negative space
-    BG_PURPLE = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
-    BG_CYAN   = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
-    BG_RED    = "\033[48;2;26;18;20m"    # PANEL — raised panel fill
+class C(_pal.ANSI):
+    """Plain-escape palette for the engine's non-Rich output. Values come from
+    ui_palette; the extra names here are this module's older role aliases."""
+    CYAN2  = _pal.fg(_pal.CAUT)       # caution / secondary
+    PURPLE = _pal.fg(_pal.PHOS_DIM)   # borders, rails
+    PURP2  = _pal.fg(_pal.REF)        # active / high emphasis
+    NEON   = _pal.fg(_pal.OK)         # success
+    FLAME  = _pal.fg(_pal.WARN)       # critical
+    GHOST  = _pal.fg(_pal.LABEL)      # captions / dim text
+    SLATE  = _pal.fg(_pal.READOUT)    # secondary prose
+    BG_CYAN = _pal.bg(_pal.PANEL)     # raised panel fill
     # Gradient endpoints for the brand rules/dividers below. Kept as RGB
     # triples (not escapes) because C.gradient() interpolates on the numbers.
-    RAMP_HI = (217, 94, 98)               # PRIMARY
-    RAMP_LO = (109, 44, 49)               # dim
+    RAMP_HI = _pal.rgb(_pal.PHOS)
+    RAMP_LO = _pal.rgb(_pal.PHOS_DIM)
 
     @staticmethod
     def gradient(text, r1, g1, b1, r2, g2, b2):
@@ -229,6 +214,19 @@ class C:
 
 WORK_DIR = os.path.join(os.path.dirname(__file__), "backend", "sandboxes")
 os.makedirs(WORK_DIR, exist_ok=True)
+
+
+def _partition_for_council(vulns):
+    """Split findings for the council's false-positive debate into
+    (static_keep, to_validate). STATIC findings ([STATIC] prefix) are
+    deterministic Semgrep/scanner source matches — the ones the patch phase
+    repairs — so they bypass the local-model vote and are always kept; only
+    dynamic/network findings are debated. Keeping static findings out of the
+    vote is what stops a wrong verdict from deleting a patchable vuln and
+    zeroing the after-patch score."""
+    def _static(v):
+        return str(getattr(v, "name", "")).startswith("[STATIC]")
+    return [v for v in vulns if _static(v)], [v for v in vulns if not _static(v)]
 
 
 class CyphexEngine:
@@ -354,7 +352,7 @@ class CyphexEngine:
                             confirmed=False,
                             cwe=ef.cwe,
                         ))
-                        c = "#eabcb8" if sev == "Critical" else "#e18e91" if sev == "High" else "#c14e5b"
+                        c = _SEV_HEX[sev]
                         console.print(f"  [[{c}]{sev}[/{c}]] {ef.name} ({ef.cwe})")
                         console.print(f"       {ef.file_path}:{ef.line_number}")
                         console.print(f"       [dim]{ef.code_snippet[:100]}[/dim]")
@@ -444,6 +442,9 @@ class CyphexEngine:
             print(f"\n  {C.G}[OK]{C.RST} Sandbox stopped.")
 
         self._final_banner()
+
+        # ── Visual HTML report (openable link) ──
+        self._write_html_report(report)
 
     def doctor(self) -> bool:
         """
@@ -550,6 +551,14 @@ class CyphexEngine:
                 self._deck.tty = False  # static repaint; no Live takeover
             self._deck._frame_idx += 1
             console.print(self._deck._renderable())
+            # The buddy and a live status line sit in the pinned footer
+            # (footer_dock) beside the input box; the box above scrolls with
+            # the output, the footer does not.
+            import footer_dock
+            wp = self.trace.current
+            if footer_dock.adopt(console):
+                footer_dock.start_task(f"{wp.num}  {wp.title}",
+                                       state=trace_deck.buddy_state(wp))
         except Exception:
             pass
 
@@ -563,11 +572,6 @@ class CyphexEngine:
         import re as _re
         done = int(_re.sub(r"[^0-9]", "", step_num) or "0")
         total = int(step_total)
-
-        # Mascot cameo announcing the phase transition — brief, self-cleaning,
-        # never held open (each phase's own work handles its own feedback).
-        if MASCOT:
-            mascot.thinking(label=title, flourish=True)
 
         if SOC_UI:
             ui.render_step(done, total, title, elapsed, mode)
@@ -2117,82 +2121,94 @@ class CyphexEngine:
                 ]
 
                 total = len(agents_to_run)
-                # Confirmed live: a `cx deep` run against a trivial dummy app
-                # hard-hung past 10 minutes inside a single agent's
-                # oracle-guided decide() loop (each local-LLM call can itself
-                # take up to ~90s, and the loop is internally bounded but
-                # still large — MAX_HYPOTHESES × MAX_ATTEMPTS_PER_HYPOTHESIS).
-                # Nothing here ever timed out or capped the phase, unlike the
-                # cognee persist step, which uses this exact
-                # wait_for-then-skip pattern. Bound both the phase and each
-                # individual agent so a slow/looping agent degrades the scan
-                # to partial results instead of hanging it indefinitely.
-                phase_deadline = time.time() + cyphex_config.DEEPAGENT_PHASE_BUDGET_S
-                for idx, agent in enumerate(agents_to_run, 1):
-                    if time.time() >= phase_deadline:
-                        skipped = total - idx + 1
-                        print(
-                            f"  {C.Y}[WARN]{C.RST} DeepAgents phase budget "
-                            f"({cyphex_config.DEEPAGENT_PHASE_BUDGET_S:.0f}s) exhausted after "
-                            f"{idx - 1}/{total} agents — skipping remaining {skipped} to keep "
-                            f"the scan bounded (tune via DEEPAGENT_PHASE_BUDGET_S)."
-                        )
-                        break
+                # No wall-clock cap on the swarm: every agent runs its full
+                # oracle-guided loop to completion, so all `total` agents get a
+                # turn no matter how slow the local models are on this hardware.
+                # A previous phase/per-agent budget capped the total time, but a
+                # single cumulative wall let the first ~4 agents consume it and
+                # deterministically starved the last 9 to zero — the opposite of
+                # what a full swarm should do. Termination is still guaranteed
+                # without a timer: each agent is internally bounded
+                # (MAX_HYPOTHESES × MAX_ATTEMPTS_PER_HYPOTHESIS), and every HTTP
+                # probe and Ollama call keeps its own per-request timeout, which
+                # is an inter-chunk stall budget catching a genuinely wedged
+                # socket or hung model — not a cap on how long real work may take.
+                # The swarm runs in parallel groups (like a real red team fans
+                # out): agents in a group run concurrently, groups run in order.
+                # Within a group their fast HTTP probes overlap while the shared
+                # per-model oracle lock serialises same-model LLM inference, so
+                # they never thrash local VRAM. Grouping is by class name so the
+                # split is stable; any agent not named here runs solo at the end
+                # rather than being dropped.
+                GROUP_PLAN = [
+                    ("DeepSQLiAgent", "DeepXSSAgent", "DeepAuthAgent"),
+                    ("DeepPathTraversalAgent", "DeepCMDiAgent", "DeepSSRFAgent",
+                     "DeepIDORAgent", "DeepSSTIAgent", "DeepXXEAgent"),
+                    ("DeepBusinessLogicAgent",),
+                    ("DeepPromptInjectionAgent", "DeepRaceConditionAgent",
+                     "DeepMassAssignmentAgent"),
+                ]
+                by_name = {a.__class__.__name__: a for a in agents_to_run}
+                groups = [[by_name[n] for n in names if n in by_name]
+                          for names in GROUP_PLAN]
+                placed = {n for names in GROUP_PLAN for n in names}
+                extra = [a for a in agents_to_run if a.__class__.__name__ not in placed]
+                if extra:
+                    groups.append(extra)
+                groups = [g for g in groups if g]
+                idx_of = {id(a): i for i, a in enumerate(agents_to_run, 1)}
+
+                if SOC_UI:
+                    ui.render_deepagents_plan(groups, total)
+
+                async def _run_agent(agent):
                     agent_header(
-                        f"DeepAgent {idx}/{total}",
+                        f"DeepAgent {idx_of[id(agent)]}/{total}",
                         f"{agent.__class__.__name__} — {agent.PRIMARY_VULN_CLASS}",
                         "Oracle-Guided Hypothesis Testing",
                     )
+                    short = agent.__class__.__name__.replace("Deep", "").replace("Agent", "")
                     try:
-                        res = await asyncio.wait_for(
-                            agent.run(context),
-                            timeout=cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S,
-                        )
-                        self._emit("deepagent_result", agent=agent.__class__.__name__, vulns_found=len(res.vulns))
-                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
-                                        f"{len(res.vulns)} confirmed" if res.vulns else "clean",
+                        res = await agent.run(context)
+                        self._emit("deepagent_result", agent=agent.__class__.__name__,
+                                   vulns_found=len(res.vulns))
+                        self.trace.note(short, f"{len(res.vulns)} confirmed" if res.vulns else "clean",
                                         _T_OK, {"vulns": len(res.vulns)})
                         context.confirmed_vulns.extend(res.vulns)
                         if res.vulns:
-                            print(
-                                f"  {C.NEON}✓{C.RST} {C.BOLD}{agent.__class__.__name__}{C.RST} "
-                                f"confirmed {C.R}{len(res.vulns)} vuln(s){C.RST}"
-                            )
-                        # Display any new attack chains
-                        if attack_graph.edges:
-                            print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
-                    except (asyncio.TimeoutError, TimeoutError):
-                        # wait_for cancels agent.run() mid-flight, so its return
-                        # value (and any attack-graph edges it was about to emit)
-                        # are lost. But an agent's confirmed findings accumulate
-                        # live on agent.vulns — including anything its fast
-                        # preflight already nailed down before the slow oracle
-                        # loop hung. Salvage those instead of discarding a real,
-                        # confirmed vuln just because the deeper phase ran long.
+                            print(f"  {C.NEON}✓{C.RST} {C.BOLD}{agent.__class__.__name__}{C.RST} "
+                                  f"confirmed {C.R}{len(res.vulns)} vuln(s){C.RST}")
+                        return len(res.vulns)
+                    except Exception as e:
+                        # Confirmed findings accumulate live on agent.vulns, so a
+                        # crash mid-run keeps whatever it already nailed down.
+                        # (CancelledError is BaseException, not Exception, so a
+                        # real Ctrl+C still propagates and aborts the scan.)
                         salvaged = list(getattr(agent, "vulns", []) or [])
                         if salvaged:
                             context.confirmed_vulns.extend(salvaged)
-                        self._emit("deepagent_timeout", agent=agent.__class__.__name__,
-                                   salvaged=len(salvaged))
-                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
-                                        f"timed out ({len(salvaged)} salvaged)" if salvaged else "timed out",
-                                        _T_WARN, {"salvaged": len(salvaged)})
-                        salvage_note = (
-                            f" (kept {len(salvaged)} confirmed vuln(s) found before the hang)"
-                            if salvaged else ""
-                        )
-                        print(
-                            f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} timed out after "
-                            f"{cyphex_config.DEEPAGENT_PER_AGENT_TIMEOUT_S:.0f}s (oracle-guided "
-                            f"loop too slow on this hardware) — skipping to the next agent{salvage_note}."
-                        )
-                        continue
-                    except Exception as e:
-                        self._emit("deepagent_error", agent=agent.__class__.__name__, error=str(e)[:200])
-                        self.trace.note(agent.__class__.__name__.replace("Deep", "").replace("Agent", ""),
-                                        f"error: {str(e)[:40]}", _T_FAIL)
-                        print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: {str(e)[:100]}")
-                        continue
+                        self._emit("deepagent_error", agent=agent.__class__.__name__,
+                                   error=str(e)[:200], salvaged=len(salvaged))
+                        self.trace.note(short, f"error: {str(e)[:40]}", _T_FAIL,
+                                        {"salvaged": len(salvaged)})
+                        note = (f" (kept {len(salvaged)} confirmed vuln(s) found first)"
+                                if salvaged else "")
+                        print(f"  {C.Y}[WARN]{C.RST} {agent.__class__.__name__} failed: "
+                              f"{str(e)[:100]}{note}")
+                        return len(salvaged)
+
+                for gi, group in enumerate(groups, 1):
+                    if SOC_UI:
+                        ui.render_deepagents_group(gi, len(groups), group)
+                    counts = await asyncio.gather(*[_run_agent(a) for a in group],
+                                                  return_exceptions=True)
+                    found = sum(c for c in counts if isinstance(c, int))
+                    if SOC_UI:
+                        ui.render_deepagents_group_result(gi, found)
+                    else:
+                        print(f"    [OK] Group {gi}: {found or 'No'} vuln(s) found")
+                    if attack_graph.edges:
+                        print(f"  {C.CYAN}▸ Attack chains: {len(attack_graph.edges)} discovered{C.RST}")
 
                 # Keep the graph on the context so later steps (Security
                 # Report) can reference it without threading a new param
@@ -2205,17 +2221,25 @@ class CyphexEngine:
                     for i, e in enumerate(attack_graph.edges, 1):
                         print(f"  {i:>2}. [{e.priority}] {e.source}  ──{e.action}──▶  {e.target}")
 
-            if COUNCIL_AVAILABLE and context.confirmed_vulns:
+            # The council debates only DYNAMIC findings (probe/LLM-inferred, so
+            # false-positive-prone). STATIC findings are deterministic source-
+            # pattern matches from Semgrep + the built-in scanner — the exact
+            # findings the patch phase repairs — so they are NEVER put to a
+            # local-model vote: a wrong "false positive" verdict there would
+            # delete a real, patchable vuln and silently zero out the after-patch
+            # score. (This is what the header always said — "validating dynamic
+            # findings" — the code just used to debate the static ones too.)
+            static_keep, to_validate = _partition_for_council(context.confirmed_vulns)
+            if COUNCIL_AVAILABLE and to_validate:
                 try:
                     agent_header("Council", "Multi-Model Debate", "Validating dynamic findings against false positives")
                     debater = DebateProtocol()
-                    original_count = len(context.confirmed_vulns)
-                    validated_vulns = await debater.debate_batch(context.confirmed_vulns)
-
-                    discarded = original_count - len(validated_vulns)
-                    context.confirmed_vulns = validated_vulns
-                    print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} findings. {C.Y}Discarded {discarded} false positives.{C.RST}")
-                except Exception as e:
+                    validated_vulns = await debater.debate_batch(to_validate)
+                    discarded = len(to_validate) - len(validated_vulns)
+                    context.confirmed_vulns = static_keep + validated_vulns
+                    print(f"\n  {C.G}[COUNCIL][OK]{C.RST} Validated {len(validated_vulns)} dynamic finding(s), "
+                          f"kept {len(static_keep)} static. {C.Y}Discarded {discarded} false positive(s).{C.RST}")
+                except Exception:
                     print(f"\n  {C.Y}[COUNCIL][SKIP]{C.RST} Ollama not available — keeping all {len(context.confirmed_vulns)} findings unvalidated")
                     print(f"  {C.DIM}Start Ollama for AI false-positive filtering: ollama serve{C.RST}")
 
@@ -2730,6 +2754,28 @@ class CyphexEngine:
             json.dump(report, f, indent=2)
         print(f"  {C.G}[OK]{C.RST} Report saved to {filepath}")
 
+    def _write_html_report(self, report):
+        """Write the visual HTML report for this scan and print an openable
+        file:// link. Best-effort — a report-render failure never fails a scan
+        that already completed. Before/after posture come off the engine, set
+        by the patch phase."""
+        try:
+            from report_html import write_report_html
+            html_path = write_report_html(
+                report,
+                score_before=getattr(self, "_score_before", None),
+                score_after=getattr(self, "_post_patch_score", None),
+                patches_applied=getattr(self, "_patches_applied", None),
+                patched=getattr(self, "_patched_details", None),
+                remaining=len(getattr(self, "_post_patch_remaining", []) or []),
+                target=getattr(self, "repo_url", None) or getattr(self, "local_path", None),
+            )
+            print(f"\n  {C.G}[OK]{C.RST} {C.BOLD}Visual report{C.RST}  "
+                  f"{C.CY}file://{html_path}{C.RST}")
+            print(f"  {C.DIM}open it →{C.RST} {C.NEON}open \"{html_path}\"{C.RST}")
+        except Exception as e:
+            print(f"  {C.Y}[SKIP]{C.RST} HTML report: {str(e)[:80]}")
+
     def _save_judge_artifacts(self, report: dict):
         """Save deterministic judge artifacts in JSON, Markdown, and SARIF."""
         out_dir = os.path.join(self.source_dir or WORK_DIR, "cyphex_judge_artifacts")
@@ -3030,6 +3076,7 @@ class CyphexEngine:
 
         patch_council = PatchCouncil(thread_id=thread_id) if COUNCIL_AVAILABLE else None
         patched_files = []
+        self._patched_details = []   # {file, cwe, vuln_type} per applied patch, for the HTML report
         verified_count = 0
         template_count = 0
         skipped = 0
@@ -3844,6 +3891,11 @@ class CyphexEngine:
                 with open(p["filepath"], "w", encoding="utf-8") as f: f.writelines(lines)
 
             patched_files.append(p["rel_path"])
+            self._patched_details.append({
+                "file": p["rel_path"],
+                "cwe": p.get("cwe", ""),
+                "vuln_type": p.get("vuln_type", ""),
+            })
             console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']} [dim]({fix_source})[/dim]\n")
 
             # NOTE: Disabled write-back to original source directory.
@@ -4285,6 +4337,17 @@ class CyphexEngine:
             if getattr(self.trace, "waypoints", None):
                 import trace_deck
                 trace_deck.render_trace_summary(self.trace)
+        except Exception:
+            pass
+        # Settle the footer buddy on the outcome; the REPL repaints the idle
+        # footer on its next turn (standalone runs release it at exit).
+        try:
+            import footer_dock
+            from backend.observability.trace import FAIL as _TRACE_FAIL
+            failed = any(w.derived_status() == _TRACE_FAIL
+                         for w in getattr(self.trace, "waypoints", []))
+            footer_dock.stop_task()
+            footer_dock.set_state("error" if failed else "success")
         except Exception:
             pass
         # Cleanup Docker Compose if used

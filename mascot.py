@@ -132,13 +132,9 @@ try:
     from terminal_ui import PHOS, PHOS_DIM, REF, CAUT, WARN_HOT, APEX, LABEL, _fg as _hex_fg
     _ANSI_RESET = "\033[0m"
 except ImportError:
-    # Mirror terminal_ui.py's MONO SIGNAL RED ramp verbatim (same values as
-    # terminal_ui.py:54-65 / HUD_THEME) so the mascot stays on-brand even when
-    # terminal_ui/rich can't be imported. Same convention cx.py already uses
-    # for its own plain-ANSI fallback palette — keep these hex values in sync
-    # with terminal_ui.py by hand if that ramp ever changes.
-    PHOS, PHOS_DIM, REF = "#d95e62", "#6d2c31", "#e18e91"
-    CAUT, WARN_HOT, APEX, LABEL = "#c14e5b", "#eabcb8", "#f4e4e1", "#8e7174"
+    # terminal_ui/rich unavailable: take the same values straight from the
+    # dependency-free palette so the mascot stays on-brand.
+    from ui_palette import PHOS, PHOS_DIM, REF, CAUT, WARN_HOT, APEX, LABEL
 
     def _hex_fg(hexcolor):
         r, g, b = (int(hexcolor[i:i + 2], 16) for i in (1, 3, 5))
@@ -1014,23 +1010,44 @@ class Mascot:
 _singleton = Mascot()
 
 
+def _docked(state, label=""):
+    """Route to the pinned footer buddy when one is live (footer_dock), so the
+    buddy stays next to the input box instead of animating inline and
+    scrolling away with the output. False -> caller renders inline as before."""
+    try:
+        import footer_dock
+        return footer_dock.set_state(state, label or None)
+    except Exception:
+        return False
+
+
 def idle(*, size=DEFAULT_TARGET_COLS):
+    if _docked("idle"):
+        return _NOOP
     return _singleton.idle(size=size)
 
 
 def searching(label="", *, flourish=False, size=DEFAULT_TARGET_COLS):
+    if _docked("searching", label):
+        return _NOOP
     return _singleton.searching(label, flourish=flourish, size=size)
 
 
 def thinking(label="", *, flourish=False, size=DEFAULT_TARGET_COLS):
+    if _docked("thinking", label):
+        return _NOOP
     return _singleton.thinking(label, flourish=flourish, size=size)
 
 
 def success(msg="", *, size=DEFAULT_TARGET_COLS):
+    if _docked("success", msg):
+        return None
     return _singleton.success(msg, size=size)
 
 
 def error(msg="", *, size=DEFAULT_TARGET_COLS):
+    if _docked("error", msg):
+        return None
     return _singleton.error(msg, size=size)
 
 

@@ -2,8 +2,6 @@ import httpx
 import json
 import os
 import re
-import asyncio
-from typing import Optional
 from rich.console import Console
 from rich.panel import Panel
 from rich.live import Live
@@ -46,29 +44,6 @@ def _ollama_timeout() -> httpx.Timeout:
 # GPU probing. Small/low-end hardware stays at 4096 (also the cyphex-patch
 # Modelfile pin); mid gets 6144; high/ultra get 8192 for the non-pinned
 # reasoning/review models.
-_TIER_CTX = {
-    "minimal": 4096,
-    "low":     4096,
-    "cloud":   4096,
-    "mid":     6144,
-    "high":    8192,
-    "ultra":   8192,
-}
-_CTX_CACHE: Optional[int] = None
-
-
-def ctx_for_tier() -> int:
-    """Return the num_ctx to use, based on detected hardware tier (cached)."""
-    global _CTX_CACHE
-    if _CTX_CACHE is None:
-        try:
-            from cyphex.hardware import detect_mode
-            _CTX_CACHE = _TIER_CTX.get(detect_mode(), 4096)
-        except Exception:
-            _CTX_CACHE = 4096
-    return _CTX_CACHE
-
-
 def is_approved_vote(value) -> bool:
     """
     Strictly interpret a council vote's "approved"/"confirmed" field.
@@ -204,7 +179,8 @@ class VRAMManager:
 
     async def ensure_loaded(self, model: str):
         if model in self.loaded:
-            return
+            return                       # already resident — no load, no log
+        console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
         # If adding this model would exceed budget, unload least-recently-used
         cost = self.VRAM_COST.get(model, 2.0)
         while sum(self.loaded.values()) + cost > self.VRAM_LIMIT and self.loaded:
@@ -301,7 +277,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
         self._reasoning_calls = 0
 
     async def _call(self, model: str, system: str, prompt: str, task_name: str = "Reasoning",
-                    severity: str = "", cwe: str = "", temperature: float = 0.1) -> dict:
+                    severity: str = "", cwe: str = "", temperature: float = 0.1,
+                    show_thinking: bool = True) -> dict:
         """
         Call a model and return parsed JSON.
         Routes through Oracle agent-reasoning when available (adds CoT/reflection).
@@ -310,9 +287,11 @@ ANTI-HALLUCINATION RULES — apply on every response:
 
         temperature: sampling temperature (default 0.1 for deterministic reasoning).
         Self-consistency uses a higher value to diversify candidate patches.
+        show_thinking: print the per-call strategy/thinking chatter. False for
+        the DeepAgents oracle, which renders its own compact panels — otherwise
+        the same reasoning text is shown three times per probe.
         """
-        console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
-        await self.vram.ensure_loaded(model)
+        await self.vram.ensure_loaded(model)   # logs only when it actually loads
 
         # Determine reasoning task type from task_name
         task_type_map = {
@@ -328,7 +307,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
         if self.reasoner and self.reasoner.is_enhanced:
             try:
                 strategy = self.reasoner.select_strategy(task_type, severity, cwe)
-                console.print(f"[dim]  ◈ Agent-Reasoning: {strategy} strategy[/dim]")
+                if show_thinking:
+                    console.print(f"[dim]  ◈ Agent-Reasoning: {strategy} strategy[/dim]")
                 result = self.reasoner.generate(
                     model=model,
                     prompt=prompt,
@@ -346,7 +326,8 @@ ANTI-HALLUCINATION RULES — apply on every response:
                     except json.JSONDecodeError:
                         parsed = self._extract_json_robust(clean)
                     if parsed and isinstance(parsed, dict):
-                        console.print(f"[dim]  ◈ Reasoning complete ({result.strategy}, {result.duration_ms:.0f}ms)[/dim]")
+                        if show_thinking:
+                            console.print(f"[dim]  ◈ Reasoning complete ({result.strategy}, {result.duration_ms:.0f}ms)[/dim]")
                         return parsed
             except Exception as e:
                 console.print(f"[dim]  ◈ Agent-reasoning fallback: {str(e)[:60]}[/dim]")
@@ -435,7 +416,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 # Extract and display thinking from the JSON
                 if isinstance(parsed, dict) and "thinking" in parsed:
                     thinking_content = str(parsed["thinking"]).strip()
-                    if thinking_content:
+                    if thinking_content and show_thinking:
                         console.print(Panel(thinking_content, title=f"[{model}] Thinking Process", border_style="blue"))
                     
                 # Display the decision if applicable
