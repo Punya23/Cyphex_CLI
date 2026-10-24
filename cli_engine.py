@@ -976,8 +976,35 @@ class CyphexEngine:
             )
         else:
             print(f"  {C.G}[OK]{C.RST} Loaded {len(graph.nodes)} service(s) from services.yaml")
-        for line in graph.describe().split("\n"):
-            print(f"  {C.DIM}{line}{C.RST}")
+
+        # Don't bury this in a one-line summary — show every detected
+        # service's actual directory and routes, same table style as the
+        # rest of the scan's Rich output.
+        table = Table(title="Detected Microservices", box=ROUNDED, border_style="cyan",
+                      title_style="bold cyan", header_style="bold magenta")
+        table.add_column("Service", style="cyan")
+        table.add_column("Path", style="dim")
+        table.add_column("Language", justify="center")
+        table.add_column("Routes")
+        for node in graph.nodes.values():
+            abs_path = os.path.join(source_dir, node.path)
+            routes = ", ".join(node.routes[:4]) if node.routes else "[dim]none found[/dim]"
+            if len(node.routes) > 4:
+                routes += f" [dim]+{len(node.routes) - 4} more[/dim]"
+            table.add_row(node.name, abs_path, node.language or "?", routes)
+        console.print(table)
+
+        resolved = [e for e in graph.edges if e.target]
+        if resolved:
+            console.print(f"  [cyan]▸ Cross-service calls ({len(resolved)}):[/cyan]")
+            for e in resolved[:10]:
+                console.print(f"    [dim]{e.source}[/dim] → [dim]{e.target}[/dim]  ({e.file})")
+        unresolved = graph.unresolved_edges()
+        if unresolved:
+            print(
+                f"  {C.Y}[WARN]{C.RST} {len(unresolved)} outbound call(s) could not be matched "
+                f"to a known service — add base_url/path hints to services.yaml to fix."
+            )
 
     def _analyze_code_files(self, source_dir):
         vulns = []
