@@ -23,7 +23,7 @@ class DeepSQLiAgent(BaseDeepAgent):
 
         has_params = any(
             p.has_numeric_params or p.has_string_params
-            for p in self.asi.endpoints.values()
+            for p in self.asi.snapshot_endpoints().values()
         )
         has_errors = bool(self.asi.error_signatures)
 
@@ -41,7 +41,7 @@ class DeepSQLiAgent(BaseDeepAgent):
     async def _preflight_sqli(self, context: ScanContext) -> None:
         """Rapid fire T1 payloads on all string-param endpoints."""
         from backend.deepagents.oracle_attack import HttpRequest
-        for path, profile in self.asi.endpoints.items():
+        for path, profile in self.asi.snapshot_endpoints().items():
             if not (profile.has_string_params or profile.has_numeric_params):
                 continue
             for param in list(profile.params)[:3]:  # Top 3 params per endpoint

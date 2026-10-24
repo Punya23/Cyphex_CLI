@@ -18,7 +18,7 @@ class DeepPathTraversalAgent(BaseDeepAgent):
         if not self.asi.endpoints:
             return AgentResult(agent=self.__class__.__name__, vulns=[], context=context)
 
-        has_file = any(p.has_file_param for p in self.asi.endpoints.values())
+        has_file = any(p.has_file_param for p in self.asi.snapshot_endpoints().values())
         if not has_file:
             self.console.print("[dim]DeepPathTraversalAgent: no file parameters found, skipping.[/dim]")
             return AgentResult(agent=self.__class__.__name__, vulns=[], context=context)
@@ -30,7 +30,7 @@ class DeepPathTraversalAgent(BaseDeepAgent):
         """Try LFI payloads on all file-type parameters."""
         all_payloads = LFI_T1 + LFI_T2 + LFI_WINDOWS
 
-        for path, profile in self.asi.endpoints.items():
+        for path, profile in self.asi.snapshot_endpoints().items():
             if not profile.has_file_param:
                 continue
             for param in profile.params:

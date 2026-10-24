@@ -17,7 +17,7 @@ class DeepXSSAgent(BaseDeepAgent):
         if not self.asi.endpoints:
             return AgentResult(agent=self.__class__.__name__, vulns=[], context=context)
 
-        has_string = any(p.has_string_params for p in self.asi.endpoints.values())
+        has_string = any(p.has_string_params for p in self.asi.snapshot_endpoints().values())
         if not has_string:
             self.console.print("[dim]DeepXSSAgent: no string parameters found, skipping.[/dim]")
             return AgentResult(agent=self.__class__.__name__, vulns=[], context=context)
@@ -29,7 +29,7 @@ class DeepXSSAgent(BaseDeepAgent):
 
     async def _preflight_xss(self, context: ScanContext) -> None:
         """Try T1 payloads on all string-param endpoints and check reflection."""
-        for path, profile in self.asi.endpoints.items():
+        for path, profile in self.asi.snapshot_endpoints().items():
             if not profile.has_string_params:
                 continue
             for param in list(profile.params)[:3]:

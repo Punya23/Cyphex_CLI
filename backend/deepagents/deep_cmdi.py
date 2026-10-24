@@ -26,7 +26,12 @@ class DeepCMDiAgent(BaseDeepAgent):
 
     async def _preflight_cmdi(self, context: ScanContext) -> None:
         """Try Tier-1 OS command payloads on all parameterised endpoints."""
-        for path, profile in self.asi.endpoints.items():
+        # Snapshot, not self.asi.endpoints directly: this ASI is shared by
+        # every DeepAgent running concurrently, and ingest_response() below
+        # (called by every agent on every HTTP probe) can insert a new
+        # endpoint mid-loop — a real scan crashed here with "dictionary
+        # changed size during iteration".
+        for path, profile in self.asi.snapshot_endpoints().items():
             if not (profile.has_string_params or profile.has_numeric_params):
                 continue
             for param in list(profile.params)[:2]:

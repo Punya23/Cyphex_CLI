@@ -51,6 +51,21 @@ class AttackSurfaceIndex:
         self.service_graph = service_graph
         self.current_service = current_service or ""
 
+    def snapshot_endpoints(self) -> dict:
+        """A safe-to-iterate copy of self.endpoints.
+
+        This ONE instance is shared by every DeepAgent in a scan (passed via
+        context), and ingest_response() below is called on every single HTTP
+        probe ANY agent makes, concurrently (asyncio.gather). A real scan
+        proved this with a traceback: DeepCMDiAgent, DeepSSTIAgent and
+        DeepPathTraversalAgent all crashed with "dictionary changed size
+        during iteration" at `for path, profile in self.asi.endpoints.items()`
+        — another agent's ingest_response() inserted a new endpoint mid-loop.
+        dict(self.endpoints) is a single atomic operation (no await inside),
+        so a snapshot taken synchronously can never itself race; callers must
+        iterate the snapshot, never self.endpoints directly."""
+        return dict(self.endpoints)
+
     def ingest_response(self, url: str, method: str, body: str,
                         status: int, response_body: str, headers: dict = None):
         """

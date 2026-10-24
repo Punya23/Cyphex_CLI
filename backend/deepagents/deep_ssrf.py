@@ -22,10 +22,11 @@ class DeepSSRFAgent(BaseDeepAgent):
         if not self.asi.endpoints:
             return AgentResult(agent=self.__class__.__name__, vulns=[], context=context)
 
-        has_url_params = any(p.has_file_param or p.has_format_param for p in self.asi.endpoints.values())
+        _endpoints_snapshot = self.asi.snapshot_endpoints()
+        has_url_params = any(p.has_file_param or p.has_format_param for p in _endpoints_snapshot.values())
         url_param_endpoints = [
             (path, param)
-            for path, profile in self.asi.endpoints.items()
+            for path, profile in _endpoints_snapshot.items()
             for param in profile.params
             if any(kw in param.lower() for kw in URL_PARAM_KEYWORDS)
         ]
