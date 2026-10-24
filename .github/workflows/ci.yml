@@ -37,16 +37,21 @@ jobs:
               if 'node_modules' in f or '.git' in f:
                   continue
               try:
-                  ast.parse(open(f).read())
+                  # bytes, not text: open(f).read() decodes with the locale
+                  # codepage (cp1252 on Windows), which rejects valid UTF-8
+                  # source; ast.parse(bytes) honours UTF-8 / PEP 263.
+                  ast.parse(open(f, 'rb').read())
               except SyntaxError as e:
                   errors.append(f'{f}: {e}')
+          # ASCII-only output: a piped cp1252 stdout on Windows can't encode
+          # check marks and would crash the step on both pass and fail.
           if errors:
               print('SYNTAX ERRORS:')
               for e in errors:
-                  print(f'  ✗ {e}')
+                  print(f'  x {e}')
               exit(1)
           else:
-              print(f'✓ All Python files parse OK')
+              print('All Python files parse OK')
           "
 
       - name: Run tests
