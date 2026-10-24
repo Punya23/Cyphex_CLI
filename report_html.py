@@ -320,6 +320,39 @@ def _attack_graph(ag) -> str:
     return meta + f'<ul class="chains">{items}</ul>'
 
 
+def _service_topology(sg) -> str:
+    """Phase 1 microservice static map: services found + cross-service calls
+    resolved from source. sg is report['service_graph'] (see
+    backend.services.service_graph.ServiceGraph.to_summary_dict)."""
+    services = sg.get("services") or []
+    if not services:
+        return '<div class="empty">No services detected.</div>'
+    svc_items = "".join(
+        f'<li><span class="node">{_esc(s.get("name", "?"))}</span>'
+        f'<span class="prio">[{_esc(s.get("language") or "?")}]</span>'
+        f'<span class="act">{_esc(", ".join(s.get("routes") or []) or "no routes found")}</span></li>'
+        for s in services
+    )
+    edges = [e for e in (sg.get("edges") or []) if e.get("target")]
+    edge_items = "".join(
+        f'<li><span class="node">{_esc(e.get("source", "?"))}</span>'
+        f'<span class="act">──calls──▶</span>'
+        f'<span class="node">{_esc(e.get("target", "?"))}</span>'
+        f'<span class="prio">[{_esc(e.get("file", ""))}]</span></li>'
+        for e in edges
+    )
+    edge_html = (
+        f'<h3>Cross-service calls ({len(edges)})</h3><ul class="chains">{edge_items}</ul>'
+        if edges else '<div class="empty">No cross-service calls resolved.</div>'
+    )
+    unresolved = int(sg.get("unresolved_count") or 0)
+    note = (
+        f'<div class="patch-rem">{unresolved} outbound call(s) could not be matched '
+        f'to a known service — see services.yaml.</div>' if unresolved else ""
+    )
+    return f'<h3>Services ({len(services)})</h3><ul class="chains">{svc_items}</ul>{edge_html}{note}'
+
+
 def _methodology() -> str:
     rows = "".join(
         f'<li><span class="mth-i">{i}</span>'
@@ -364,6 +397,14 @@ def render_report_html(report: dict, *, score_before=None, score_after=None,
         f'<section><h2>Attack Graph &middot; {len(chains)} chain(s)</h2>'
         f'<div class="card">{_attack_graph(ag)}</div></section>'
         if chains else ""
+    )
+    # Service Topology only appears for a monorepo-of-microservices scan —
+    # most scans have no service_graph at all.
+    sg = report.get("service_graph") or {}
+    service_section = (
+        f'<section><h2>Service Topology &middot; {len(sg.get("services") or [])} service(s)</h2>'
+        f'<div class="card">{_service_topology(sg)}</div></section>'
+        if sg.get("services") else ""
     )
 
     return f"""<!doctype html>
@@ -594,6 +635,7 @@ def render_report_html(report: dict, *, score_before=None, score_after=None,
     <div class="card">{patches_html}</div>
   </section>
 
+  {service_section}
   {attack_section}
 
   <section class="page-break">

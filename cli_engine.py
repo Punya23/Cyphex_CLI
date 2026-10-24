@@ -238,6 +238,8 @@ class CyphexEngine:
         self.trace = _NullTrace()
         self._deck = None
         self.source_dir = None
+        self.service_graph = None   # backend.services.ServiceGraph, set if the
+                                     # scan target is a monorepo of microservices
         self.sandbox_info = None
         self.context = None
         self.vulns = []
@@ -326,6 +328,8 @@ class CyphexEngine:
         self.source_dir = await self._get_source(repo_url, local_path, branch)
         if not self.source_dir:
             return
+
+        self._detect_microservices(self.source_dir)
 
         # Step 2: Analyze code files
         self._step("2/9", "STATIC CODE ANALYSIS")
@@ -886,6 +890,33 @@ class CyphexEngine:
         return info
 
     # Step 2: Static code analysis
+    def _detect_microservices(self, source_dir):
+        """Phase 1 of microservice VAPT: if this repo is a monorepo of
+        services (services.yaml present, or >=2 sibling folders each with
+        their own Dockerfile + manifest), build the static ServiceGraph and
+        tell the user what was found. A single-service repo — the common
+        case — hits none of this and scans exactly as before."""
+        try:
+            from backend.services.service_discovery import detect_and_build_service_graph
+            graph = detect_and_build_service_graph(source_dir)
+        except Exception as e:
+            print(f"  {C.Y}[SKIP]{C.RST} Microservice detection: {str(e)[:80]}")
+            return
+        self.service_graph = graph
+        if not graph:
+            return
+
+        if graph.auto_generated:
+            print(
+                f"  {C.G}[OK]{C.RST} Detected {len(graph.nodes)} services under "
+                f"this folder — wrote {C.CY}services.yaml{C.RST} "
+                f"(base_url is a placeholder; edit it and re-run to refine)."
+            )
+        else:
+            print(f"  {C.G}[OK]{C.RST} Loaded {len(graph.nodes)} service(s) from services.yaml")
+        for line in graph.describe().split("\n"):
+            print(f"  {C.DIM}{line}{C.RST}")
+
     def _analyze_code_files(self, source_dir):
         vulns = []
         patterns = {
@@ -2729,7 +2760,15 @@ class CyphexEngine:
                 for v in vulns
             ],
             "attack_graph": self._attack_graph_summary(),
+            "service_graph": self._service_graph_summary(),
         }
+
+    def _service_graph_summary(self):
+        """Serialize the Phase 1 static ServiceGraph (if this repo turned out
+        to be a monorepo of microservices) for the JSON/HTML report."""
+        if not self.service_graph:
+            return None
+        return self.service_graph.to_summary_dict()
 
     def _attack_graph_summary(self):
         """Serialize the DeepAgents AttackGraph (if the swarm ran) into the
