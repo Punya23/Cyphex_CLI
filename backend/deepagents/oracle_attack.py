@@ -478,11 +478,17 @@ class AttackOracle:
                     )
                 )
 
+        # Every LLM call across every DeepAgent funnels through one serialized
+        # slot (_LLM_SEMAPHORE = Semaphore(1), to prevent Ollama queue
+        # timeouts) — so the real wait a call can face is its own inference
+        # time PLUS however long the agents queued ahead of it take. 120s is
+        # the queue-wait allowance on top of the caller's own budget.
+        total_budget = timeout + 120.0
         try:
-            # Add 120s to the timeout to account for waiting in the semaphore queue
-            result = await asyncio.wait_for(_run(), timeout=timeout + 120.0)
+            result = await asyncio.wait_for(_run(), timeout=total_budget)
         except asyncio.TimeoutError:
-            print(f"  [DeepAgent:{role}] timed out after {timeout}s (in queue or inference) — skipping")
+            print(f"  [DeepAgent:{role}] timed out after {total_budget:.0f}s "
+                  f"({timeout:.0f}s budget + 120s queue wait) — skipping")
             return None
 
         if not result or not result.response:
