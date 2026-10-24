@@ -2382,6 +2382,21 @@ class CyphexEngine:
                         salvaged = list(getattr(agent, "vulns", []) or [])
                         if salvaged:
                             context.confirmed_vulns.extend(salvaged)
+                        # str(e) alone ("dictionary changed size during iteration")
+                        # names the exception but not WHERE — a real recurring crash
+                        # survived one fix attempt (AttackGraph) with no way to tell
+                        # if that was the wrong dict or a second, different one.
+                        # Full traceback to a file turns the next occurrence into an
+                        # exact file:line instead of another guess.
+                        try:
+                            import traceback as _tb
+                            log_dir = os.path.join(self.source_dir or ".", ".cyphex")
+                            os.makedirs(log_dir, exist_ok=True)
+                            with open(os.path.join(log_dir, "deepagent_errors.log"), "a", encoding="utf-8") as _f:
+                                _f.write(f"\n--- {agent.__class__.__name__} ({self.scan_id}) ---\n")
+                                _f.write(_tb.format_exc())
+                        except Exception:
+                            pass
                         self._emit("deepagent_error", agent=agent.__class__.__name__,
                                    error=str(e)[:200], salvaged=len(salvaged))
                         self.trace.note(short, f"error: {str(e)[:40]}", _T_FAIL,
