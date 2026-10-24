@@ -26,6 +26,15 @@ from cyphex.docker_sandbox import (
 )
 
 
+async def _docker(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    """subprocess.run in a thread. A timeout or OS error becomes a failed result, so one
+    bad service is reported in "failed" and cleaned up instead of aborting the whole deploy."""
+    try:
+        return await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, **kw)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return subprocess.CompletedProcess(cmd, 124, "", type(e).__name__)
+
+
 def _container_name(scan_id: str, service_name: str) -> str:
     return f"cyphex-svc-{scan_id}-{service_name}"
 
@@ -78,7 +87,7 @@ async def deploy_service_graph(source_dir: str, graph, scan_id: str) -> dict:
         app_info_by_name[node.name] = _detect_app_type(service_dir)
         dockerfile_path = os.path.join(service_dir, "Dockerfile")
         if not os.path.exists(dockerfile_path):
-            with open(dockerfile_path, "w") as f:
+            with open(dockerfile_path, "w", encoding="utf-8") as f:
                 f.write(_generate_dockerfile(service_dir, app_info_by_name[node.name]))
             generated_dockerfiles.append(dockerfile_path)
 
@@ -93,10 +102,8 @@ async def deploy_service_graph(source_dir: str, graph, scan_id: str) -> dict:
             host_port = _find_free_port()
             internal_port = app_info_by_name[node.name]["port"]
 
-            build = await asyncio.to_thread(
-                subprocess.run, ["docker", "build", "-t", container_name, "."],
-                cwd=service_dir, capture_output=True, text=True, timeout=180,
-            )
+            build = await _docker(["docker", "build", "-t", container_name, "."],
+                                  cwd=service_dir, timeout=180)
             if build.returncode != 0:
                 failed.append(node.name)
                 continue
@@ -124,9 +131,7 @@ async def deploy_service_graph(source_dir: str, graph, scan_id: str) -> dict:
                     run_cmd += ["-e", f"{override[0]}={override[1]}"]
             run_cmd.append(container_name)
 
-            run = await asyncio.to_thread(
-                subprocess.run, run_cmd, capture_output=True, text=True, timeout=30,
-            )
+            run = await _docker(run_cmd, timeout=30)
             if run.returncode != 0:
                 failed.append(node.name)
                 continue

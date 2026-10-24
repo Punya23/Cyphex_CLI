@@ -251,6 +251,7 @@ class CyphexEngine:
         self._shared_attack_graph = None
         self._shared_asi = None
         self._shared_oracle = None
+        self._in_multi_scan = False  # True while _multi_service_dynamic_scan loops over services
         self.sandbox_info = None
         self.context = None
         self.vulns = []
@@ -933,18 +934,18 @@ class CyphexEngine:
             info["name"] = "PHP"
         return info
 
-    # Step 2: Static code analysis
     async def _try_assemble_org(self, repo_url, branch):
         """Org-wide microservice discovery for a single GitHub repo_url.
-        Opt-in on GITHUB_TOKEN being set; returns None (caller falls back to
-        the normal single-repo clone) when the token is unset, repo_url
+        Opt-in on a token being available (GITHUB_TOKEN, or the one `gh
+        auth login` already has); returns None (caller falls back to the
+        normal single-repo clone) when no token can be found, repo_url
         isn't a GitHub URL, or discovery fails for any reason — this must
         never be why a scan can't get its source code."""
-        token = os.environ.get("GITHUB_TOKEN", "")
-        if not token:
-            return None
         try:
-            from backend.services.github_discovery import discover_and_assemble_org
+            from backend.services.github_discovery import discover_and_assemble_org, resolve_github_token
+            token = resolve_github_token()
+            if not token:
+                return None
             dest = os.path.join(WORK_DIR, self.scan_id)
             return await discover_and_assemble_org(repo_url, dest, branch or "", token)
         except Exception as e:
@@ -970,8 +971,8 @@ class CyphexEngine:
         if graph.auto_generated:
             print(
                 f"  {C.G}[OK]{C.RST} Detected {len(graph.nodes)} services under "
-                f"this folder — wrote {C.CY}services.yaml{C.RST} "
-                f"(base_url is a placeholder; edit it and re-run to refine)."
+                f"this folder — wrote {C.CY}{os.path.join(source_dir, 'services.yaml')}{C.RST} "
+                f"(this scan's working copy, with placeholder URLs; copy it into your repo to keep edits)."
             )
         else:
             print(f"  {C.G}[OK]{C.RST} Loaded {len(graph.nodes)} service(s) from services.yaml")
@@ -1497,6 +1498,7 @@ class CyphexEngine:
         live_nodes = [self.service_graph.nodes[name] for name in deploy_result["deployed"]]
         merged_context = ScanContext(target_url=live_nodes[0].base_url)
         self._shared_attack_graph = self._shared_asi = self._shared_oracle = None
+        self._in_multi_scan = True
         try:
             for node in live_nodes:
                 print(f"\n  {C.G}[OK]{C.RST} Scanning service '{C.CY}{node.name}{C.RST}' "
@@ -1511,6 +1513,23 @@ class CyphexEngine:
         finally:
             teardown_service_graph(deploy_result)
             self._shared_attack_graph = self._shared_asi = self._shared_oracle = None
+            self._in_multi_scan = False
+
+    def _attack_triple(self):
+        """AttackGraph / AttackSurfaceIndex / AttackOracle for one _dynamic_scan. In a multi-service
+        scan the first service builds them and every later service reuses the SAME objects, so what
+        one service reveals is visible when the next is tested. A single-service scan gets a fresh set."""
+        if self._shared_attack_graph is not None:
+            return self._shared_attack_graph, self._shared_asi, self._shared_oracle
+        from backend.deepagents.attack_graph import AttackGraph
+        from backend.deepagents.attack_surface_index import AttackSurfaceIndex
+        from backend.deepagents.oracle_attack import AttackOracle
+        from backend.council.council_orchestrator import CouncilOrchestrator
+        triple = (AttackGraph(), AttackSurfaceIndex(),
+                  AttackOracle(orchestrator=CouncilOrchestrator(thread_id=self.scan_id)))
+        if self._in_multi_scan:
+            self._shared_attack_graph, self._shared_asi, self._shared_oracle = triple
+        return triple
 
     # Step 4: Dynamic scan
     async def _dynamic_scan(self, target_url, use_deepagents=False):
@@ -1535,25 +1554,7 @@ class CyphexEngine:
         asi = None
         if use_deepagents:
             print(f"\n  {C.G}[DEEPAGENTS ENABLED]{C.RST} Initialising adaptive intelligence engine...")
-            from backend.deepagents.attack_graph import AttackGraph
-            from backend.deepagents.attack_surface_index import AttackSurfaceIndex
-            from backend.deepagents.oracle_attack import AttackOracle
-            from backend.council.council_orchestrator import CouncilOrchestrator
-            
-            # Phase 3: a multi-service scan calls this once per deployed
-            # service and sets _shared_* before the loop so every call
-            # reuses the SAME attack_graph/asi/oracle instead of starting
-            # over — a single-service scan never sets these and gets a
-            # fresh triple exactly as before.
-            if self._shared_attack_graph is not None:
-                attack_graph = self._shared_attack_graph
-                asi = self._shared_asi
-                oracle = self._shared_oracle
-            else:
-                attack_graph = AttackGraph()
-                asi = AttackSurfaceIndex()
-                orchestrator = CouncilOrchestrator(thread_id=self.scan_id)
-                oracle = AttackOracle(orchestrator=orchestrator)
+            attack_graph, asi, oracle = self._attack_triple()
 
             # Phase 2 microservice VAPT: if source_dir turned out to be a
             # monorepo of services (self.service_graph set in Step 1), and

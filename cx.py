@@ -386,7 +386,7 @@ QUICK_HELP = f"""
 COMMANDS = [
     "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
     "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/verify", "/status", "/runs", "/doctor",
-    "/models", "/webhook", "/version", "/history", "/clear", "/exit", "/quit", "/help",
+    "/models", "/webhook", "/github", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
 def _completer(text, state):
@@ -1184,6 +1184,45 @@ def _cmd_webhook(arg: str):
         _err(res["error"])
 
 
+def _cmd_github(arg: str):
+    """Check or connect GitHub auth. Needed for org-wide microservice
+    discovery: point /deep at one repo and CYPHEX finds its sibling
+    services elsewhere in the same GitHub org, automatically — no manual
+    setup if you've already run `gh auth login`."""
+    from backend.services.github_discovery import resolve_github_token
+
+    arg = arg.strip().lower()
+    if arg == "login":
+        if not shutil.which("gh"):
+            _err("gh CLI not found.")
+            _dim("Install it: https://cli.github.com — then run /github login again.")
+            return
+        _spinner("Launching gh auth login — follow the prompts (browser or device code)…")
+        try:
+            subprocess.run(["gh", "auth", "login"])  # interactive: inherits this terminal
+        except Exception as e:
+            _err(f"gh auth login failed: {e}")
+            return
+        if resolve_github_token():
+            _ok("Connected. /deep <repo-url> will now find its org siblings automatically.")
+        else:
+            _warn("Still no token found — run `gh auth status` to check what went wrong.")
+        return
+
+    print(f"\n  {C.CYAN}{C.BOLD}GitHub connection{C.RST}")
+    if os.environ.get("GITHUB_TOKEN"):
+        _ok("Using the GITHUB_TOKEN environment variable.")
+    elif resolve_github_token():
+        _ok("Using gh CLI auth (gh auth login).")
+    else:
+        _warn("No GitHub token found.")
+        _dim("Run /github login to authenticate via gh — or set GITHUB_TOKEN yourself.")
+    _dim("")
+    _dim("What this is for: point /deep at one microservice's repo and CYPHEX finds its")
+    _dim("sibling services elsewhere in the same GitHub org, clones them, and scans the")
+    _dim("whole group together. No token -> that repo is scanned alone, as normal.")
+
+
 def _cmd_models():
     """List available Ollama models."""
     print()
@@ -1310,6 +1349,9 @@ def _handle(line: str):
 
         case "/webhook" | "/webhooks":
             _cmd_webhook(arg)
+
+        case "/github":
+            _cmd_github(arg)
 
         case "/benchmark" | "/bench":
             _cmd_benchmark(arg)

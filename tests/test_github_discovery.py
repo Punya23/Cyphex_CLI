@@ -16,6 +16,7 @@ from backend.services.github_discovery import (
     find_linked_repos,
     list_org_repos,
     repo_owner_and_name,
+    resolve_github_token,
     search_org_code_for_term,
 )
 
@@ -32,6 +33,37 @@ def _ok_clone(returncode=0):
     r.returncode = returncode
     r.stderr = ""
     return r
+
+
+# ── resolve_github_token ─────────────────────────────────────────────────
+
+def test_resolve_github_token_prefers_env_var_without_calling_gh(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    with patch("backend.services.github_discovery.subprocess.run") as mock_run:
+        assert resolve_github_token() == "env-token"
+    mock_run.assert_not_called()
+
+
+def test_resolve_github_token_falls_back_to_gh_auth_token(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    gh_result = MagicMock(returncode=0, stdout="gh-token-123\n")
+    with patch("backend.services.github_discovery.subprocess.run", return_value=gh_result) as mock_run:
+        assert resolve_github_token() == "gh-token-123"
+    mock_run.assert_called_once_with(["gh", "auth", "token"], capture_output=True,
+                                      text=True, timeout=10)
+
+
+def test_resolve_github_token_empty_when_gh_not_logged_in(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    gh_result = MagicMock(returncode=1, stdout="")
+    with patch("backend.services.github_discovery.subprocess.run", return_value=gh_result):
+        assert resolve_github_token() == ""
+
+
+def test_resolve_github_token_empty_when_gh_not_installed(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with patch("backend.services.github_discovery.subprocess.run", side_effect=FileNotFoundError):
+        assert resolve_github_token() == ""
 
 
 # ── repo_owner_and_name ──────────────────────────────────────────────────
