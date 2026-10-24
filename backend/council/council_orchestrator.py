@@ -15,6 +15,10 @@ except ImportError:
     def get_reasoner(**kwargs): return None
 
 OLLAMA_BASE = "http://localhost:11434"
+try:  # user-configured OpenAI-compatible LLM (/llm); inactive unless configured
+    from backend import llm_provider
+except ImportError:
+    import llm_provider
 try:                      # drag legacy [green]/[red] markup onto the ramp
     from terminal_ui import themed_console as _themed_console
 except Exception:         # terminal_ui not importable in this context
@@ -134,6 +138,8 @@ class VRAMManager:
         self.loaded: dict[str, float] = {}  # model → VRAM cost
         self.VRAM_LIMIT = _detect_vram_limit()
         self._parallel_capable = self.VRAM_LIMIT >= 8.0  # Can fit 2 × 7B models
+        if llm_provider.active():  # hosted model: no local VRAM to budget
+            self.VRAM_LIMIT, self._parallel_capable = 1e6, True
 
     @property
     def parallel_capable(self) -> bool:
@@ -178,6 +184,8 @@ class VRAMManager:
         return batches
 
     async def ensure_loaded(self, model: str):
+        if llm_provider.active():
+            return                       # nothing to load into VRAM
         if model in self.loaded:
             return                       # already resident — no load, no log
         console.print(f"[dim]VRAM Manager: Loading {model}...[/dim]")
@@ -195,6 +203,8 @@ class VRAMManager:
 
     async def ensure_loaded_together(self, models: list[str]):
         """Load multiple models simultaneously for parallel execution."""
+        if llm_provider.active():
+            return
         # First check if they all fit
         models_to_load = [m for m in models if m not in self.loaded]
         if not models_to_load:
@@ -223,6 +233,8 @@ class VRAMManager:
 
     async def unload(self, model: str):
         """Force Ollama to release VRAM for this model immediately."""
+        if llm_provider.active():
+            return
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 await client.post(
@@ -304,7 +316,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
         full_system = f"{system}\n\n{self.UNIVERSAL_ANTI_HALLUCINATION_RULES}"
 
         # ── Try Oracle agent-reasoning first (adds CoT/reflection layer) ──
-        if self.reasoner and self.reasoner.is_enhanced:
+        if self.reasoner and self.reasoner.is_enhanced and not llm_provider.active():  # reasoner is Ollama-only
             try:
                 strategy = self.reasoner.select_strategy(task_type, severity, cwe)
                 if show_thinking:
@@ -346,39 +358,42 @@ ANTI-HALLUCINATION RULES — apply on every response:
                 raw = ""
                 with Live(Panel(f"[cyan bold]Evaluating[/cyan bold]\n[dim]Model: {model}[/dim]\n[yellow]Status: Thinking...[/yellow]", border_style="cyan"), refresh_per_second=2, console=console, transient=True) as live:
                     parts: list[str] = []
-                    async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
-                        async with client.stream(
-                            "POST",
-                            f"{OLLAMA_BASE}/api/chat",
-                            json={
-                                "model": model,
-                                "messages": [
-                                    {"role": "system", "content": full_system},
-                                    {"role": "user", "content": prompt},
-                                ],
-                                "stream": True,
-                                "format": "json",
-                                "keep_alive": "10m",
-                                "options": {
-                                    "temperature": temperature,
-                                    "top_p": 0.9,
-                                    **ctx_for_tier(),     # Tier-aware: 4096 (low) → 8192 (ultra)
+                    if llm_provider.active():
+                        parts.append(await llm_provider.chat(full_system, prompt, temperature=temperature, model=model))
+                    else:
+                        async with httpx.AsyncClient(timeout=_ollama_timeout()) as client:
+                            async with client.stream(
+                                "POST",
+                                f"{OLLAMA_BASE}/api/chat",
+                                json={
+                                    "model": model,
+                                    "messages": [
+                                        {"role": "system", "content": full_system},
+                                        {"role": "user", "content": prompt},
+                                    ],
+                                    "stream": True,
+                                    "format": "json",
+                                    "keep_alive": "10m",
+                                    "options": {
+                                        "temperature": temperature,
+                                        "top_p": 0.9,
+                                        **ctx_for_tier(),     # Tier-aware: 4096 (low) → 8192 (ultra)
+                                    }
                                 }
-                            }
-                        ) as resp:
-                            resp.raise_for_status()
-                            async for line in resp.aiter_lines():
-                                if not line.strip():
-                                    continue
-                                try:
-                                    chunk = json.loads(line)
-                                except json.JSONDecodeError:
-                                    continue  # skip any partial/keep-alive line
-                                piece = chunk.get("message", {}).get("content", "")
-                                if piece:
-                                    parts.append(piece)
-                                if chunk.get("done"):
-                                    break
+                            ) as resp:
+                                resp.raise_for_status()
+                                async for line in resp.aiter_lines():
+                                    if not line.strip():
+                                        continue
+                                    try:
+                                        chunk = json.loads(line)
+                                    except json.JSONDecodeError:
+                                        continue  # skip any partial/keep-alive line
+                                    piece = chunk.get("message", {}).get("content", "")
+                                    if piece:
+                                        parts.append(piece)
+                                    if chunk.get("done"):
+                                        break
                     raw = "".join(parts)
                     live.update(Panel(f"[green bold]✓ Done[/green bold] [dim]({model})[/dim]", border_style="green"))
 

@@ -12,13 +12,24 @@ import pytest
 
 from backend.services.github_discovery import (
     assemble_workspace,
+    clear_saved_token,
     discover_and_assemble_org,
     find_linked_repos,
     list_org_repos,
+    load_saved_token,
     repo_owner_and_name,
     resolve_github_token,
+    save_token,
     search_org_code_for_term,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_token_file(tmp_path, monkeypatch):
+    """Every test in this module gets its own token file — never the real
+    ~/.cyphex/github_token, so a run here can't read a developer's actual
+    token or leave one behind."""
+    monkeypatch.setenv("CYPHEX_GITHUB_TOKEN_FILE", str(tmp_path / "github_token"))
 
 
 def _http_response(status_code=200, json_data=None):
@@ -64,6 +75,53 @@ def test_resolve_github_token_empty_when_gh_not_installed(monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     with patch("backend.services.github_discovery.subprocess.run", side_effect=FileNotFoundError):
         assert resolve_github_token() == ""
+
+
+# ── save_token / load_saved_token / clear_saved_token ───────────────────
+
+def test_save_and_load_token_round_trip():
+    assert load_saved_token() == ""
+    save_token("  pasted-token  ")  # whitespace from a copy-paste, stripped
+    assert load_saved_token() == "pasted-token"
+
+
+def test_clear_saved_token_reports_whether_anything_was_removed():
+    assert clear_saved_token() is False
+    save_token("tok")
+    assert clear_saved_token() is True
+    assert load_saved_token() == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="chmod bits are POSIX-only; Windows has no 0o600 equivalent")
+def test_save_token_sets_restrictive_permissions():
+    import stat
+    save_token("secret-pat")
+    path = os.environ["CYPHEX_GITHUB_TOKEN_FILE"]
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600
+
+
+# ── resolve_github_token precedence (env > saved file > gh) ──────────────
+
+def test_resolve_prefers_env_over_saved_token(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    save_token("saved-token")
+    assert resolve_github_token() == "env-token"
+
+
+def test_resolve_prefers_saved_token_over_gh(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    save_token("saved-token")
+    with patch("backend.services.github_discovery.subprocess.run") as mock_run:
+        assert resolve_github_token() == "saved-token"
+    mock_run.assert_not_called()
+
+
+def test_resolve_falls_back_to_gh_when_nothing_saved(monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    gh_result = MagicMock(returncode=0, stdout="gh-token\n")
+    with patch("backend.services.github_discovery.subprocess.run", return_value=gh_result):
+        assert resolve_github_token() == "gh-token"
 
 
 # ── repo_owner_and_name ──────────────────────────────────────────────────

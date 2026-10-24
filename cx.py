@@ -9,6 +9,7 @@ Usage:
     python3 cx.py <target>     → auto-detect target and scan
 """
 import asyncio
+import getpass
 import os
 import sys
 import shlex
@@ -386,7 +387,7 @@ QUICK_HELP = f"""
 COMMANDS = [
     "/scan", "/deep", "/deepagents", "/full", "/net", "/netmap", "/netwatch",
     "/netaudit", "/watch", "/setup", "/benchmark", "/bench", "/verify", "/status", "/runs", "/doctor",
-    "/models", "/webhook", "/github", "/version", "/history", "/clear", "/exit", "/quit", "/help",
+    "/models", "/llm", "/webhook", "/github", "/version", "/history", "/clear", "/exit", "/quit", "/help",
 ]
 
 def _completer(text, state):
@@ -1184,18 +1185,44 @@ def _cmd_webhook(arg: str):
         _err(res["error"])
 
 
+def _verify_github_token(token: str) -> str:
+    """The authenticated login name if `token` works against GitHub's API,
+    else "". Best-effort — a network hiccup here must never block saving
+    the token the user explicitly chose to enter."""
+    try:
+        import httpx
+        r = httpx.get("https://api.github.com/user",
+                      headers={"Authorization": f"Bearer {token}"}, timeout=8)
+        if r.status_code == 200:
+            return r.json().get("login", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
 def _cmd_github(arg: str):
     """Check or connect GitHub auth. Needed for org-wide microservice
     discovery: point /deep at one repo and CYPHEX finds its sibling
-    services elsewhere in the same GitHub org, automatically — no manual
-    setup if you've already run `gh auth login`."""
-    from backend.services.github_discovery import resolve_github_token
+    services elsewhere in the same GitHub org, automatically.
 
-    arg = arg.strip().lower()
-    if arg == "login":
+    Two independent ways in, pick whichever you actually have:
+      /github login          — via the gh CLI (gh auth login)
+      /github token [<pat>]  — paste a personal access token directly,
+                                no gh required
+      /github clear          — remove a token saved with /github token
+    """
+    from backend.services.github_discovery import (
+        clear_saved_token, load_saved_token, resolve_github_token, save_token,
+    )
+
+    parts = arg.strip().split(None, 1)
+    sub = parts[0].lower() if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+
+    if sub == "login":
         if not shutil.which("gh"):
             _err("gh CLI not found.")
-            _dim("Install it: https://cli.github.com — then run /github login again.")
+            _dim("Install it: https://cli.github.com — or use /github token instead.")
             return
         _spinner("Launching gh auth login — follow the prompts (browser or device code)…")
         try:
@@ -1209,18 +1236,128 @@ def _cmd_github(arg: str):
             _warn("Still no token found — run `gh auth status` to check what went wrong.")
         return
 
+    if sub == "token":
+        token = rest.strip()
+        if not token:
+            try:
+                token = getpass.getpass("  Paste your GitHub token (hidden, not saved to shell history): ").strip()
+            except Exception:
+                _err("Couldn't read hidden input here — pass it inline instead: /github token <token>")
+                return
+        if not token:
+            _warn("No token entered — nothing saved.")
+            return
+        _spinner("Checking the token against GitHub…")
+        who = _verify_github_token(token)
+        save_token(token)
+        if who:
+            _ok(f"Saved. Authenticated as {who}.")
+        else:
+            _warn("Saved, but GitHub didn't accept it just now — double-check it's valid and not expired.")
+        _dim("/deep <repo-url> will now use it for org-wide sibling discovery.")
+        return
+
+    if sub == "clear":
+        if clear_saved_token():
+            _ok("Removed the saved token.")
+        else:
+            _dim("No token was saved with /github token — nothing to remove.")
+        return
+
     print(f"\n  {C.CYAN}{C.BOLD}GitHub connection{C.RST}")
     if os.environ.get("GITHUB_TOKEN"):
         _ok("Using the GITHUB_TOKEN environment variable.")
+    elif load_saved_token():
+        _ok("Using a token saved via /github token.")
     elif resolve_github_token():
         _ok("Using gh CLI auth (gh auth login).")
     else:
         _warn("No GitHub token found.")
-        _dim("Run /github login to authenticate via gh — or set GITHUB_TOKEN yourself.")
+        _dim("Two ways in — pick whichever you have:")
+        _dim("  /github login          — via the GitHub CLI (gh auth login)")
+        _dim("  /github token <token>  — paste a personal access token, no gh required")
     _dim("")
     _dim("What this is for: point /deep at one microservice's repo and CYPHEX finds its")
     _dim("sibling services elsewhere in the same GitHub org, clones them, and scans the")
     _dim("whole group together. No token -> that repo is scanned alone, as normal.")
+
+
+def _llm_provider():
+    # Loaded by path (stdlib-only module), same reason as _notify(): sys.path shadowing in this process.
+    import importlib.util
+    if "cyphex_llm_provider" not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            "cyphex_llm_provider", os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend", "llm_provider.py"))
+        sys.modules["cyphex_llm_provider"] = mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    return sys.modules["cyphex_llm_provider"]
+
+
+def _cmd_llm(arg: str):
+    """Use your own OpenAI-compatible LLM (a hosted API or a self-hosted SLM) instead of local Ollama."""
+    prov = _llm_provider()
+    parts = arg.split()
+    sub = parts[0].lower() if parts else ""
+
+    if sub in ("local", "off", "clear", "remove"):
+        _ok("Back to local Ollama.") if prov.clear() else _warn("No saved hosted LLM to remove.")
+        if os.environ.get("CYPHEX_LLM_BASE_URL"):
+            _warn("CYPHEX_LLM_* environment variables are still set and override this.")
+        return
+
+    cfg = prov.load()
+    if not parts or sub == "status":
+        print(f"\n  {C.CYAN}{C.BOLD}LLM provider{C.RST}")
+        if prov.active():
+            src = "environment" if os.environ.get("CYPHEX_LLM_BASE_URL") else "saved by /llm"
+            print(f"  {C.NEON}●{C.RST} Hosted: {prov.label(cfg)}  {C.GREY}key {prov.mask(cfg.get('api_key', ''))} · {src}{C.RST}")
+            if len(prov.all_models(cfg)) > 1:
+                print(f"  {C.GREY}  council review also uses: {', '.join(prov.all_models(cfg)[1:])}{C.RST}")
+        else:
+            print(f"  {C.NEON}●{C.RST} Local Ollama {C.GREY}(default){C.RST}")
+        _dim("Use your own:  /llm set   (or  /llm <base-url> <api-key> [model])   ·   Test:  /llm test   ·   Back to local:  /llm local")
+        return
+
+    if sub == "test":
+        if not prov.active():
+            return _warn("No hosted LLM configured. Use /llm set")
+        res = prov.check(cfg["base_url"], cfg.get("api_key", ""), cfg["model"])
+        _ok(f"Working: {prov.label(cfg)} replied '{res['reply']}'") if res["ok"] else _err(res["error"])
+        return
+
+    if sub == "set":
+        parts = parts[1:]
+    interactive = not parts
+    try:
+        import getpass
+        url = parts[0] if parts else input("  Base URL (e.g. https://api.openai.com/v1): ").strip()
+        key = parts[1] if len(parts) > 1 else getpass.getpass("  API key (hidden; Enter if the server needs none): ").strip()
+        model = parts[2] if len(parts) > 2 else ""
+    except (EOFError, KeyboardInterrupt):
+        return _warn("Cancelled.")
+    _spinner("Testing the connection…")
+    res = prov.check(url, key, model)
+    if not res["ok"]:
+        return _err(res["error"])
+    extra = []
+    if interactive:
+        try:
+            if not model and len(res["models"]) > 1:
+                print(f"  {C.GREY}Models: {', '.join(res['models'][:12])}{' …' if len(res['models']) > 12 else ''}{C.RST}")
+                pick = input(f"  Model [Enter = {res['model']}]: ").strip()
+                if pick and pick != res["model"]:
+                    res = prov.check(url, key, pick)
+                    if not res["ok"]:
+                        return _err(res["error"])
+            second = input("  Extra model for council review (optional, Enter to skip): ").strip()
+            extra = [second] if second and second != res["model"] else []
+        except (EOFError, KeyboardInterrupt):
+            return _warn("Cancelled.")
+    cfg = {"base_url": res["base_url"], "api_key": key, "model": res["model"], "extra_models": extra}
+    prov.save(cfg)
+    _ok(f"Connected: {prov.label(cfg)}  (key {prov.mask(key)})")
+    _warn(f"Scans will now send code snippets and findings to {prov.label(cfg).split(' via ')[-1]}. "
+          f"Use /llm local to go back to Ollama.")
 
 
 def _cmd_models():
@@ -1346,6 +1483,9 @@ def _handle(line: str):
 
         case "/models":
             _cmd_models()
+
+        case "/llm":
+            _cmd_llm(arg)
 
         case "/webhook" | "/webhooks":
             _cmd_webhook(arg)

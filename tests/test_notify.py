@@ -9,7 +9,11 @@ CHAT = "https://chat.googleapis.com/v1/spaces/X/messages?key=k&token=t"
 SLACK = "https://hooks.slack.com/services/T/B/x"
 
 
-def test_only_https_urls_are_used(monkeypatch):
+def test_only_https_urls_are_used(monkeypatch, tmp_path):
+    # Isolate from this machine's real ~/.cyphex/webhooks.json — webhook_urls()
+    # merges in saved_urls() by design, so without this the test asserts
+    # against whatever is actually connected here, not a fixed, hermetic set.
+    monkeypatch.setenv("CYPHEX_WEBHOOKS_FILE", str(tmp_path / "webhooks.json"))
     monkeypatch.setenv("CYPHEX_WEBHOOK_URLS", "http://insecure.example/x, https://hooks.slack.com/a ,")
     assert n.webhook_urls() == ["https://hooks.slack.com/a"]
 
