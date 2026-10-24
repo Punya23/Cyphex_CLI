@@ -19,6 +19,21 @@ except ImportError:
     except ImportError:
         Vuln = Any
 
+
+def _looks_like_id(segment: str) -> bool:
+    """True for a URL path segment that's a resource VALUE (a numeric id,
+    uuid, or other opaque token a real request substituted in), not a route
+    name a codebase search could ever find literally. Pure digits (any
+    length, including the huge ones DeepAgent IDOR probes use) or a uuid are
+    the two shapes that actually show up; a query string was already
+    stripped by urlparse before this runs."""
+    if segment.isdigit():
+        return True
+    if re.fullmatch(r"[0-9a-fA-F-]{8,}", segment) and "-" in segment:
+        return True  # uuid-shaped
+    return False
+
+
 class RouteTracer:
     """
     Maps dynamic (DAST) HTTP vulnerabilities back to static source code files and line numbers.
@@ -124,17 +139,34 @@ class RouteTracer:
         path_segments = [s for s in path.strip('/').split('/') if s]
         if not path_segments:
             return None
+
+        # A DAST/DeepAgent finding's path is a REAL request, so an IDOR/mass-
+        # assignment/race-condition probe's trailing segment is routinely a
+        # live resource ID — e.g. /api/users/1, /api/users/9999999999999999,
+        # /api/admin/users/1?isAdmin=true — never a literal route name. Using
+        # that raw last segment searched the codebase for a route literally
+        # called "1", which can never match, so every one of these findings
+        # stayed "no source to patch" even though /api/users/:id obviously
+        # exists. Walk backward to the last segment that looks like an actual
+        # resource/route name, not a path parameter's value.
+        last_segment = next(
+            (s for s in reversed(path_segments) if not _looks_like_id(s)),
+            path_segments[-1],
+        )
         
-        last_segment = path_segments[-1]
-        
+        # Optional trailing path-param placeholder — router.get('/users/:id', ...)
+        # or FastAPI's @app.get('/users/{id}') — so a route REGISTERED with a
+        # param still matches a DAST finding that hit it with a real id/uuid
+        # substituted in (the whole reason last_segment skips that id above).
+        _param_suffix = r'(?:/[:{<][\w]+[>}]?)?'
         # Regex patterns for Express/NodeJS, Python, etc.
         patterns = [
             # Express: router.post('/login', ...) or app.get('/login', ...)
-            re.compile(r'\.(get|post|put|delete|use|all)\s*\(\s*[\'"`]/?(?:api/)?(?:v1/)?(?:' + re.escape(last_segment) + r')/?[\'"`]', re.IGNORECASE),
+            re.compile(r'\.(get|post|put|delete|use|all)\s*\(\s*[\'"`]/?(?:api/)?(?:v1/)?(?:' + re.escape(last_segment) + r')' + _param_suffix + r'/?[\'"`]', re.IGNORECASE),
             # NestJS / Spring: @Post('login')
-            re.compile(r'@(Get|Post|Put|Delete|RequestMapping)\s*\(\s*[\'"`]/?' + re.escape(last_segment) + r'/?[\'"`]\)', re.IGNORECASE),
-            # Flask/FastAPI: @app.route('/login')
-            re.compile(r'@(app|router)\.(route|get|post|put|delete)\s*\(\s*[\'"`]/?(?:api/)?(?:' + re.escape(last_segment) + r')/?[\'"`]', re.IGNORECASE)
+            re.compile(r'@(Get|Post|Put|Delete|RequestMapping)\s*\(\s*[\'"`]/?' + re.escape(last_segment) + _param_suffix + r'/?[\'"`]\)', re.IGNORECASE),
+            # Flask/FastAPI: @app.route('/login') or @app.get('/users/{id}')
+            re.compile(r'@(app|router)\.(route|get|post|put|delete)\s*\(\s*[\'"`]/?(?:api/)?(?:' + re.escape(last_segment) + r')' + _param_suffix + r'/?[\'"`]', re.IGNORECASE)
         ]
 
         # Scan files
