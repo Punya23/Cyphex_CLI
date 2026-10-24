@@ -84,9 +84,9 @@ def test_model_selector_still_asks_ollama(monkeypatch, tmp_path):
     assert asked == ["http://localhost:11434/api/tags"] and sel.get("patcher") == "qwen2.5-coder:7b"
 
 
-def test_oracle_plan_still_calls_the_local_ollama_model_through_the_orchestrator(monkeypatch, tmp_path):
-    """No hosted LLM: AttackOracle.plan() must still resolve an Ollama model name and reach it
-    through CouncilOrchestrator._call() exactly as before (streaming /api/chat)."""
+def test_oracle_plan_still_uses_the_reasoner_not_the_orchestrator(monkeypatch, tmp_path):
+    """No hosted LLM: AttackOracle on this branch routes through self.reasoner (CyphexReasoner,
+    optionally the agent-reasoning package), NOT through CouncilOrchestrator — untouched by /llm."""
     from backend.deepagents import oracle_attack
     from backend.deepagents.oracle_attack import AttackOracle
     _local(monkeypatch, tmp_path)
@@ -94,12 +94,20 @@ def test_oracle_plan_still_calls_the_local_ollama_model_through_the_orchestrator
 
     seen = {}
 
-    async def fake_orchestrator_call(self, model, system, prompt, **kw):
-        seen["model"] = model
-        return {"target_summary": "s", "primary_vulnerability_class": "SQLi", "hypotheses": []}
+    def no_orchestrator_call(*a, **k):
+        raise AssertionError("no hosted LLM: must not route through CouncilOrchestrator._call")
 
-    monkeypatch.setattr(CouncilOrchestrator, "_call", fake_orchestrator_call)
+    monkeypatch.setattr(CouncilOrchestrator, "_call", no_orchestrator_call)
     oracle = AttackOracle(CouncilOrchestrator())
+
+    class FakeReasoner:
+        def generate(self, model, prompt, **kw):
+            seen["model"] = model
+            return types.SimpleNamespace(
+                response='{"target_summary": "s", "primary_vulnerability_class": "SQLi", "hypotheses": []}',
+                strategy_name="Decomposition", strategy="decomposed", duration_ms=1)
+
+    oracle.reasoner = FakeReasoner()
     plan = asyncio.run(oracle.plan("http://x", "surface", "SQLi"))
     assert plan.target_summary == "s" and seen["model"] == "qwen2.5-coder:7b"
 
@@ -166,17 +174,15 @@ def test_oracle_plan_decide_mutate_all_go_to_the_hosted_llm_not_ollama(monkeypat
     # _call()'s pre-existing "_sanitize" step flattens a list-of-strings into one \n-joined
     # string — applies identically to a hosted reply as it always did to an Ollama one.
     assert plan.target_summary == "s" and decision.action == "confirmed" and variants == "v1\nv2"
-    assert {c["model"] for c in calls} == {"qwen2.5-coder:7b", "llama3.1:8b", "deepseek-coder:6.7b"}
-    # The provider itself (test_llm_provider.py) proves all 3 collapse to the single
-    # configured model: all_models() only contains "big", so chat_sync always sends "big".
+    # planner/analyst/mutator each resolve a different local-Ollama-style name (see _ROLE_PREFERENCES);
+    # the provider itself (test_llm_provider.py) proves all 3 collapse to the one configured model.
+    assert {c["model"] for c in calls} == {"qwen2.5-coder:7b", "llama3.1:8b", "deepseek-coder:1.3b"}
 
 
-def test_oracle_on_provider_failure_raises_the_same_way_an_ollama_failure_would(monkeypatch, tmp_path):
-    """CouncilOrchestrator._call() wraps ANY exception as CouncilCallError and plan() has no
-    try/except — that was already true for an Ollama failure (ReadTimeout etc). A hosted-provider
-    failure must behave identically, not silently degrade."""
-    import pytest
-    from backend.council.council_errors import CouncilCallError
+def test_oracle_on_provider_failure_degrades_like_a_reasoner_timeout_would(monkeypatch, tmp_path):
+    """_call_reasoner already catches a timeout and returns None so plan() degrades to an empty
+    plan rather than crashing the DeepAgents swarm — a hosted-provider failure must get the same
+    resilience, not a different (crashing) failure mode."""
     from backend.deepagents.oracle_attack import AttackOracle
     _hosted(monkeypatch, tmp_path)
 
@@ -185,8 +191,8 @@ def test_oracle_on_provider_failure_raises_the_same_way_an_ollama_failure_would(
 
     monkeypatch.setattr(p, "chat", boom)
     oracle = AttackOracle(CouncilOrchestrator())
-    with pytest.raises(CouncilCallError):
-        asyncio.run(oracle.plan("http://x", "surface", "SQLi"))
+    plan = asyncio.run(oracle.plan("http://x", "surface", "SQLi"))  # must not raise
+    assert plan.hypotheses == []
 
 
 def test_classic_agents_use_the_hosted_llm(monkeypatch, tmp_path):
