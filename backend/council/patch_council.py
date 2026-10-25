@@ -128,6 +128,14 @@ CWE_DIRECTIVES = {
     "CWE-942": "Replace wildcard CORS origin ('*') with a specific allowlist of origins.",
     "CWE-287": "Add authentication middleware check before the route handler.",
     "CWE-352": "Add anti-CSRF protection: require and validate a per-session CSRF token (e.g. csurf middleware or a double-submit cookie) on state-changing routes. Do NOT add, remove, or rename unrelated routes or handlers — only harden the existing one.",
+    "CWE-94": "Replace string-based template rendering (e.g. a template engine's render(userInput)) with a precompiled template and pass user input only as a DATA variable into it — never let user input become template source. Never use eval/Function() to evaluate it.",
+    "CWE-611": "Disable external entity resolution on the XML parser (e.g. libxmljs/xml2js: set noent:false, noblanks, and disable DTD loading; or switch to a parser with external entities off by default). Never pass raw user-supplied XML to a parser with entity expansion enabled.",
+    "CWE-98": "Replace dynamic require()/include() of a user-controlled path with a fixed allowlist of valid module/file names — never pass user input directly into a require/include call.",
+    "CWE-99": "Validate the resource identifier against a strict allowlist of known-safe values before it is used to construct a path, URL, or require() target. Reject anything not on the allowlist instead of trying to sanitize it.",
+    "CWE-284": "Add an explicit authorization check (e.g. verify req.user.id matches the resource's owner, or req.user.role has the required permission) before the handler acts on the resource — do not rely on the client-supplied id/role alone.",
+    "CWE-200": "Remove the sensitive field(s) (internal IPs, stack traces, env vars, credentials, full error objects) from the response body entirely, or gate the full response behind an authenticated admin check. Returning a generic error/status to unauthenticated callers is sufficient.",
+    "CWE-362": "Add a mutex/lock (or an atomic, single-query check-and-update, e.g. `UPDATE ... WHERE balance >= ? ` instead of a separate SELECT then UPDATE) around the check-then-act sequence so two concurrent requests can't both pass the check before either applies its update.",
+    "CWE-840": "Add the missing server-side business-rule check (e.g. re-validate price/quantity/ownership server-side instead of trusting a client-supplied value) before the action completes — never rely on a value the client could have tampered with.",
 }
 _GENERIC_DIRECTIVE = ("Eliminate the vulnerability completely. The fix must remove the dangerous "
                       "pattern, not just add a superficial validation.")
@@ -152,6 +160,14 @@ _CWE_NAME_KEYWORDS = {
     "CWE-942": ("cors", "cross-origin"),
     "CWE-287": ("auth", "login", "credential", "session"),
     "CWE-352": ("csrf", "cross-site request forgery"),
+    "CWE-94": ("template injection", "ssti", "expression language", "code injection"),
+    "CWE-611": ("xxe", "xml external entity", "xml"),
+    "CWE-98": ("file inclusion", "rfi", "lfi", "remote file"),
+    "CWE-99": ("resource injection", "rfi", "file inclusion"),
+    "CWE-284": ("idor", "direct object", "access control", "mass assignment", "privilege", "unauthorized", "unrestricted"),
+    "CWE-200": ("sensitive data", "information disclosure", "information exposure", "data exposure", "leak"),
+    "CWE-362": ("race condition", "toctou", "time-of-check"),
+    "CWE-840": ("business logic",),
 }
 
 

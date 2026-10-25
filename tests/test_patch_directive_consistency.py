@@ -51,6 +51,27 @@ def test_cwe_with_no_keyword_list_still_trusts_the_tag():
     assert d == CWE_DIRECTIVES["CWE-798"]
 
 
+def test_ssti_xxe_rfi_idor_sde_race_and_business_logic_have_real_directives():
+    """These CWEs had NO directive at all before — the generator got only
+    the generic instruction for SSTI, XXE, file inclusion, IDOR/mass
+    assignment, sensitive data exposure, race conditions, and business
+    logic flaws, exactly the categories that kept showing up unpatched in
+    real scans."""
+    for cwe, name in [
+        ("CWE-94", "Server-Side Template Injection via query param"),
+        ("CWE-611", "XXE Injection via URL Parameter"),
+        ("CWE-98", "Remote File Inclusion (RFI)"),
+        ("CWE-99", "Remote File Inclusion (RFI) via filter"),
+        ("CWE-284", "Unrestricted Admin Access"),
+        ("CWE-200", "Sensitive Data Exposure in Order Lookup"),
+        ("CWE-362", "TOCTOU data export vulnerability"),
+        ("CWE-840", "Business Logic Flaw in Checkout Flow"),
+    ]:
+        d = _directive_for(name, cwe)
+        assert d == CWE_DIRECTIVES[cwe], f"{cwe} ({name!r}) fell back to generic unexpectedly"
+        assert d != _GENERIC_DIRECTIVE
+
+
 def test_build_patch_prompt_uses_the_consistency_checked_directive():
     prompt = _build_patch_prompt({
         "vuln_name": "Internal IP Leakage",
