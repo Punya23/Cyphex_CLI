@@ -53,6 +53,32 @@ def test_no_interceptor_falls_back_to_direct_ollama_not_empty():
     assert kwargs["json"]["stream"] is False
 
 
+def test_direct_ollama_sends_a_bounded_context_not_the_models_own_max():
+    """Real incident: with no `options`, Ollama loaded llama3.1:8b at its
+    own max context (131072), a 23GB footprint that no longer fit in
+    unified memory/VRAM — forcing a 52%/48% CPU/GPU split and making every
+    single call pathologically slow regardless of free RAM. num_ctx must
+    be sent, and small enough that this can't recur."""
+    reasoner = CyphexReasoner()
+    client = _client_returning(_mock_response(200, {"response": "ok"}))
+    with patch("backend.reasoning.oracle_adapter.httpx.Client", return_value=client):
+        reasoner.generate(model="llama3.1:8b", prompt="plan an attack")
+    options = client.post.call_args.kwargs["json"]["options"]
+    assert 0 < options["num_ctx"] <= 8192
+
+
+def test_direct_ollama_uses_the_callers_timeout_not_a_hardcoded_one():
+    """Real incident: generate()'s own httpx timeout was a fixed 120s,
+    completely decoupled from oracle_attack.py's per-role budget (raised to
+    150-240s+) — so raising that outer budget never had any real effect.
+    The caller's timeout must actually reach the httpx.Client."""
+    reasoner = CyphexReasoner()
+    with patch("backend.reasoning.oracle_adapter.httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _client_returning(_mock_response(200, {"response": "ok"}))
+        reasoner.generate(model="m", prompt="x", timeout=390.0)
+    assert mock_client_cls.call_args.kwargs["timeout"] == 390.0
+
+
 def test_direct_ollama_sends_system_and_prompt_combined():
     reasoner = CyphexReasoner()
     client = _client_returning(_mock_response(200, {"response": "ok"}))

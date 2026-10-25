@@ -197,7 +197,7 @@ class CyphexReasoner:
         """True if Oracle agent-reasoning is active."""
         return self.interceptor is not None
 
-    def _direct_ollama(self, model: str, prompt: str) -> str:
+    def _direct_ollama(self, model: str, prompt: str, timeout: float = 120.0) -> str:
         """Plain Ollama /api/generate call — the fallback this class's own
         docstring always promised ("Falls back to direct Ollama calls if
         agent-reasoning isn't installed") but never implemented. Without
@@ -205,11 +205,29 @@ class CyphexReasoner:
         optional agent-reasoning package wasn't installed (the common
         case), so every DeepAgent planner call failed instantly, every
         agent tested 0 hypotheses, and a scan looked "done" in seconds
-        without ever touching the target."""
+        without ever touching the target.
+
+        Two real bugs found live: (1) no `options` meant Ollama loaded the
+        model at ITS OWN max context (131072 for llama3.1:8b) instead of
+        what these short prompts need — a 23GB footprint that no longer
+        fits in unified memory/VRAM, forcing a 52%/48% CPU/GPU split and
+        making every single call pathologically slow regardless of how
+        much RAM was free. (2) this method's own httpx timeout was a fixed
+        120s, completely decoupled from the caller's actual per-role budget
+        (oracle_attack.py's _call_reasoner raised that to 150-240s+) — so
+        raising the outer budget never had any effect; this always gave up
+        at 120s first and returned "" (counted as a quiet failure, not the
+        real timeout)."""
         try:
-            with httpx.Client(timeout=120.0) as client:
-                r = client.post(f"{self.host}/api/generate",
-                                json={"model": model, "prompt": prompt, "stream": False})
+            with httpx.Client(timeout=timeout) as client:
+                r = client.post(f"{self.host}/api/generate", json={
+                    "model": model, "prompt": prompt, "stream": False,
+                    # 8192 is generous for these planner/analyst/mutator
+                    # prompts (a few KB of surface summary + instructions)
+                    # and keeps the model's KV cache small enough to run
+                    # fully on GPU/unified memory instead of spilling to CPU.
+                    "options": {"num_ctx": 8192, "num_predict": 2048},
+                })
                 r.raise_for_status()
                 return r.json().get("response", "")
         except Exception as e:
@@ -264,6 +282,7 @@ class CyphexReasoner:
         severity: str = "",
         cwe: str = "",
         system: str = "",
+        timeout: float = 120.0,
         **kwargs,
     ) -> ReasoningResult:
         """
@@ -315,7 +334,7 @@ class CyphexReasoner:
         # its call just failed above) — a real, unenhanced Ollama call, not
         # an empty response. See _direct_ollama's docstring for why this
         # matters: without it every caller here silently got nothing.
-        response_text = self._direct_ollama(model, full_prompt)
+        response_text = self._direct_ollama(model, full_prompt, timeout=timeout)
         elapsed = (time.time() - start) * 1000
         self._call_count += 1
         self._total_time_ms += elapsed

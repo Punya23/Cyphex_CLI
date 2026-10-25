@@ -480,6 +480,12 @@ class AttackOracle:
                         }.get(role, "default"),
                         severity=severity,
                         cwe=cwe,
+                        # Without this, generate()'s own internal httpx
+                        # timeout was a decoupled, hardcoded 120s — raising
+                        # THIS caller's budget (above, total_budget) never
+                        # had any real effect, since the direct-Ollama call
+                        # always gave up first and returned "" quietly.
+                        timeout=timeout,
                     )
                 )
 
