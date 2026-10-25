@@ -80,3 +80,56 @@ def test_never_raises_when_sheets_module_is_unimportable():
     with patch("builtins.__import__", side_effect=ImportError("boom")):
         agent._log_hypothesis_row(ScanContext(target_url=agent.target), _hyp(),
                                    HypothesisResult(False, reason="x"))  # must not raise
+
+
+class TestRunBanners:
+    """log_run_start()/log_run_end() post a styled banner event to every
+    connected sheet, separate from log_row()'s per-hypothesis rows — the
+    visual run separator the Outcome column alone can't give you."""
+
+    def test_run_start_posts_one_event_per_connection(self):
+        from cyphex import sheets
+        with patch.object(sheets, "saved",
+                           return_value=[{"url": "u1", "secret": "s1"}, {"url": "u2", "secret": "s2"}]), \
+             patch.object(sheets._pool, "submit", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
+             patch.object(sheets, "_post_now") as mock_post:
+            sheets.log_run_start("scan_1", "https://example.com/app", "2026-01-01T00:00:00+00:00")
+        assert mock_post.call_count == 2
+        urls = {c.args[0] for c in mock_post.call_args_list}
+        assert urls == {"u1", "u2"}
+        body = mock_post.call_args_list[0].args[1]
+        assert body["type"] == "run_start"
+        assert body["scan_id"] == "scan_1"
+        assert body["secret"] == "s1"
+
+    def test_run_end_includes_before_after_and_patch_count(self):
+        from cyphex import sheets
+        with patch.object(sheets, "saved", return_value=[{"url": "u", "secret": "s"}]), \
+             patch.object(sheets._pool, "submit", side_effect=lambda fn, *a, **k: fn(*a, **k)), \
+             patch.object(sheets, "_post_now") as mock_post:
+            sheets.log_run_end("scan_1", 17, 24, 7)
+        body = mock_post.call_args.args[1]
+        assert body == {
+            "type": "run_end", "scan_id": "scan_1",
+            "score_before": 17, "score_after": 24, "patches_applied": 7,
+            "secret": "s",
+        }
+
+    def test_no_connection_posts_nothing(self):
+        from cyphex import sheets
+        with patch.object(sheets, "saved", return_value=[]), \
+             patch.object(sheets, "_post_now") as mock_post:
+            sheets.log_run_start("scan_1", "t", "ts")
+            sheets.log_run_end("scan_1", 0, 0, 0)
+        mock_post.assert_not_called()
+
+    def test_apps_script_handles_run_start_and_run_end_types(self):
+        """The webhook side (Apps Script) must branch on d.type for both new
+        event kinds, not just 'row' — this is the actual visual-separator
+        logic; a regression here would silently stop styling anything."""
+        from cyphex import sheets
+        script = sheets.setup_script("secret")
+        assert "run_start" in script
+        assert "run_end" in script
+        assert "merge()" in script  # banner rows span the full row width
+        assert "setBackground" in script  # header + banners are actually styled

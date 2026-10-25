@@ -354,6 +354,20 @@ class CyphexEngine:
             self._final_banner()
             return
 
+        # Log the scan-start banner to any connected Google Sheet so this
+        # run's rows are visually separated from whatever a previous scan
+        # already wrote — a no-op when nothing is connected (log_run_start
+        # checks saved() internally via _post_event).
+        try:
+            from cyphex import sheets as _sheets_mod
+            _sheets_mod.log_run_start(
+                self.scan_id,
+                str(self.repo_url or self.local_path or ""),
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            pass
+
         # Step 1: Get source code
         self._step("1/10", "GETTING SOURCE CODE")
 
@@ -3083,6 +3097,11 @@ class CyphexEngine:
         vulns = _exclude_network_findings(self.context.confirmed_vulns)
         if not vulns:
             print(f"  {C.G}No vulnerabilities to patch.{C.RST}")
+            try:
+                from cyphex import sheets as _sheets_mod
+                _sheets_mod.log_run_end(self.scan_id, 100, 100, 0)
+            except Exception:
+                pass
             return
 
         if COUNCIL_AVAILABLE:
@@ -3525,6 +3544,11 @@ class CyphexEngine:
                 f"score stays {score_before}/100 (0 of {len(vulns)} finding(s) were patchable; "
                 f"all are dynamic/runtime-only, no source file was traced).[/yellow]"
             )
+            try:
+                from cyphex import sheets as _sheets_mod
+                _sheets_mod.log_run_end(self.scan_id, score_before, score_before, 0)
+            except Exception:
+                pass
             self._post_patch_score = score_before
             self._post_patch_remaining = vulns
             self._patches_applied = 0
@@ -4288,6 +4312,14 @@ class CyphexEngine:
             title="[bold cyan]◈ SECURITY SCORE: BEFORE vs AFTER ◈[/bold cyan]",
             border_style="cyan", padding=(1, 2)
         ))
+
+        # Log the scan-end banner (real before/after score) to any connected
+        # Google Sheet, closing out this run's rows started by log_run_start().
+        try:
+            from cyphex import sheets as _sheets_mod
+            _sheets_mod.log_run_end(self.scan_id, score_before, score_after, len(patched_files))
+        except Exception:
+            pass
 
         # Save post-patch score for final banner
         self._post_patch_score = score_after

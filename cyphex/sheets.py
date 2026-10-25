@@ -24,19 +24,70 @@ _pool = ThreadPoolExecutor(max_workers=1)
 COLUMNS = ["Timestamp", "Scan ID", "Service", "Agent", "Method", "Endpoint", "Payload",
            "Vulnerability", "CWE", "Severity", "Outcome", "Confidence", "Reason"]
 
+# Apps Script, not Python, does the actual writing (it's a webhook, see this
+# module's docstring) — so every bit of per-run visual separation has to be
+# implemented here, not in Python. Runs otherwise looked identical to each
+# other with no way to tell where one scan ended and the next began.
 SETUP_SCRIPT = """\
 const SECRET = '__SECRET__';
 const COLUMNS = __COLUMNS__;
+const N = COLUMNS.length;
+const HEADER_BG = '#4c1d95';   // deep purple — CYPHEX brand
+const START_BG  = '#1e293b';   // slate — run start banner
+const END_BG_OK = '#166534';   // green — score improved
+const END_BG_FLAT = '#78350f'; // amber — no change
+const CONFIRMED_BG = '#fef2f2';
+const CONFIRMED_FG = '#b91c1c';
 
 function doPost(e) {
   let d;
   try { d = JSON.parse(e.postData.contents); } catch (_) { return out('bad request'); }
   if (d.secret !== SECRET) return out('forbidden');
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  if (sheet.getLastRow() === 0) sheet.appendRow(COLUMNS);
-  if (d.type === 'row') sheet.appendRow(COLUMNS.map(c => String(d.row[c] ?? '').slice(0, 2000)));
+  ensureHeader(sheet);
+
+  if (d.type === 'row') {
+    const row = COLUMNS.map(c => String(d.row[c] ?? '').slice(0, 2000));
+    sheet.appendRow(row);
+    const r = sheet.getLastRow();
+    if (String(d.row['Outcome']) === 'confirmed') {
+      sheet.getRange(r, 1, 1, N).setBackground(CONFIRMED_BG).setFontColor(CONFIRMED_FG);
+    }
+  } else if (d.type === 'run_start') {
+    const banner = `▶ SCAN START — ${d.scan_id || ''}  ·  target: ${d.target || ''}  ·  ${d.timestamp || ''}`;
+    appendBanner(sheet, banner, START_BG, '#ffffff');
+  } else if (d.type === 'run_end') {
+    const before = Number(d.score_before), after = Number(d.score_after);
+    const delta = isNaN(before) || isNaN(after) ? '' : (after - before >= 0 ? '+' : '') + (after - before);
+    const bg = !isNaN(before) && !isNaN(after) && after > before ? END_BG_OK : END_BG_FLAT;
+    const banner = `■ SCAN END — ${d.scan_id || ''}  ·  score ${d.score_before ?? '?'} -> ${d.score_after ?? '?'} (${delta})  ·  applied ${d.patches_applied ?? '?'}`;
+    appendBanner(sheet, banner, bg, '#ffffff');
+  }
   return out('ok');
 }
+
+function ensureHeader(sheet) {
+  if (sheet.getLastRow() !== 0) return;
+  sheet.appendRow(COLUMNS);
+  const header = sheet.getRange(1, 1, 1, N);
+  header.setBackground(HEADER_BG).setFontColor('#ffffff').setFontWeight('bold');
+  sheet.setFrozenRows(1);
+  sheet.setColumnWidths(1, N, 140);
+  try { sheet.setColumnWidth(COLUMNS.indexOf('Payload') + 1, 260); } catch (_) {}
+  try { sheet.setColumnWidth(COLUMNS.indexOf('Reason') + 1, 260); } catch (_) {}
+}
+
+// A full-width merged, colored row — the visual run separator the Outcome
+// column alone can't give you: every row before it is one scan, every row
+// after is the next.
+function appendBanner(sheet, text, bg, fg) {
+  sheet.appendRow([text]);
+  const r = sheet.getLastRow();
+  const range = sheet.getRange(r, 1, 1, N);
+  range.merge().setBackground(bg).setFontColor(fg).setFontWeight('bold')
+       .setHorizontalAlignment('center').setValue(text);
+}
+
 function out(s) { return ContentService.createTextOutput(s); }
 """
 
@@ -154,3 +205,29 @@ def log_row(row: dict) -> None:
     """Queue one row (keys = COLUMNS) to every connected sheet. Never raises, never blocks."""
     for conn in saved():
         _pool.submit(_post, conn, row)
+
+
+def _post_event(event: dict) -> None:
+    """Queue a run_start/run_end banner event to every connected sheet.
+    Shares the same fire-and-forget pool/semantics as log_row(): never
+    raises, never blocks the scan on a sheet outage."""
+    for conn in saved():
+        body = dict(event, secret=conn["secret"])
+        _pool.submit(_post_now, conn["url"], body)
+
+
+def log_run_start(scan_id: str, target: str, timestamp: str) -> None:
+    """A styled banner row marking where a new scan's rows begin — the
+    visual separator the Outcome column alone can't give you, so runs
+    don't all blur into one plain, undifferentiated list."""
+    _post_event({"type": "run_start", "scan_id": scan_id, "target": target, "timestamp": timestamp})
+
+
+def log_run_end(scan_id: str, score_before, score_after, patches_applied: int) -> None:
+    """A styled banner row closing out a scan with its real before/after
+    score — colored green when the score improved, amber when it didn't."""
+    _post_event({
+        "type": "run_end", "scan_id": scan_id,
+        "score_before": score_before, "score_after": score_after,
+        "patches_applied": patches_applied,
+    })
