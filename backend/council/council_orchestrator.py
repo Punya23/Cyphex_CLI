@@ -69,10 +69,22 @@ def is_approved_vote(value) -> bool:
     return False
 
 
-def ctx_for_tier() -> dict:
+def ctx_for_tier(model: str = "") -> dict:
     """
     Return tier-appropriate num_ctx and num_predict based on detected hardware.
-    Respects the cyphex-patch fine-tuned model's training context (4096).
+
+    num_ctx bounds PROMPT + OUTPUT together — a patch-generation prompt is
+    RAG-enriched (full function body + imports + CWE recipe + in-repo secure
+    example) and can easily run 2500-3500 tokens on its own, so the old
+    uniform 4096 ceiling for mid/low/minimal/cloud left barely any room for
+    the model's own OUTPUT once that prompt was accounted for — a live scan
+    confirmed this: 9 of 12 patches came back "invalid syntax — auto-rolled
+    back", the exact failure this file's own comments already named ("get
+    cut off at num_predict mid-JSON, leaving unbalanced brackets"). Only the
+    cyphex-patch fine-tune genuinely needs capping at its training context
+    (4096) — qwen2.5-coder/llama3.1/deepseek-coder all natively support far
+    more, so capping THEM at 4096 for that one model's sake was needlessly
+    truncating the common case.
     """
     try:
         from cyphex.hardware import detect_mode
@@ -80,13 +92,16 @@ def ctx_for_tier() -> dict:
     except Exception:
         mode = "mid"  # safe fallback
 
+    if "cyphex-patch" in (model or "").lower():
+        return {"num_ctx": 4096, "num_predict": 2048}
+
     tier_config = {
-        "ultra":   {"num_ctx": 8192, "num_predict": 4096},
-        "high":    {"num_ctx": 6144, "num_predict": 2048},
-        "mid":     {"num_ctx": 4096, "num_predict": 2048},
-        "low":     {"num_ctx": 4096, "num_predict": 1536},
-        "minimal": {"num_ctx": 4096, "num_predict": 1024},
-        "cloud":   {"num_ctx": 4096, "num_predict": 2048},
+        "ultra":   {"num_ctx": 12288, "num_predict": 6144},
+        "high":    {"num_ctx": 10240, "num_predict": 4096},
+        "mid":     {"num_ctx": 8192,  "num_predict": 3072},
+        "low":     {"num_ctx": 8192,  "num_predict": 2560},
+        "minimal": {"num_ctx": 6144,  "num_predict": 2048},
+        "cloud":   {"num_ctx": 8192,  "num_predict": 3072},
     }
     return tier_config.get(mode, tier_config["mid"])
 
@@ -346,7 +361,7 @@ class VRAMManager:
                     "prompt": prompt,
                     "stream": stream,
                     "keep_alive": "10m",
-                    "options": {"temperature": 0.1, "top_p": 0.9, **ctx_for_tier()}
+                    "options": {"temperature": 0.1, "top_p": 0.9, **ctx_for_tier(model)}
                 }
             )
             return r.json()["response"]
@@ -465,7 +480,7 @@ ANTI-HALLUCINATION RULES — apply on every response:
                                     "options": {
                                         "temperature": temperature,
                                         "top_p": 0.9,
-                                        **ctx_for_tier(),     # Tier-aware: 4096 (low) → 8192 (ultra)
+                                        **ctx_for_tier(model),  # Tier-aware: 6144 (minimal) -> 12288 (ultra)
                                     }
                                 }
                             ) as resp:
