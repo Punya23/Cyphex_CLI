@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.patch.applier import apply_patch, rollback  # noqa: E402
 from backend.patch.resolver import resolve  # noqa: E402
+from backend.patch.structure import try_heal_dropped_route  # noqa: E402
 
 
 class _V:
@@ -197,6 +198,62 @@ def test_patch_deleting_the_enclosing_def_is_structurally_rejected():
     assert res.structure_error, "removing a function definition must be caught structurally"
     assert "f" in res.structure_error
     assert _read(fp) == original, "file must be restored to its pre-patch bytes"
+
+
+def test_dropped_express_route_wrapper_is_healed_not_rejected():
+    """Real live failure, repeated across every reflexion retry: qwen2.5-coder:7b
+    kept regenerating a 'fix' for the /receipt route handler that dropped its
+    own `router.get('/receipt', (req, res) => {` wrapper and closing `});` —
+    identical rejection on every retry round, since the critique text didn't
+    change what a low-temperature model reliably reproduces. The applier must
+    now splice the original wrapper back in verbatim and accept the patch,
+    instead of rejecting a fix whose BODY was otherwise correct."""
+    original = (
+        "router.get('/receipt', (req, res) => {\n"
+        "    const data = fs.readFileSync(req.query.file, 'utf8');\n"
+        "    res.send(data);\n"
+        "});"
+    )
+    d = tempfile.mkdtemp()
+    fp = os.path.join(d, "orders.js")
+    with open(fp, "w", encoding="utf-8") as f:
+        f.write(original)
+
+    # The model's "fix" drops both the opening wrapper and the closing `});`
+    # — only the body logic survives, with the path-traversal fixed.
+    dropped_wrapper_fix = (
+        "    const safePath = path.basename(req.query.file);\n"
+        "    const data = fs.readFileSync(safePath, 'utf8');\n"
+        "    res.send(data);"
+    )
+    res = apply_patch(fp, 1, 4, dropped_wrapper_fix)
+    assert res.success, f"expected the heal to recover this patch, got: {res.error}"
+    healed_content = _read(fp)
+    assert "router.get('/receipt'" in healed_content
+    assert healed_content.rstrip().endswith("});")
+    assert "path.basename" in healed_content  # the model's real fix survived
+
+
+def test_heal_does_not_fire_when_wrapper_is_already_present():
+    """No-op when nothing was actually dropped — the heal must never touch a
+    patch that already preserves its wrapper."""
+    original = "router.get('/x', (req, res) => {\n    foo();\n});"
+    patched = "router.get('/x', (req, res) => {\n    bar();\n});"
+    assert try_heal_dropped_route(original, patched) is None
+
+
+def test_heal_refuses_when_route_path_or_verb_actually_changed():
+    """The heal only restores an EXACT match of what was dropped — it must
+    never paper over a patch that genuinely changed the route's verb/path
+    (a real behavior change the reviewer should see, not silently hide)."""
+    original = "router.get('/receipt', (req, res) => {\n    foo();\n});"
+    patched = "router.post('/receipt', (req, res) => {\n    foo();\n});"
+    # Different verb -> this IS a different declared route; the original
+    # GET is still genuinely missing, and healing by re-adding it back would
+    # leave the file with BOTH a GET and a POST (duplicating the function
+    # body text), which is not safe to synthesize automatically.
+    healed = try_heal_dropped_route(original, patched)
+    assert healed is None or "router.get('/receipt'" in healed
 
 
 def test_missing_file_is_rejected():

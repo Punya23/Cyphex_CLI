@@ -45,6 +45,46 @@ _PY_ROUTE_DECORATOR_RE = re.compile(
 )
 
 
+def try_heal_dropped_route(original: str, patched: str) -> Optional[str]:
+    """Mechanical repair for the one structural-failure shape that kept
+    recurring even across reflexion retries: a low-temperature 7B patcher
+    model regenerating the exact same dropped route wrapper no matter how
+    the critique is worded (observed live: the same 'route handler removed'
+    rejection on every retry round for /lookup, /receipt, /export). Rather
+    than keep asking the model to re-guess a wrapper it already proved it
+    can't reliably reproduce, splice the ORIGINAL wrapper line(s) back in
+    verbatim — never an LLM guess, so it can't introduce a new bug.
+
+    Only heals the common, unambiguous shape: the route registration is the
+    original range's own first line, and/or its closer is the original
+    range's own last line. Returns the healed code only if re-checking
+    confirms every declaration now survives; returns None otherwise (never
+    guesses at a repair it can't verify)."""
+    orig_lines = original.split("\n")
+    if not orig_lines:
+        return None
+
+    first, last = orig_lines[0], orig_lines[-1]
+    patched_routes = {(m.group(1).lower(), m.group(3)) for m in _JS_ROUTE_RE.finditer(patched)}
+
+    healed = patched
+    m = _JS_ROUTE_RE.search(first)
+    if m and (m.group(1).lower(), m.group(3)) not in patched_routes:
+        healed = first + "\n" + healed
+
+    stripped_last = last.strip()
+    # Common Express closer shapes only (e.g. "});", "})", ");") — never
+    # splice arbitrary trailing text, which could duplicate real code
+    # instead of just a wrapper.
+    if stripped_last and re.fullmatch(r"[)\s;}]*", stripped_last) and stripped_last not in healed:
+        if not healed.rstrip().endswith(stripped_last):
+            healed = healed.rstrip() + "\n" + last
+
+    if healed == patched:
+        return None  # nothing identified to heal
+    return healed if check_structure_preserved(original, healed) is None else None
+
+
 def check_structure_preserved(original: str, patched: str) -> Optional[str]:
     """
     Compare a vulnerable code range to its proposed replacement.

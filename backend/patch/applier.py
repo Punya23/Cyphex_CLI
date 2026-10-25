@@ -17,7 +17,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Optional
 
-from backend.patch.structure import check_structure_preserved
+from backend.patch.structure import check_structure_preserved, try_heal_dropped_route
 
 
 @dataclass
@@ -164,13 +164,23 @@ def apply_patch(
     original_range = "\n".join(lines[start_idx:end_idx])
     structure_error = check_structure_preserved(original_range, fixed_code)
     if structure_error:
-        return ApplyResult(
-            success=False,
-            file_path=file_path,
-            backup_content=backup_content,
-            error=f"Structural integrity check failed: {structure_error}",
-            structure_error=structure_error,
-        )
+        # A low-temperature patcher model regenerating the SAME dropped
+        # wrapper on every reflexion retry (observed live: identical
+        # "route handler removed" rejections across rounds) means asking
+        # the LLM to re-guess it again won't help. Try a deterministic,
+        # verbatim splice of the original wrapper line(s) instead — never
+        # an LLM guess, so it can't introduce a new bug — before giving up.
+        healed = try_heal_dropped_route(original_range, fixed_code)
+        if healed is not None:
+            fixed_code = healed
+        else:
+            return ApplyResult(
+                success=False,
+                file_path=file_path,
+                backup_content=backup_content,
+                error=f"Structural integrity check failed: {structure_error}",
+                structure_error=structure_error,
+            )
 
     # Split fixed code into lines, preserving structure
     fixed_lines = fixed_code.split("\n")
