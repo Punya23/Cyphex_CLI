@@ -40,16 +40,21 @@ _VULN = SimpleNamespace(name="SQL Injection", cwe="CWE-89")
 # ── Tier adaptation ───────────────────────────────────────────────────
 
 def test_tier_adaptation_values():
-    assert rounds_for_tier("low") == 1
-    assert rounds_for_tier("mid") == 2
-    assert rounds_for_tier("high") == 3
+    # Raised deliberately: the council verdict is advisory (a rejected patch
+    # still reaches the real, deterministic verify gate as long as it has
+    # code), so more rounds is a genuine extra chance at a correct fix, not
+    # a way to force a verdict — explicitly trading wall-clock time for a
+    # better shot at a real patch.
+    assert rounds_for_tier("low") == 2
+    assert rounds_for_tier("mid") == 3
+    assert rounds_for_tier("high") == 4
     assert k_for_tier("minimal") == 1
     assert k_for_tier("ultra") == 3
 
 
 def test_tier_adaptation_unknown_tier_falls_back():
     """An unrecognised tier must stay usable rather than collapse to zero work."""
-    assert rounds_for_tier("nonsense") == 2
+    assert rounds_for_tier("nonsense") == 3
     assert k_for_tier("nonsense") == 2
 
 

@@ -153,13 +153,21 @@ def _build_feedback(evidence: dict, last_patch: str, round_num: int) -> str:
 
 
 def rounds_for_tier(mode: str) -> int:
-    """Get max reflexion rounds based on hardware tier."""
+    """Get max reflexion rounds based on hardware tier.
+
+    Raised across the board: the council verdict is advisory (a rejected
+    patch still reaches the real, deterministic verify gate as long as it
+    has code), so a round that gets rejected by the council isn't wasted —
+    it's the verify gate's rollback/PASS that's final. More rounds is a
+    genuine extra chance at a correct fix, not a way to force a verdict;
+    trading more wall-clock time for a better shot at a real fix is an
+    explicit, deliberate choice here, not a change to what counts as safe."""
     tier_rounds = {
-        "ultra": 3,
-        "high": 3,
-        "mid": 2,
-        "low": 1,
-        "minimal": 1,
-        "cloud": 3,
+        "ultra": 5,
+        "high": 4,
+        "mid": 3,
+        "low": 2,
+        "minimal": 2,
+        "cloud": 4,
     }
-    return tier_rounds.get(mode, 2)
+    return tier_rounds.get(mode, 3)

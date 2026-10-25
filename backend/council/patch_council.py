@@ -669,7 +669,12 @@ class PatchCouncil(CouncilOrchestrator):
         # ══════════════════════════════════════════════════════════════
         # REFLEXION LOOP: Retry rejected patches with critique feedback
         # ══════════════════════════════════════════════════════════════
-        MAX_REFLEXION_RETRIES = 2
+        # Council verdict is advisory (cli_engine.py's apply step still lets
+        # a rejected-but-coded patch reach the real, deterministic verify
+        # gate) — a rejected round here isn't wasted work, it's one more
+        # genuine attempt before that real gate decides. Raised from 2 to 3:
+        # more wall-clock time for a real fix, not a way to force a verdict.
+        MAX_REFLEXION_RETRIES = 3
         rejected_indices = [
             i for i, r in enumerate(final_results)
             if r["patch_safety"] == "rejected" and r.get("dissent_reasons")
