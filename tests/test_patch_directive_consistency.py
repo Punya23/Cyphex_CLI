@@ -9,7 +9,9 @@ guaranteeing a no-op patch (the generator had nothing matching to change),
 not just a wrong one. _directive_for() only trusts a CWE-specific directive
 when the finding's own name is consistent with it.
 """
-from backend.council.patch_council import _directive_for, _build_patch_prompt, CWE_DIRECTIVES, _GENERIC_DIRECTIVE
+from backend.council.patch_council import (
+    _directive_for, _build_patch_prompt, CWE_DIRECTIVES, _GENERIC_DIRECTIVE, cwe_name_consistent,
+)
 
 
 def test_matching_name_gets_the_cwe_specific_directive():
@@ -70,6 +72,21 @@ def test_ssti_xxe_rfi_idor_sde_race_and_business_logic_have_real_directives():
         d = _directive_for(name, cwe)
         assert d == CWE_DIRECTIVES[cwe], f"{cwe} ({name!r}) fell back to generic unexpectedly"
         assert d != _GENERIC_DIRECTIVE
+
+
+def test_cwe_name_consistent_catches_the_live_ssrf_mistag():
+    """Real live bug: an SSRF finding tagged CWE-89 fed a SQLi KB strategy
+    into the patch prompt (via cli_engine.py's RAG lookup, a SEPARATE path
+    from _directive_for) even after the generation-directive side was
+    fixed — the patch generator produced a parameterized-query "fix" for a
+    finding with no SQL in it. cwe_name_consistent() is the single source
+    of truth both paths now share."""
+    assert cwe_name_consistent("Server-Side Request Forgery (SSRF)", "CWE-89") is False
+    assert cwe_name_consistent("Server-Side Request Forgery (SSRF)", "CWE-918") is True
+
+
+def test_cwe_name_consistent_unknown_cwe_is_never_consistent():
+    assert cwe_name_consistent("Whatever", "CWE-9999") is False
 
 
 def test_build_patch_prompt_uses_the_consistency_checked_directive():

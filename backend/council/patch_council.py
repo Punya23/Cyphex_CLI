@@ -171,17 +171,31 @@ _CWE_NAME_KEYWORDS = {
 }
 
 
+def cwe_name_consistent(vuln_name: str, cwe: str) -> bool:
+    """True if a planner-assigned CWE tag is actually consistent with the
+    finding's own name — e.g. CWE-89 needs "sql"/"query"/"injection" in the
+    name. CWEs with no keyword list are trusted by default (no known
+    mismatch class for them yet). Shared by _directive_for() below (which
+    finding to a PATCH on) and cli_engine.py's RAG/KB lookup (which
+    secure-example/anti-pattern to attach) — a mismatched tag fed EITHER
+    path the wrong guidance (confirmed live: an SSRF finding mistagged
+    CWE-89 got a SQL-parameterized-query "fix" from the KB side even after
+    the generation-directive side was fixed)."""
+    if cwe not in CWE_DIRECTIVES:
+        return False
+    keywords = _CWE_NAME_KEYWORDS.get(cwe)
+    if not keywords:
+        return True
+    return any(kw in (vuln_name or "").lower() for kw in keywords)
+
+
 def _directive_for(vuln_name: str, cwe: str) -> str:
     """The CWE-specific directive if the finding's own name is consistent
     with that CWE, else the generic (not actively-wrong) directive."""
     directive = CWE_DIRECTIVES.get(cwe)
     if not directive:
         return _GENERIC_DIRECTIVE
-    keywords = _CWE_NAME_KEYWORDS.get(cwe)
-    if not keywords:
-        return directive  # no keyword list for this CWE — trust the tag as before
-    name_lower = (vuln_name or "").lower()
-    if any(kw in name_lower for kw in keywords):
+    if cwe_name_consistent(vuln_name, cwe):
         return directive
     return _GENERIC_DIRECTIVE
 

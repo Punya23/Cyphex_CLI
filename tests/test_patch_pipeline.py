@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from backend.patch.applier import apply_patch, rollback  # noqa: E402
 from backend.patch.resolver import resolve  # noqa: E402
 from backend.patch.structure import try_heal_dropped_route  # noqa: E402
+from backend.patch.context import extract_function_span  # noqa: E402
 
 
 class _V:
@@ -254,6 +255,53 @@ def test_heal_refuses_when_route_path_or_verb_actually_changed():
     # body text), which is not safe to synthesize automatically.
     healed = try_heal_dropped_route(original, patched)
     assert healed is None or "router.get('/receipt'" in healed
+
+
+def test_re_extraction_finds_the_right_function_after_an_earlier_shift():
+    """Real live bug: multiple patches in one batch target the same file
+    (orders.js had 4+). cli_engine.py computes every patch's snippet/line
+    range ONCE in Phase 1, before any patch is applied — once an earlier
+    patch adds or removes lines, a LATER patch's stale line_num no longer
+    points at its own route, and extraction reads the wrong text entirely
+    (confirmed live: the same "GET /receipt" structural rejection repeated
+    identically across every reflexion retry, because the range being read
+    was wrong before generation even started). This pins the core fix:
+    re-running extract_function_span at the file's CURRENT content and a
+    delta-shifted line number finds the real target."""
+    original = (
+        "router.get('/a', (req, res) => {\n"
+        "    res.send('short');\n"
+        "});\n"
+        "\n"
+        "router.get('/receipt', (req, res) => {\n"
+        "    const orderId = req.query.id;\n"
+        "    res.send(`<p>${orderId}</p>`);\n"
+        "});\n"
+    )
+    # /receipt is at line 5 originally.
+    _, _, orig_s, orig_e = extract_function_span(original, 5, "js")
+    assert orig_s == 5 and "/receipt" in "\n".join(original.split("\n")[orig_s - 1:orig_e])
+
+    # Simulate an earlier patch REPLACING /a's 1-line body with a 4-line
+    # one — /receipt is now 3 lines further down (line 8, not 5).
+    shifted = (
+        "router.get('/a', (req, res) => {\n"
+        "    const x = 1;\n"
+        "    const y = 2;\n"
+        "    const z = 3;\n"
+        "    res.send('short');\n"
+        "});\n"
+        "\n"
+        "router.get('/receipt', (req, res) => {\n"
+        "    const orderId = req.query.id;\n"
+        "    res.send(`<p>${orderId}</p>`);\n"
+        "});\n"
+    )
+    delta = 3  # the earlier patch's net line-count change
+    new_snippet, _, new_s, new_e = extract_function_span(shifted, 5 + delta, "js")
+    assert new_s == 8, "re-extraction with the delta-shifted line must land on /receipt, not /a"
+    assert "/receipt" in new_snippet
+    assert "/a" not in new_snippet
 
 
 def test_missing_file_is_rejected():

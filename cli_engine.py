@@ -118,7 +118,7 @@ except Exception:
 # Council system imports
 sys.path.insert(0, os.path.dirname(__file__))
 try:
-    from backend.council.patch_council import PatchCouncil
+    from backend.council.patch_council import PatchCouncil, cwe_name_consistent
     from backend.council.debate_protocol import DebateProtocol
     from backend.council.analysis_council import AnalysisCouncil
     from backend.council.route_tracer import RouteTracer
@@ -3510,10 +3510,26 @@ class CyphexEngine:
                     if not loc:
                         loc = SimpleNamespace(rel=p["rel_path"], line=p["line_num"], url=None)
 
-                    strategy = kb.primary_strategy(p["cwe"])
-                    anti = kb.anti_patterns(p["cwe"])
+                    # Same mismatch class the patch-generation directive was
+                    # already fixed for: a planner-assigned CWE tag can be
+                    # inconsistent with the finding's own name (an SSRF
+                    # finding mistagged CWE-89 got fed SQLi KB guidance here
+                    # even after the generation-directive side was fixed,
+                    # confirmed live). Only pull CWE-specific KB strategy/
+                    # anti-patterns/secure-example when the tag actually
+                    # matches the finding; a trustworthy generic empty
+                    # strategy beats actively-wrong CWE-specific guidance.
+                    # COUNCIL_AVAILABLE and PATCH_V2_AVAILABLE are independent
+                    # import gates — cwe_name_consistent only exists under the
+                    # former, so this block (gated by the latter) can't assume
+                    # it's bound; fall back to trusting the tag, same as before
+                    # this fix, rather than a NameError.
+                    _consistent = cwe_name_consistent(p.get("vuln_type", ""), p["cwe"]) if COUNCIL_AVAILABLE else True
+                    kb_cwe = p["cwe"] if _consistent else ""
+                    strategy = kb.primary_strategy(kb_cwe) if kb_cwe else None
+                    anti = kb.anti_patterns(kb_cwe) if kb_cwe else []
                     related_files = indexer.find_for_vuln(p["vuln"], loc)
-                    secure_example = indexer.find_secure_pattern(p["cwe"])
+                    secure_example = indexer.find_secure_pattern(kb_cwe) if kb_cwe else ""
 
                     p["context_snippet"] = context_snippet
                     p["extraction_quality"] = extraction_quality
@@ -3711,8 +3727,50 @@ class CyphexEngine:
             rounds_for_tier(getattr(self, "_hw_tier", "mid")) if REFLEXION_AVAILABLE else 1
         )
 
+        # Multiple patches often target the SAME file (orders.js alone had
+        # 4+ in one real scan). p["lines"]/p["snippet"]/p["start_l"]/
+        # p["end_l"] were all computed ONCE in Phase 1, before any patch was
+        # applied — once an earlier patch to that file adds or removes
+        # lines, every LATER patch's stale range points at the wrong text
+        # entirely: the model gets shown the wrong "vulnerable code", and
+        # the applier's own fresh-read structural check (which compares
+        # against ITS OWN fresh read, sliced at the stale line numbers)
+        # rejects it because that slice isn't the real route anymore. Live
+        # proof: the same route ("GET /receipt") failed the structural
+        # check identically across every reflexion retry — not a model
+        # quality problem, the line range being read was already wrong
+        # before generation even started. Once a file has been modified by
+        # an earlier patch in this batch, every later patch targeting it is
+        # fully re-extracted from the file's CURRENT content — using
+        # line_num shifted by that file's ACCUMULATED line-count delta from
+        # earlier applies in this batch, since the stale line_num itself no
+        # longer points at the right place either once the file has grown
+        # or shrunk above it.
+        _line_delta_by_file: dict = {}
+
         # ── Phase 3: Present each patch — template → council → verify → apply ──
         for i, p in enumerate(patchable):
+            delta = _line_delta_by_file.get(p["filepath"], 0)
+            if delta:
+                try:
+                    fresh_content = open(p["filepath"], "r", encoding="utf-8", errors="ignore").read()
+                    fresh_lines = fresh_content.split("\n")
+                    lang = p.get("lang") or detect_language(p["filepath"])
+                    shifted_line = p["line_num"] + delta
+                    new_snippet, new_quality, new_s, new_e = extract_function_span(
+                        fresh_content, shifted_line, lang
+                    )
+                    if new_s is not None:
+                        p["lines"] = [l + "\n" for l in fresh_lines]
+                        p["snippet"] = new_snippet
+                        p["ctx_quality"] = new_quality
+                        p["start_l"] = new_s - 1
+                        p["end_l"] = new_e
+                except Exception as e:
+                    self._vconsole(
+                        f"[yellow]  ⚠ Could not re-extract {p['rel_path']} after an earlier "
+                        f"patch shifted its lines ({str(e)[:60]}) — using the last-known range.[/yellow]"
+                    )
             v = p["vuln"]
             sev_colors = {"Critical": "red", "High": "bright_red", "Medium": "yellow", "Low": "green"}
             sev_icons  = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}
@@ -4173,6 +4231,18 @@ class CyphexEngine:
                 "vuln_type": p.get("vuln_type", ""),
             })
             console.print(f"[green][APPLIED][/green] Patch applied to {p['rel_path']} [dim]({fix_source})[/dim]\n")
+
+            # Record this file's net line-count change so any LATER patch
+            # targeting the same file re-extracts from the right place
+            # instead of reading stale, now-wrong lines (see the comment at
+            # the top of this loop — this is what "an earlier patch shifted
+            # its lines" above is tracking).
+            window_lines = p["end_l"] - p["start_l"]
+            new_lines = len(fixed.split("\n"))
+            if new_lines != window_lines:
+                _line_delta_by_file[p["filepath"]] = (
+                    _line_delta_by_file.get(p["filepath"], 0) + (new_lines - window_lines)
+                )
 
             # NOTE: Disabled write-back to original source directory.
             # Patches are applied in the sandbox copy (self.source_dir).
