@@ -132,6 +132,43 @@ CWE_DIRECTIVES = {
 _GENERIC_DIRECTIVE = ("Eliminate the vulnerability completely. The fix must remove the dangerous "
                       "pattern, not just add a superficial validation.")
 
+# A hypothesis's CWE tag comes from the PLANNER LLM's free-text output, not
+# deterministic code, and can be inconsistent with the finding's own name —
+# confirmed live: "Internal IP Leakage", "Internal Service Discovery", and
+# "HTTP Request Smuggling" all tagged CWE-89 (SQL injection). Trusting that
+# tag blindly handed the generator the WRONG fix directive — "replace
+# template literals with parameterized queries" for a finding with no SQL
+# in it at all — which guarantees a no-op patch, not a wrong-but-plausible
+# one. Each CWE directive only fires when the finding's own name actually
+# mentions something consistent with it; otherwise the generic directive
+# (which gives no specific-but-wrong instruction) is used instead.
+_CWE_NAME_KEYWORDS = {
+    "CWE-78": ("command", "cmdi", "exec", "shell", "os command"),
+    "CWE-89": ("sql", "sqli", "database", "query", "union", "injection"),
+    "CWE-79": ("xss", "cross-site script", "script injection", "dom"),
+    "CWE-798": ("secret", "credential", "hardcoded", "hard-coded", "password", "api key", "token"),
+    "CWE-918": ("ssrf", "server-side request", "internal", "metadata", "loopback", "redirect"),
+    "CWE-22": ("path traversal", "directory traversal", "file inclusion", "lfi", "rfi"),
+    "CWE-942": ("cors", "cross-origin"),
+    "CWE-287": ("auth", "login", "credential", "session"),
+    "CWE-352": ("csrf", "cross-site request forgery"),
+}
+
+
+def _directive_for(vuln_name: str, cwe: str) -> str:
+    """The CWE-specific directive if the finding's own name is consistent
+    with that CWE, else the generic (not actively-wrong) directive."""
+    directive = CWE_DIRECTIVES.get(cwe)
+    if not directive:
+        return _GENERIC_DIRECTIVE
+    keywords = _CWE_NAME_KEYWORDS.get(cwe)
+    if not keywords:
+        return directive  # no keyword list for this CWE — trust the tag as before
+    name_lower = (vuln_name or "").lower()
+    if any(kw in name_lower for kw in keywords):
+        return directive
+    return _GENERIC_DIRECTIVE
+
 
 def _build_patch_prompt(vuln_dict: dict) -> str:
     """
@@ -149,7 +186,7 @@ def _build_patch_prompt(vuln_dict: dict) -> str:
     context = vuln_dict.get("context", "")
     memory_hint = vuln_dict.get("memory_hint", "")
     oracle = vuln_dict.get("oracle_analysis")
-    directive = CWE_DIRECTIVES.get(cwe, _GENERIC_DIRECTIVE)
+    directive = _directive_for(vuln_name, cwe)
 
     parts = [
         f"Vulnerability: {vuln_name} ({cwe})",
