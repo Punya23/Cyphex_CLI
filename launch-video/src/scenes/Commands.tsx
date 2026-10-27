@@ -1,4 +1,11 @@
-import { AbsoluteFill, Easing, Img, interpolate, staticFile, useCurrentFrame } from "remotion";
+import {
+  AbsoluteFill,
+  Easing,
+  Img,
+  interpolate,
+  staticFile,
+  useCurrentFrame,
+} from "remotion";
 import { Appear, Cursor, Eyebrow, Headline } from "../components/kit";
 import { C, CLAMP, FONT_MONO } from "../theme";
 
@@ -36,18 +43,35 @@ const wirePath = (i: number): string => {
 
 const bezierPoint = (i: number, t: number): { x: number; y: number } => {
   const y = rowY(i);
-  const [x0, y0, x1, y1, x2, y2, x3, y3] = [P0.x, P0.y, P0.x + 110, P0.y, ROW_X - 110, y, ROW_X, y];
+  const [x0, y0, x1, y1, x2, y2, x3, y3] = [
+    P0.x,
+    P0.y,
+    P0.x + 110,
+    P0.y,
+    ROW_X - 110,
+    y,
+    ROW_X,
+    y,
+  ];
   const u = 1 - t;
   return {
-    x: u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
-    y: u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3,
+    x:
+      u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3,
+    y:
+      u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3,
   };
 };
 
-const Wire: React.FC<{ readonly i: number; readonly active: boolean }> = ({ i, active }) => {
+const Wire: React.FC<{ readonly i: number; readonly active: boolean }> = ({
+  i,
+  active,
+}) => {
   const frame = useCurrentFrame();
   const at = WIRE_START + i * WIRE_STEP;
-  const draw = interpolate(frame, [at, at + WIRE_LEN], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const draw = interpolate(frame, [at, at + WIRE_LEN], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const pulseT = draw < 1 ? draw : ((frame - at - WIRE_LEN) * 0.025) % 1;
   const showPulse = draw > 0 && (draw < 1 || active);
   const pt = bezierPoint(i, pulseT);
@@ -63,15 +87,29 @@ const Wire: React.FC<{ readonly i: number; readonly active: boolean }> = ({ i, a
         strokeDasharray={1}
         strokeDashoffset={1 - draw}
       />
-      {showPulse ? <circle cx={pt.x} cy={pt.y} r={8} fill={C.coral} style={{ filter: `drop-shadow(0 0 12px ${C.coral})` }} /> : null}
+      {showPulse ? (
+        <circle
+          cx={pt.x}
+          cy={pt.y}
+          r={8}
+          fill={C.coral}
+          style={{ filter: `drop-shadow(0 0 12px ${C.coral})` }}
+        />
+      ) : null}
     </g>
   );
 };
 
-const Row: React.FC<{ readonly i: number; readonly active: boolean }> = ({ i, active }) => {
+const Row: React.FC<{ readonly i: number; readonly active: boolean }> = ({
+  i,
+  active,
+}) => {
   const frame = useCurrentFrame();
   const at = WIRE_START + i * WIRE_STEP + WIRE_LEN - 4;
-  const p = interpolate(frame, [at, at + 14], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 14], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const { cmd, desc } = COMMANDS[i];
   return (
     <div
@@ -105,17 +143,32 @@ const Row: React.FC<{ readonly i: number; readonly active: boolean }> = ({ i, ac
       >
         {cmd}
       </div>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 28, color: active ? C.text : C.dim, width: 560 }}>{desc}</div>
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 28,
+          color: active ? C.text : C.dim,
+          width: 560,
+        }}
+      >
+        {desc}
+      </div>
     </div>
   );
 };
 
 export const Commands: React.FC = () => {
   const frame = useCurrentFrame();
-  const nodeIn = interpolate(frame, [6, 24], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const nodeIn = interpolate(frame, [6, 24], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const hacking = frame >= WIRE_START;
   const bob = Math.sin(frame / 9) * 6;
-  const active = frame >= ACTIVE_FROM ? Math.floor((frame - ACTIVE_FROM) / ACTIVE_EVERY) % COMMANDS.length : -1;
+  const active =
+    frame >= ACTIVE_FROM
+      ? Math.floor((frame - ACTIVE_FROM) / ACTIVE_EVERY) % COMMANDS.length
+      : -1;
 
   return (
     <AbsoluteFill>
@@ -128,7 +181,11 @@ export const Commands: React.FC = () => {
         </Appear>
       </div>
 
-      <svg width={1920} height={1080} style={{ position: "absolute", inset: 0 }}>
+      <svg
+        width={1920}
+        height={1080}
+        style={{ position: "absolute", inset: 0 }}
+      >
         {COMMANDS.map((_, i) => (
           <Wire key={i} i={i} active={i === active} />
         ))}
@@ -149,10 +206,23 @@ export const Commands: React.FC = () => {
           translate: `0px ${(1 - nodeIn) * 30}px`,
         }}
       >
-        <div style={{ display: "flex", justifyContent: "center", translate: `0px ${bob}px` }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            translate: `0px ${bob}px`,
+          }}
+        >
           <Img
-            src={staticFile(hacking ? "brand/expr_hacking.png" : "brand/expr_focused.png")}
-            style={{ width: 190, height: 190, objectFit: "contain", imageRendering: "pixelated" }}
+            src={staticFile(
+              hacking ? "brand/expr_hacking.png" : "brand/expr_focused.png",
+            )}
+            style={{
+              width: 190,
+              height: 190,
+              objectFit: "contain",
+              imageRendering: "pixelated",
+            }}
           />
         </div>
         <div
