@@ -9,17 +9,19 @@ import { Voiceover } from "./components/Voiceover";
 import { Compare } from "./scenes/Compare";
 import { CTA } from "./scenes/CTA";
 import { DecisionGate } from "./scenes/DecisionGate";
-import { LocalFirst } from "./scenes/LocalFirst";
 import { LogoReveal } from "./scenes/LogoReveal";
 import { Problem } from "./scenes/Problem";
 import {
   RealArena,
+  RealChat,
+  RealConnect,
   RealCouncil,
   RealGenome,
   RealHypothesis,
   RealIntro,
   RealPatch,
   RealScan,
+  RealSheet,
   RealSwarm,
 } from "./scenes/Real";
 import { VerifyGate } from "./scenes/VerifyGate";
@@ -75,7 +77,7 @@ const DECK: readonly {
   {
     id: "problem",
     label: "Problem",
-    frames: 150,
+    frames: 135,
     Comp: Problem,
     enter: "fade",
   },
@@ -84,6 +86,13 @@ const DECK: readonly {
     label: "Product",
     frames: 150,
     Comp: LogoReveal,
+    enter: "fade",
+  },
+  {
+    id: "connect",
+    label: "Webhook",
+    frames: 225,
+    Comp: RealConnect,
     enter: "fade",
   },
   { id: "scan", label: "Scan", frames: 270, Comp: RealScan, enter: "fade" },
@@ -97,7 +106,7 @@ const DECK: readonly {
   {
     id: "hypothesis",
     label: "Reasoning",
-    frames: 450,
+    frames: 360,
     Comp: RealHypothesis,
     enter: "fade",
   },
@@ -111,7 +120,7 @@ const DECK: readonly {
   {
     id: "genome",
     label: "Genome",
-    frames: 250,
+    frames: 235,
     Comp: RealGenome,
     enter: "fade",
   },
@@ -132,7 +141,7 @@ const DECK: readonly {
   {
     id: "patch",
     label: "Patching",
-    frames: 330,
+    frames: 315,
     Comp: RealPatch,
     enter: "wipeLeft",
   },
@@ -144,18 +153,25 @@ const DECK: readonly {
     enter: "fade",
   },
   {
+    id: "sheet",
+    label: "Sheets",
+    frames: 180,
+    Comp: RealSheet,
+    enter: "fade",
+  },
+  {
+    id: "chat",
+    label: "Chat",
+    frames: 200,
+    Comp: RealChat,
+    enter: "fade",
+  },
+  {
     id: "compare",
     label: "Compare",
     frames: 255,
     Comp: Compare,
     enter: "wipeLeft",
-  },
-  {
-    id: "local",
-    label: "Local-first",
-    frames: 150,
-    Comp: LocalFirst,
-    enter: "fade",
   },
   { id: "cta", label: "Get started", frames: 180, Comp: CTA, enter: "fade" },
 ];

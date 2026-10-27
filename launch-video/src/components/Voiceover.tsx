@@ -6,11 +6,12 @@ import { Audio, Sequence, staticFile } from "remotion";
 // frames past its scene without being cut by the scene's Sequence.
 const LINES: readonly { readonly file: string; readonly scene: string; readonly offset: number }[] = [
   { file: "vo01-intro.mp3", scene: "intro", offset: 10 },
-  { file: "vo02-problem.mp3", scene: "problem", offset: 20 },
+  { file: "vo02-problem.mp3", scene: "problem", offset: 12 },
   { file: "vo03-logo.mp3", scene: "logo", offset: 10 },
+  { file: "vo11-connect.mp3", scene: "connect", offset: 10 },
   { file: "vo05-pipeline.mp3", scene: "scan", offset: 8 },
-  { file: "vo06-swarm.mp3", scene: "swarm", offset: 4 },
-  { file: "vo05b-hypothesis.mp3", scene: "hypothesis", offset: 10 },
+  { file: "vo06-swarm.mp3", scene: "swarm", offset: 16 },
+  { file: "vo05b-hypothesis.mp3", scene: "hypothesis", offset: 32 },
   { file: "vo06c-council.mp3", scene: "council", offset: 8 },
   { file: "vo07-genome.mp3", scene: "genome", offset: 10 },
   // 12.5s line: starts in the attack-sim scene so its 2nd sentence lands as the gate scene opens
@@ -18,8 +19,9 @@ const LINES: readonly { readonly file: string; readonly scene: string; readonly 
   { file: "vo06b-debate.mp3", scene: "patch", offset: 6 },
   { file: "vo07a-verify.mp3", scene: "verify", offset: 20 },
   { file: "vo07b-verify.mp3", scene: "verify", offset: 108 },
+  { file: "vo12-sheet.mp3", scene: "sheet", offset: 12 },
+  { file: "vo13-chat.mp3", scene: "chat", offset: 10 },
   { file: "vo10-compare.mp3", scene: "compare", offset: 10 },
-  { file: "vo08-local.mp3", scene: "local", offset: 16 },
   { file: "vo09-cta.mp3", scene: "cta", offset: 66 },
 ];
 
