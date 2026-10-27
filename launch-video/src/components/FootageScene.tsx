@@ -1,4 +1,11 @@
-import { AbsoluteFill, Easing, OffthreadVideo, interpolate, staticFile, useCurrentFrame } from "remotion";
+import {
+  AbsoluteFill,
+  Easing,
+  OffthreadVideo,
+  interpolate,
+  staticFile,
+  useCurrentFrame,
+} from "remotion";
 import { Appear, Eyebrow, Headline } from "./kit";
 import { C, CLAMP, FONT_MONO } from "../theme";
 
@@ -11,7 +18,12 @@ const WIN = { x: 40, y: 82, w: 1470, h: 950 } as const;
 const COL = { x: 1542, w: 338 } as const;
 
 /** Camera keyframe: centre (cx, cy in 0..1 of the recording) and zoom, from frame `f`. */
-export type ZoomKey = { readonly f: number; readonly cx: number; readonly cy: number; readonly z: number };
+export type ZoomKey = {
+  readonly f: number;
+  readonly cx: number;
+  readonly cy: number;
+  readonly z: number;
+};
 /** Right-column callout that appears at frame `at`. */
 export type Card = {
   readonly at: number;
@@ -30,7 +42,10 @@ export type Mark = {
   readonly h: number;
 };
 
-const camera = (keys: readonly ZoomKey[], frame: number): Pick<ZoomKey, "cx" | "cy" | "z"> => {
+const camera = (
+  keys: readonly ZoomKey[],
+  frame: number,
+): Pick<ZoomKey, "cx" | "cy" | "z"> => {
   if (keys.length === 0) return { cx: 0.5, cy: 0.5, z: 1 };
   if (frame <= keys[0].f) return keys[0];
   for (let i = 0; i < keys.length - 1; i++) {
@@ -38,13 +53,18 @@ const camera = (keys: readonly ZoomKey[], frame: number): Pick<ZoomKey, "cx" | "
     const b = keys[i + 1];
     if (frame < b.f) {
       const t = EASE_IO((frame - a.f) / (b.f - a.f));
-      return { cx: a.cx + (b.cx - a.cx) * t, cy: a.cy + (b.cy - a.cy) * t, z: a.z + (b.z - a.z) * t };
+      return {
+        cx: a.cx + (b.cx - a.cx) * t,
+        cy: a.cy + (b.cy - a.cy) * t,
+        z: a.z + (b.z - a.z) * t,
+      };
     }
   }
   return keys[keys.length - 1];
 };
 
-const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+const clamp = (v: number, lo: number, hi: number): number =>
+  Math.min(hi, Math.max(lo, v));
 
 export const FootageScene: React.FC<{
   readonly clip: string;
@@ -60,7 +80,10 @@ export const FootageScene: React.FC<{
   const { cx, cy, z } = camera(zoom, frame);
   const tx = clamp(WIN.w / 2 - z * cx * WIN.w, WIN.w * (1 - z), 0);
   const ty = clamp(WIN.h / 2 - z * cy * WIN.h, WIN.h * (1 - z), 0);
-  const winIn = interpolate(frame, [0, 14], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const winIn = interpolate(frame, [0, 14], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const shown = cards.filter((c) => frame >= c.at);
   const activeAt = shown.length ? shown[shown.length - 1].at : -1;
   const compact = cards.length > 4;
@@ -91,11 +114,20 @@ export const FootageScene: React.FC<{
             transform: `translate(${tx}px, ${ty}px) scale(${z})`,
           }}
         >
-          <OffthreadVideo src={staticFile(`footage/${clip}.mp4`)} muted style={{ width: WIN.w, height: WIN.h }} />
+          <OffthreadVideo
+            src={staticFile(`footage/${clip}.mp4`)}
+            muted
+            style={{ width: WIN.w, height: WIN.h }}
+          />
         </div>
 
         {marks.map((m) => {
-          const p = interpolate(frame, [m.from, m.from + 8, m.to - 8, m.to], [0, 1, 1, 0], CLAMP);
+          const p = interpolate(
+            frame,
+            [m.from, m.from + 8, m.to - 8, m.to],
+            [0, 1, 1, 0],
+            CLAMP,
+          );
           return (
             <div
               key={`${m.from}-${m.x}-${m.y}`}
@@ -129,7 +161,8 @@ export const FootageScene: React.FC<{
             color: C.dim,
           }}
         >
-          <span style={{ color: C.coral }}>●</span> REAL TERMINAL{note ? ` · ${note}` : ""}
+          <span style={{ color: C.coral }}>●</span> REAL TERMINAL
+          {note ? ` · ${note}` : ""}
         </div>
       </div>
 
@@ -142,9 +175,22 @@ export const FootageScene: React.FC<{
         </Appear>
       </div>
 
-      <div style={{ position: "absolute", left: COL.x, top: 340, width: COL.w, display: "flex", flexDirection: "column", gap: compact ? 9 : 14 }}>
+      <div
+        style={{
+          position: "absolute",
+          left: COL.x,
+          top: 340,
+          width: COL.w,
+          display: "flex",
+          flexDirection: "column",
+          gap: compact ? 9 : 14,
+        }}
+      >
         {shown.map((c) => {
-          const p = interpolate(frame, [c.at, c.at + 12], [0, 1], { ...CLAMP, easing: EASE_OUT });
+          const p = interpolate(frame, [c.at, c.at + 12], [0, 1], {
+            ...CLAMP,
+            easing: EASE_OUT,
+          });
           const active = c.at === activeAt;
           const color = c.color ?? C.coral;
           return (
@@ -163,12 +209,48 @@ export const FootageScene: React.FC<{
                 fontFamily: FONT_MONO,
               }}
             >
-              <div style={{ fontSize: compact ? 21 : 24, fontWeight: 700, color: active ? color : C.text, lineHeight: 1.2 }}>{c.title}</div>
-              {c.sub ? <div style={{ fontSize: compact ? 16 : 19, color: C.dim, marginTop: compact ? 3 : 6, lineHeight: 1.3 }}>{c.sub}</div> : null}
+              <div
+                style={{
+                  fontSize: compact ? 21 : 24,
+                  fontWeight: 700,
+                  color: active ? color : C.text,
+                  lineHeight: 1.2,
+                }}
+              >
+                {c.title}
+              </div>
+              {c.sub ? (
+                <div
+                  style={{
+                    fontSize: compact ? 16 : 19,
+                    color: C.dim,
+                    marginTop: compact ? 3 : 6,
+                    lineHeight: 1.3,
+                  }}
+                >
+                  {c.sub}
+                </div>
+              ) : null}
               {c.chips ? (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: compact ? 5 : 8 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 8,
+                    marginTop: compact ? 5 : 8,
+                  }}
+                >
                   {c.chips.map((chip) => (
-                    <span key={chip} style={{ fontSize: 16, color: CYAN, border: `1px solid ${CYAN}66`, borderRadius: 8, padding: "2px 8px" }}>
+                    <span
+                      key={chip}
+                      style={{
+                        fontSize: 16,
+                        color: CYAN,
+                        border: `1px solid ${CYAN}66`,
+                        borderRadius: 8,
+                        padding: "2px 8px",
+                      }}
+                    >
                       {chip}
                     </span>
                   ))}

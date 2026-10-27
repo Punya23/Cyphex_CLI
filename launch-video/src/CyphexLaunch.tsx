@@ -30,15 +30,33 @@ const timing = linearTiming({ durationInFrames: T });
 
 // Transition INTO a scene, by name (the presentation types don't unify).
 const ENTER = {
-  fade: (key: string) => <TransitionSeries.Transition key={key} presentation={fade()} timing={timing} />,
+  fade: (key: string) => (
+    <TransitionSeries.Transition
+      key={key}
+      presentation={fade()}
+      timing={timing}
+    />
+  ),
   slideRight: (key: string) => (
-    <TransitionSeries.Transition key={key} presentation={slide({ direction: "from-right" })} timing={timing} />
+    <TransitionSeries.Transition
+      key={key}
+      presentation={slide({ direction: "from-right" })}
+      timing={timing}
+    />
   ),
   slideBottom: (key: string) => (
-    <TransitionSeries.Transition key={key} presentation={slide({ direction: "from-bottom" })} timing={timing} />
+    <TransitionSeries.Transition
+      key={key}
+      presentation={slide({ direction: "from-bottom" })}
+      timing={timing}
+    />
   ),
   wipeLeft: (key: string) => (
-    <TransitionSeries.Transition key={key} presentation={wipe({ direction: "from-left" })} timing={timing} />
+    <TransitionSeries.Transition
+      key={key}
+      presentation={wipe({ direction: "from-left" })}
+      timing={timing}
+    />
   ),
 } as const;
 
@@ -54,30 +72,104 @@ const DECK: readonly {
   readonly enter?: keyof typeof ENTER;
 }[] = [
   { id: "intro", label: "Intro", frames: 165, Comp: RealIntro },
-  { id: "problem", label: "Problem", frames: 150, Comp: Problem, enter: "fade" },
-  { id: "logo", label: "Product", frames: 150, Comp: LogoReveal, enter: "fade" },
+  {
+    id: "problem",
+    label: "Problem",
+    frames: 150,
+    Comp: Problem,
+    enter: "fade",
+  },
+  {
+    id: "logo",
+    label: "Product",
+    frames: 150,
+    Comp: LogoReveal,
+    enter: "fade",
+  },
   { id: "scan", label: "Scan", frames: 270, Comp: RealScan, enter: "fade" },
-  { id: "swarm", label: "Agents", frames: 280, Comp: RealSwarm, enter: "slideRight" },
-  { id: "hypothesis", label: "Reasoning", frames: 450, Comp: RealHypothesis, enter: "fade" },
-  { id: "council", label: "Council", frames: 170, Comp: RealCouncil, enter: "wipeLeft" },
-  { id: "genome", label: "Genome", frames: 250, Comp: RealGenome, enter: "fade" },
-  { id: "arena", label: "Attack sim", frames: 170, Comp: RealArena, enter: "slideRight" },
-  { id: "gate", label: "Zero-day", frames: 300, Comp: DecisionGate, enter: "slideBottom" },
-  { id: "patch", label: "Patching", frames: 330, Comp: RealPatch, enter: "wipeLeft" },
-  { id: "verify", label: "Verify", frames: 300, Comp: VerifyGate, enter: "fade" },
-  { id: "compare", label: "Compare", frames: 240, Comp: Compare, enter: "wipeLeft" },
-  { id: "local", label: "Local-first", frames: 150, Comp: LocalFirst, enter: "fade" },
+  {
+    id: "swarm",
+    label: "Agents",
+    frames: 280,
+    Comp: RealSwarm,
+    enter: "slideRight",
+  },
+  {
+    id: "hypothesis",
+    label: "Reasoning",
+    frames: 450,
+    Comp: RealHypothesis,
+    enter: "fade",
+  },
+  {
+    id: "council",
+    label: "Council",
+    frames: 170,
+    Comp: RealCouncil,
+    enter: "wipeLeft",
+  },
+  {
+    id: "genome",
+    label: "Genome",
+    frames: 250,
+    Comp: RealGenome,
+    enter: "fade",
+  },
+  {
+    id: "arena",
+    label: "Attack sim",
+    frames: 170,
+    Comp: RealArena,
+    enter: "slideRight",
+  },
+  {
+    id: "gate",
+    label: "Zero-day",
+    frames: 300,
+    Comp: DecisionGate,
+    enter: "slideBottom",
+  },
+  {
+    id: "patch",
+    label: "Patching",
+    frames: 330,
+    Comp: RealPatch,
+    enter: "wipeLeft",
+  },
+  {
+    id: "verify",
+    label: "Verify",
+    frames: 300,
+    Comp: VerifyGate,
+    enter: "fade",
+  },
+  {
+    id: "compare",
+    label: "Compare",
+    frames: 240,
+    Comp: Compare,
+    enter: "wipeLeft",
+  },
+  {
+    id: "local",
+    label: "Local-first",
+    frames: 150,
+    Comp: LocalFirst,
+    enter: "fade",
+  },
   { id: "cta", label: "Get started", frames: 180, Comp: CTA, enter: "fade" },
 ];
 
-export const TOTAL_FRAMES = DECK.reduce((a, s) => a + s.frames, 0) - T * (DECK.length - 1);
+export const TOTAL_FRAMES =
+  DECK.reduce((a, s) => a + s.frames, 0) - T * (DECK.length - 1);
 
 // Each scene starts where the previous one ends minus the transition overlap.
-export const SECTIONS: readonly (Section & { readonly id: string })[] = DECK.map((s, i) => ({
-  id: s.id,
-  label: s.label,
-  from: DECK.slice(0, i).reduce((a, d) => a + d.frames, 0) - T * i,
-}));
+export const SECTIONS: readonly (Section & { readonly id: string })[] =
+  DECK.map((s, i) => ({
+    id: s.id,
+    label: s.label,
+    from: DECK.slice(0, i).reduce((a, d) => a + d.frames, 0) - T * i,
+  }));
 
 export const CyphexLaunch: React.FC = () => {
   return (
@@ -86,7 +178,11 @@ export const CyphexLaunch: React.FC = () => {
       <TransitionSeries>
         {DECK.flatMap(({ id, frames, Comp, enter }) => [
           ...(enter ? [ENTER[enter](`${id}-in`)] : []),
-          <TransitionSeries.Sequence key={id} name={id} durationInFrames={frames}>
+          <TransitionSeries.Sequence
+            key={id}
+            name={id}
+            durationInFrames={frames}
+          >
             <Comp />
           </TransitionSeries.Sequence>,
         ])}

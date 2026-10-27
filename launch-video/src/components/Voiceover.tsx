@@ -11,12 +11,14 @@ const LINES: readonly { readonly file: string; readonly scene: string; readonly 
   { file: "vo05-pipeline.mp3", scene: "scan", offset: 8 },
   { file: "vo06-swarm.mp3", scene: "swarm", offset: 4 },
   { file: "vo05b-hypothesis.mp3", scene: "hypothesis", offset: 10 },
+  { file: "vo06c-council.mp3", scene: "council", offset: 8 },
   { file: "vo07-genome.mp3", scene: "genome", offset: 10 },
   // 12.5s line: starts in the attack-sim scene so its 2nd sentence lands as the gate scene opens
   { file: "vo08a-gate.mp3", scene: "arena", offset: 40 },
   { file: "vo06b-debate.mp3", scene: "patch", offset: 6 },
   { file: "vo07a-verify.mp3", scene: "verify", offset: 20 },
   { file: "vo07b-verify.mp3", scene: "verify", offset: 108 },
+  { file: "vo10-compare.mp3", scene: "compare", offset: 10 },
   { file: "vo08-local.mp3", scene: "local", offset: 16 },
   { file: "vo09-cta.mp3", scene: "cta", offset: 66 },
 ];
