@@ -57,7 +57,7 @@ const DECK: readonly {
   { id: "hypothesis", label: "Reasoning", frames: 300, Comp: Hypothesis, enter: "fade" },
   { id: "debate", label: "Council", frames: 330, Comp: Debate, enter: "slideRight" },
   { id: "genome", label: "Genome", frames: 300, Comp: Genome, enter: "wipeLeft" },
-  { id: "gate", label: "Zero-day", frames: 360, Comp: DecisionGate, enter: "slideBottom" },
+  { id: "gate", label: "Zero-day", frames: 390, Comp: DecisionGate, enter: "slideBottom" },
   { id: "verify", label: "Verify", frames: 300, Comp: VerifyGate, enter: "fade" },
   { id: "compare", label: "Compare", frames: 300, Comp: Compare, enter: "wipeLeft" },
   { id: "local", label: "Local-first", frames: 150, Comp: LocalFirst, enter: "fade" },

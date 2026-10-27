@@ -14,6 +14,7 @@ const LINES: readonly { readonly file: string; readonly scene: string; readonly 
   { file: "vo05b-hypothesis.mp3", scene: "hypothesis", offset: 10 },
   { file: "vo06b-debate.mp3", scene: "debate", offset: 6 },
   { file: "vo07-genome.mp3", scene: "genome", offset: 10 },
+  { file: "vo08a-gate.mp3", scene: "gate", offset: 8 },
   { file: "vo07a-verify.mp3", scene: "verify", offset: 20 },
   { file: "vo07b-verify.mp3", scene: "verify", offset: 108 },
   { file: "vo08-local.mp3", scene: "local", offset: 16 },
