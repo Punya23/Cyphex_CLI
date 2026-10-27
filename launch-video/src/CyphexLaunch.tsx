@@ -8,7 +8,12 @@ import { DeckChrome, type Section } from "./components/DeckChrome";
 import { Voiceover } from "./components/Voiceover";
 import { ColdOpen } from "./scenes/ColdOpen";
 import { Commands } from "./scenes/Commands";
+import { Compare } from "./scenes/Compare";
 import { CTA } from "./scenes/CTA";
+import { Debate } from "./scenes/Debate";
+import { DecisionGate } from "./scenes/DecisionGate";
+import { Genome } from "./scenes/Genome";
+import { Hypothesis } from "./scenes/Hypothesis";
 import { LocalFirst } from "./scenes/LocalFirst";
 import { LogoReveal } from "./scenes/LogoReveal";
 import { Pipeline } from "./scenes/Pipeline";
@@ -18,28 +23,54 @@ import { VerifyGate } from "./scenes/VerifyGate";
 
 export const T = 12; // transition length, frames
 
-// Scene lengths; Root derives total duration from these.
-export const SCENES = [120, 150, 150, 270, 270, 270, 300, 150, 180] as const;
-export const TOTAL_FRAMES =
-  SCENES.reduce((a, b) => a + b, 0) - T * (SCENES.length - 1);
-
 const timing = linearTiming({ durationInFrames: T });
 
-const LABELS = [
-  "Intro",
-  "Problem",
-  "Product",
-  "Commands",
-  "Pipeline",
-  "Swarm",
-  "Verify",
-  "Local-first",
-  "Get started",
+// Transition INTO a scene, by name (the presentation types don't unify).
+const ENTER = {
+  fade: (key: string) => <TransitionSeries.Transition key={key} presentation={fade()} timing={timing} />,
+  slideRight: (key: string) => (
+    <TransitionSeries.Transition key={key} presentation={slide({ direction: "from-right" })} timing={timing} />
+  ),
+  slideBottom: (key: string) => (
+    <TransitionSeries.Transition key={key} presentation={slide({ direction: "from-bottom" })} timing={timing} />
+  ),
+  wipeLeft: (key: string) => (
+    <TransitionSeries.Transition key={key} presentation={wipe({ direction: "from-left" })} timing={timing} />
+  ),
+} as const;
+
+// One row per scene, in playback order. `enter` is the transition INTO the scene.
+// Voiceover anchors in components/Voiceover.tsx refer to a scene by its `id`.
+const DECK: readonly {
+  readonly id: string;
+  readonly label: string;
+  readonly frames: number;
+  readonly Comp: React.FC;
+  readonly enter?: keyof typeof ENTER;
+}[] = [
+  { id: "intro", label: "Intro", frames: 120, Comp: ColdOpen },
+  { id: "problem", label: "Problem", frames: 150, Comp: Problem, enter: "fade" },
+  { id: "logo", label: "Product", frames: 150, Comp: LogoReveal, enter: "fade" },
+  { id: "commands", label: "Commands", frames: 270, Comp: Commands, enter: "fade" },
+  { id: "pipeline", label: "Pipeline", frames: 270, Comp: Pipeline, enter: "slideRight" },
+  { id: "swarm", label: "Swarm", frames: 270, Comp: Swarm, enter: "wipeLeft" },
+  { id: "hypothesis", label: "Reasoning", frames: 300, Comp: Hypothesis, enter: "fade" },
+  { id: "debate", label: "Council", frames: 330, Comp: Debate, enter: "slideRight" },
+  { id: "genome", label: "Genome", frames: 300, Comp: Genome, enter: "wipeLeft" },
+  { id: "gate", label: "Zero-day", frames: 360, Comp: DecisionGate, enter: "slideBottom" },
+  { id: "verify", label: "Verify", frames: 300, Comp: VerifyGate, enter: "fade" },
+  { id: "compare", label: "Compare", frames: 300, Comp: Compare, enter: "wipeLeft" },
+  { id: "local", label: "Local-first", frames: 150, Comp: LocalFirst, enter: "fade" },
+  { id: "cta", label: "Get started", frames: 180, Comp: CTA, enter: "fade" },
 ];
+
+export const TOTAL_FRAMES = DECK.reduce((a, s) => a + s.frames, 0) - T * (DECK.length - 1);
+
 // Each scene starts where the previous one ends minus the transition overlap.
-const SECTIONS: Section[] = LABELS.map((label, i) => ({
-  label,
-  from: SCENES.slice(0, i).reduce((a, b) => a + b, 0) - T * i,
+export const SECTIONS: readonly (Section & { readonly id: string })[] = DECK.map((s, i) => ({
+  id: s.id,
+  label: s.label,
+  from: DECK.slice(0, i).reduce((a, d) => a + d.frames, 0) - T * i,
 }));
 
 export const CyphexLaunch: React.FC = () => {
@@ -47,62 +78,12 @@ export const CyphexLaunch: React.FC = () => {
     <AbsoluteFill>
       <Backdrop />
       <TransitionSeries>
-        <TransitionSeries.Sequence
-          name="Cold open"
-          durationInFrames={SCENES[0]}
-        >
-          <ColdOpen />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence name="Problem" durationInFrames={SCENES[1]}>
-          <Problem />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence
-          name="Logo reveal"
-          durationInFrames={SCENES[2]}
-        >
-          <LogoReveal />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence name="Commands" durationInFrames={SCENES[3]}>
-          <Commands />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition
-          presentation={slide({ direction: "from-right" })}
-          timing={timing}
-        />
-        <TransitionSeries.Sequence name="Pipeline" durationInFrames={SCENES[4]}>
-          <Pipeline />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition
-          presentation={wipe({ direction: "from-left" })}
-          timing={timing}
-        />
-        <TransitionSeries.Sequence name="Swarm" durationInFrames={SCENES[5]}>
-          <Swarm />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition
-          presentation={slide({ direction: "from-bottom" })}
-          timing={timing}
-        />
-        <TransitionSeries.Sequence
-          name="Verify gate"
-          durationInFrames={SCENES[6]}
-        >
-          <VerifyGate />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence
-          name="Local first"
-          durationInFrames={SCENES[7]}
-        >
-          <LocalFirst />
-        </TransitionSeries.Sequence>
-        <TransitionSeries.Transition presentation={fade()} timing={timing} />
-        <TransitionSeries.Sequence name="CTA" durationInFrames={SCENES[8]}>
-          <CTA />
-        </TransitionSeries.Sequence>
+        {DECK.flatMap(({ id, frames, Comp, enter }) => [
+          ...(enter ? [ENTER[enter](`${id}-in`)] : []),
+          <TransitionSeries.Sequence key={id} name={id} durationInFrames={frames}>
+            <Comp />
+          </TransitionSeries.Sequence>,
+        ])}
       </TransitionSeries>
       <DeckChrome sections={SECTIONS} />
       <Voiceover sections={SECTIONS} />
