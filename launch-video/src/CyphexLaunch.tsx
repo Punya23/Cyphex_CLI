@@ -6,19 +6,22 @@ import { wipe } from "@remotion/transitions/wipe";
 import { Backdrop } from "./components/Backdrop";
 import { DeckChrome, type Section } from "./components/DeckChrome";
 import { Voiceover } from "./components/Voiceover";
-import { ColdOpen } from "./scenes/ColdOpen";
-import { Commands } from "./scenes/Commands";
 import { Compare } from "./scenes/Compare";
 import { CTA } from "./scenes/CTA";
-import { Debate } from "./scenes/Debate";
 import { DecisionGate } from "./scenes/DecisionGate";
-import { Genome } from "./scenes/Genome";
-import { Hypothesis } from "./scenes/Hypothesis";
 import { LocalFirst } from "./scenes/LocalFirst";
 import { LogoReveal } from "./scenes/LogoReveal";
-import { Pipeline } from "./scenes/Pipeline";
 import { Problem } from "./scenes/Problem";
-import { Swarm } from "./scenes/Swarm";
+import {
+  RealArena,
+  RealCouncil,
+  RealGenome,
+  RealHypothesis,
+  RealIntro,
+  RealPatch,
+  RealScan,
+  RealSwarm,
+} from "./scenes/Real";
 import { VerifyGate } from "./scenes/VerifyGate";
 
 export const T = 12; // transition length, frames
@@ -41,6 +44,8 @@ const ENTER = {
 
 // One row per scene, in playback order. `enter` is the transition INTO the scene.
 // Voiceover anchors in components/Voiceover.tsx refer to a scene by its `id`.
+// Scenes named Real* play the screen recordings (public/footage, built by the ffmpeg
+// script from the original .mov files); the rest are motion graphics.
 const DECK: readonly {
   readonly id: string;
   readonly label: string;
@@ -48,18 +53,19 @@ const DECK: readonly {
   readonly Comp: React.FC;
   readonly enter?: keyof typeof ENTER;
 }[] = [
-  { id: "intro", label: "Intro", frames: 120, Comp: ColdOpen },
+  { id: "intro", label: "Intro", frames: 165, Comp: RealIntro },
   { id: "problem", label: "Problem", frames: 150, Comp: Problem, enter: "fade" },
   { id: "logo", label: "Product", frames: 150, Comp: LogoReveal, enter: "fade" },
-  { id: "commands", label: "Commands", frames: 270, Comp: Commands, enter: "fade" },
-  { id: "pipeline", label: "Pipeline", frames: 270, Comp: Pipeline, enter: "slideRight" },
-  { id: "swarm", label: "Swarm", frames: 270, Comp: Swarm, enter: "wipeLeft" },
-  { id: "hypothesis", label: "Reasoning", frames: 300, Comp: Hypothesis, enter: "fade" },
-  { id: "debate", label: "Council", frames: 330, Comp: Debate, enter: "slideRight" },
-  { id: "genome", label: "Genome", frames: 300, Comp: Genome, enter: "wipeLeft" },
-  { id: "gate", label: "Zero-day", frames: 390, Comp: DecisionGate, enter: "slideBottom" },
+  { id: "scan", label: "Scan", frames: 270, Comp: RealScan, enter: "fade" },
+  { id: "swarm", label: "Agents", frames: 280, Comp: RealSwarm, enter: "slideRight" },
+  { id: "hypothesis", label: "Reasoning", frames: 450, Comp: RealHypothesis, enter: "fade" },
+  { id: "council", label: "Council", frames: 170, Comp: RealCouncil, enter: "wipeLeft" },
+  { id: "genome", label: "Genome", frames: 250, Comp: RealGenome, enter: "fade" },
+  { id: "arena", label: "Attack sim", frames: 170, Comp: RealArena, enter: "slideRight" },
+  { id: "gate", label: "Zero-day", frames: 300, Comp: DecisionGate, enter: "slideBottom" },
+  { id: "patch", label: "Patching", frames: 330, Comp: RealPatch, enter: "wipeLeft" },
   { id: "verify", label: "Verify", frames: 300, Comp: VerifyGate, enter: "fade" },
-  { id: "compare", label: "Compare", frames: 300, Comp: Compare, enter: "wipeLeft" },
+  { id: "compare", label: "Compare", frames: 240, Comp: Compare, enter: "wipeLeft" },
   { id: "local", label: "Local-first", frames: 150, Comp: LocalFirst, enter: "fade" },
   { id: "cta", label: "Get started", frames: 180, Comp: CTA, enter: "fade" },
 ];

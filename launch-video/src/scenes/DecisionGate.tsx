@@ -1,39 +1,53 @@
 import { AbsoluteFill, Easing, interpolate, useCurrentFrame } from "remotion";
 import { Appear, Eyebrow, Headline } from "../components/kit";
-import { C, CLAMP, FONT_MONO } from "../theme";
+import { C, CLAMP, FONT_DISPLAY, FONT_MONO } from "../theme";
 
 const EASE_OUT = Easing.bezier(0.215, 0.61, 0.355, 1); // power3.out
 const BLOCK_THRESHOLD = 0.7; // GENOME_BLOCK_THRESHOLD in the README
 
-// Sample scores straight from the README's /search table (untrained genome).
+// Scores are the real ones: the genome scoring table in the recording (benign rows,
+// ' OR 1=1--, SSRF, ; cat /etc/passwd) and the README's {{7*7}} sample.
 const REQUESTS = [
-  { payload: "normal search query", score: 0.0 },
+  { payload: "laptop", score: 0.453 },
+  { payload: "John O'Brien", score: 0.549 },
   { payload: "' OR 1=1--", score: 1.0 },
   { payload: "{{7*7}}", score: 0.8 },
-  { payload: "http://169.254.169.254/latest/meta-data/", score: 0.8 },
+  { payload: "http://169.254.169.254/latest/meta-data/", score: 1.0 },
   { payload: "; cat /etc/passwd", score: 1.0 },
 ];
-const ROW_Y0 = 300;
-const ROW_GAP = 86;
-const FIRST = 24;
-const EVERY = 44;
-const GATE_X = 880;
+
+const ROW_Y0 = 290;
+const ROW_GAP = 84;
+const FIRST = 14;
+const EVERY = 26;
+const TRACK_X = 800;
+const TRACK_W = 600;
+const THRESH_X = TRACK_X + BLOCK_THRESHOLD * TRACK_W;
 
 const startOf = (i: number): number => FIRST + i * EVERY;
-const isBlocked = (score: number): boolean => score >= BLOCK_THRESHOLD;
+/** The decision model's output: one bit. */
+const bitOf = (score: number): 0 | 1 => (score >= BLOCK_THRESHOLD ? 1 : 0);
 
 const Row: React.FC<{ readonly i: number }> = ({ i }) => {
   const frame = useCurrentFrame();
   const { payload, score } = REQUESTS[i];
   const s = startOf(i);
-  const blocked = isBlocked(score);
-  const inP = interpolate(frame, [s, s + 10], [0, 1], { ...CLAMP, easing: EASE_OUT });
-  const travel = interpolate(frame, [s + 8, s + 18], [0, 1], CLAMP);
-  const shown = interpolate(frame, [s + 18, s + 30], [0, score], CLAMP);
-  const pill = interpolate(frame, [s + 28, s + 36], [0, 1], { ...CLAMP, easing: EASE_OUT });
-  const onward = interpolate(frame, [s + 34, s + 50], [0, 1], CLAMP);
-  const color = blocked ? C.red : C.green;
+  const bit = bitOf(score);
+  const color = bit ? C.red : C.green;
   const y = ROW_Y0 + i * ROW_GAP;
+  const inP = interpolate(frame, [s, s + 10], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+  const slide = interpolate(frame, [s + 6, s + 28], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+  const value = slide * score;
+  const decided = interpolate(frame, [s + 28, s + 36], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <>
       <div
@@ -41,9 +55,9 @@ const Row: React.FC<{ readonly i: number }> = ({ i }) => {
           position: "absolute",
           left: 150,
           top: y,
-          width: 650,
+          width: 630,
           fontFamily: FONT_MONO,
-          fontSize: 27,
+          fontSize: 24,
           color: C.text,
           opacity: inP,
           translate: `${(1 - inP) * -30}px 0px`,
@@ -52,54 +66,85 @@ const Row: React.FC<{ readonly i: number }> = ({ i }) => {
       >
         {payload}
       </div>
-      {/* request chip travelling to the gate, then on to the app if allowed */}
-      {frame >= s + 8 && (blocked ? frame < s + 20 : true) ? (
-        <div
-          style={{
-            position: "absolute",
-            left: blocked ? 810 + travel * (GATE_X - 810) : 810 + travel * (GATE_X - 810) + onward * (1490 - GATE_X),
-            top: y + 8,
-            width: 18,
-            height: 18,
-            borderRadius: 9,
-            backgroundColor: color,
-            boxShadow: `0 0 16px ${color}`,
-            opacity: blocked ? 1 - Math.max(0, (frame - (s + 18)) / 2) : 1 - Math.max(0, (onward - 0.9) * 10),
-          }}
-        />
-      ) : null}
       <div
         style={{
           position: "absolute",
-          left: 985,
-          top: y - 2,
-          fontFamily: FONT_MONO,
-          fontSize: 32,
-          fontWeight: 700,
-          color: C.text,
-          opacity: interpolate(frame, [s + 18, s + 22], [0, 1], CLAMP),
+          left: TRACK_X,
+          top: y + 8,
+          width: TRACK_W,
+          height: 14,
+          borderRadius: 7,
+          overflow: "hidden",
+          opacity: inP,
         }}
       >
-        {shown.toFixed(2)}
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            width: BLOCK_THRESHOLD * TRACK_W,
+            height: "100%",
+            backgroundColor: `${C.green}30`,
+          }}
+        />
+        <div
+          style={{
+            position: "absolute",
+            left: BLOCK_THRESHOLD * TRACK_W,
+            right: 0,
+            height: "100%",
+            backgroundColor: `${C.red}40`,
+          }}
+        />
       </div>
       <div
         style={{
           position: "absolute",
-          left: 1130,
-          top: y - 6,
-          padding: "6px 18px",
-          borderRadius: 10,
-          border: `2px solid ${color}`,
-          backgroundColor: `${color}1f`,
+          left: TRACK_X + value * TRACK_W - 12,
+          top: y + 3,
+          width: 24,
+          height: 24,
+          borderRadius: 12,
+          backgroundColor: decided > 0.5 ? color : C.text,
+          boxShadow: `0 0 ${14 + decided * 16}px ${decided > 0.5 ? color : C.text}`,
+          opacity: inP,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          left: TRACK_X + TRACK_W + 24,
+          top: y - 2,
           fontFamily: FONT_MONO,
+          fontSize: 28,
           fontWeight: 700,
-          fontSize: 26,
-          color,
-          opacity: pill,
-          scale: 0.9 + pill * 0.1,
+          color: C.text,
+          opacity: inP,
         }}
       >
-        {blocked ? "✕ BLOCK" : "✓ ALLOW"}
+        {value.toFixed(2)}
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          left: TRACK_X + TRACK_W + 130,
+          top: y - 8,
+          width: 52,
+          height: 46,
+          borderRadius: 10,
+          border: `2px solid ${color}`,
+          backgroundColor: `${color}22`,
+          fontFamily: FONT_MONO,
+          fontWeight: 700,
+          fontSize: 32,
+          color,
+          textAlign: "center",
+          lineHeight: "42px",
+          opacity: decided,
+          scale: 0.8 + decided * 0.2,
+        }}
+      >
+        {bit}
       </div>
     </>
   );
@@ -114,13 +159,16 @@ const Chip: React.FC<{
   readonly x: number;
 }> = ({ label, tag, color, solid, at, x }) => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [at, at + 14], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 14], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <div
       style={{
         position: "absolute",
         left: x,
-        top: 880,
+        top: 900,
         display: "flex",
         gap: 16,
         alignItems: "center",
@@ -143,99 +191,144 @@ const Chip: React.FC<{
 
 export const DecisionGate: React.FC = () => {
   const frame = useCurrentFrame();
-  // The gate flashes red the instant a blocked request reaches it.
-  const flash = REQUESTS.reduce(
-    (m, r, i) =>
-      isBlocked(r.score)
-        ? Math.max(m, interpolate(frame, [startOf(i) + 18, startOf(i) + 21, startOf(i) + 34], [0, 1, 0], CLAMP))
-        : m,
+  const head = interpolate(frame, [4, 18], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+
+  // Output bit = verdict of the most recently decided request.
+  const decidedCount = REQUESTS.reduce(
+    (n, _, i) => (frame >= startOf(i) + 28 ? i + 1 : n),
     0,
   );
-  const gateIn = interpolate(frame, [8, 24], [0, 1], { ...CLAMP, easing: EASE_OUT });
-  const appGlow = REQUESTS.reduce(
-    (m, r, i) =>
-      isBlocked(r.score) ? m : Math.max(m, interpolate(frame, [startOf(i) + 46, startOf(i) + 52, startOf(i) + 70], [0, 1, 0], CLAMP)),
-    0,
-  );
-  const callout = interpolate(frame, [215, 235], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const last =
+    decidedCount > 0 ? bitOf(REQUESTS[decidedCount - 1].score) : null;
+  const outColor = last === null ? C.faint : last ? C.red : C.green;
+  const flip =
+    decidedCount > 0
+      ? interpolate(
+          frame,
+          [startOf(decidedCount - 1) + 28, startOf(decidedCount - 1) + 36],
+          [0.6, 1],
+          CLAMP,
+        )
+      : 1;
+  const callout = interpolate(frame, [150, 170], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
 
   return (
     <AbsoluteFill>
       <div style={{ position: "absolute", left: 150, top: 96 }}>
         <Appear from={0}>
-          <Eyebrow>Zero-day defence · the decision model</Eyebrow>
+          <Eyebrow>Decision model · the genome gate</Eyebrow>
         </Appear>
         <Appear from={6} style={{ marginTop: 18 }}>
-          <Headline size={78}>Unfair payloads don't pass.</Headline>
+          <Headline size={78}>Behaviour in. One bit out.</Headline>
         </Appear>
       </div>
 
-      {/* the gate */}
+      {/* axis labels + threshold */}
       <div
         style={{
           position: "absolute",
-          left: GATE_X,
-          top: 270,
-          width: 24,
-          height: 450,
-          borderRadius: 12,
-          backgroundColor: flash > 0.05 ? C.red : C.coral,
-          boxShadow: `0 0 ${30 + flash * 70}px ${flash > 0.05 ? C.red : C.coral}`,
-          opacity: gateIn,
+          left: TRACK_X,
+          top: 252,
+          width: TRACK_W,
+          fontFamily: FONT_MONO,
+          fontSize: 20,
+          color: C.dim,
+          opacity: head,
+        }}
+      >
+        <span style={{ position: "absolute", left: 0 }}>0.0 · normal</span>
+        <span style={{ position: "absolute", right: 0 }}>1.0 · attack</span>
+        <span
+          style={{
+            position: "absolute",
+            left: BLOCK_THRESHOLD * TRACK_W - 62,
+            top: -30,
+            color: C.coral,
+            fontWeight: 700,
+          }}
+        >
+          BLOCK ≥ 0.70
+        </span>
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          left: THRESH_X - 1,
+          top: 284,
+          width: 3,
+          height: ROW_GAP * REQUESTS.length - 14,
+          backgroundColor: C.coral,
+          boxShadow: `0 0 14px ${C.coral}`,
+          opacity: head,
         }}
       />
-      <div
-        style={{
-          position: "absolute",
-          left: GATE_X - 300,
-          width: 624,
-          top: 735,
-          textAlign: "center",
-          fontFamily: FONT_MONO,
-          fontSize: 22,
-          letterSpacing: 3,
-          color: C.dim,
-          opacity: gateIn,
-        }}
-      >
-        GENOME DECISION MODEL · BLOCK ≥ 0.70
-      </div>
-
-      {/* your app */}
-      <div
-        style={{
-          position: "absolute",
-          left: 1490,
-          top: 270,
-          width: 280,
-          height: 450,
-          borderRadius: 18,
-          border: `2px solid ${appGlow > 0.05 ? C.green : C.line}`,
-          backgroundColor: C.panel,
-          boxShadow: `0 0 ${appGlow * 60}px ${C.green}`,
-          fontFamily: FONT_MONO,
-          fontSize: 26,
-          letterSpacing: 3,
-          color: C.dim,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: gateIn,
-        }}
-      >
-        YOUR APP
-      </div>
 
       {REQUESTS.map((_, i) => (
         <Row key={i} i={i} />
       ))}
 
+      {/* the one-bit output */}
+      <div
+        style={{
+          position: "absolute",
+          left: 1660,
+          top: 290,
+          width: 190,
+          height: 380,
+          borderRadius: 18,
+          border: `3px solid ${outColor}`,
+          backgroundColor: C.panel,
+          boxShadow: `0 0 50px ${outColor}55`,
+          textAlign: "center",
+          fontFamily: FONT_MONO,
+          opacity: head,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 20,
+            letterSpacing: 4,
+            color: C.dim,
+            marginTop: 20,
+          }}
+        >
+          OUTPUT
+        </div>
+        <div
+          style={{
+            fontFamily: FONT_DISPLAY,
+            fontWeight: 700,
+            fontSize: 190,
+            lineHeight: 1.05,
+            color: outColor,
+            scale: flip,
+            marginTop: 10,
+          }}
+        >
+          {last === null ? "–" : last}
+        </div>
+        <div style={{ fontSize: 24, fontWeight: 700, color: outColor }}>
+          {last === null ? "" : last ? "BLOCK" : "ALLOW"}
+        </div>
+        <div
+          style={{ fontSize: 16, color: C.dim, marginTop: 22, lineHeight: 1.5 }}
+        >
+          0 = allow
+          <br />1 = block
+        </div>
+      </div>
+
       <div
         style={{
           position: "absolute",
           left: 150,
-          right: 150,
-          top: 790,
+          top: 815,
           fontFamily: FONT_MONO,
           fontSize: 30,
           color: C.text,
@@ -243,12 +336,34 @@ export const DecisionGate: React.FC = () => {
           translate: `0px ${(1 - callout) * 20}px`,
         }}
       >
-        <span style={{ color: C.coral }}>Zero-day?</span> No signature needed. It scores behaviour, not rules.
+        <span style={{ color: C.coral }}>Zero-day?</span> No signature. 15
+        behaviour features → score → one bit.
       </div>
 
-      <Chip label="● RASP guard · /watch" tag="TODAY" color={C.green} solid at={255} x={150} />
-      <Chip label="○ AWS WAF" tag="PLANNED" color={C.amber} solid={false} at={270} x={720} />
-      <Chip label="○ Cloudflare" tag="PLANNED" color={C.amber} solid={false} at={285} x={1060} />
+      <Chip
+        label="● RASP guard · /watch"
+        tag="TODAY"
+        color={C.green}
+        solid
+        at={172}
+        x={150}
+      />
+      <Chip
+        label="○ AWS WAF"
+        tag="PLANNED"
+        color={C.amber}
+        solid={false}
+        at={186}
+        x={720}
+      />
+      <Chip
+        label="○ Cloudflare"
+        tag="PLANNED"
+        color={C.amber}
+        solid={false}
+        at={200}
+        x={1060}
+      />
     </AbsoluteFill>
   );
 };

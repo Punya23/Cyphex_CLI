@@ -5,3 +5,6 @@ dist
 
 # Ignore the output video from Git but not videos you import into src/.
 out
+
+# real recordings: large, personal terminal footage; rebuild with the ffmpeg script, do not commit
+public/footage/
