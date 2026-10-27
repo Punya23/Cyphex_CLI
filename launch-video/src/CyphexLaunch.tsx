@@ -146,7 +146,7 @@ const DECK: readonly {
   {
     id: "compare",
     label: "Compare",
-    frames: 240,
+    frames: 255,
     Comp: Compare,
     enter: "wipeLeft",
   },
