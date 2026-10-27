@@ -13,15 +13,31 @@ const CHECKS = [
 ];
 
 const CASES = [
-  { verdict: "PASS", note: "re-scan clean · fix kept", color: C.green, at: 130 },
+  {
+    verdict: "PASS",
+    note: "re-scan clean · fix kept",
+    color: C.green,
+    at: 130,
+  },
   { verdict: "FAIL", note: "rolled back automatically", color: C.red, at: 160 },
-  { verdict: "UNVERIFIABLE", note: "never rounded up to PASS", color: C.amber, at: 190 },
+  {
+    verdict: "UNVERIFIABLE",
+    note: "never rounded up to PASS",
+    color: C.amber,
+    at: 190,
+  },
 ];
 
-const CheckRow: React.FC<{ readonly label: string; readonly i: number }> = ({ label, i }) => {
+const CheckRow: React.FC<{ readonly label: string; readonly i: number }> = ({
+  label,
+  i,
+}) => {
   const frame = useCurrentFrame();
   const at = 70 + i * 9;
-  const p = interpolate(frame, [at, at + 8], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 8], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <div
       style={{
@@ -43,10 +59,21 @@ const CheckRow: React.FC<{ readonly label: string; readonly i: number }> = ({ la
 
 const Diff: React.FC = () => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [18, 34], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [18, 34], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const fixed = interpolate(frame, [48, 58], [0, 1], CLAMP);
   const line = (bg: string, fg: string, sign: string, text: string, o = 1) => (
-    <div style={{ background: bg, color: fg, padding: "6px 22px", opacity: o, whiteSpace: "pre" }}>
+    <div
+      style={{
+        background: bg,
+        color: fg,
+        padding: "6px 22px",
+        opacity: o,
+        whiteSpace: "pre",
+      }}
+    >
       {sign} {text}
     </div>
   );
@@ -64,16 +91,39 @@ const Diff: React.FC = () => {
         width: 960,
       }}
     >
-      <div style={{ padding: "10px 22px", color: C.dim, borderBottom: `2px solid ${C.line}` }}>routes/orders.js</div>
-      {line("#f0524d1f", C.red, "−", "db.query(\"SELECT * FROM orders WHERE id=\" + id)", 1 - fixed * 0.55)}
-      {line("#22c55e1f", C.green, "+", "db.query(\"SELECT * FROM orders WHERE id=?\", [id])", fixed)}
+      <div
+        style={{
+          padding: "10px 22px",
+          color: C.dim,
+          borderBottom: `2px solid ${C.line}`,
+        }}
+      >
+        routes/orders.js
+      </div>
+      {line(
+        "#f0524d1f",
+        C.red,
+        "−",
+        'db.query("SELECT * FROM orders WHERE id=" + id)',
+        1 - fixed * 0.55,
+      )}
+      {line(
+        "#22c55e1f",
+        C.green,
+        "+",
+        'db.query("SELECT * FROM orders WHERE id=?", [id])',
+        fixed,
+      )}
     </div>
   );
 };
 
 const Case: React.FC<{ readonly c: (typeof CASES)[number] }> = ({ c }) => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [c.at, c.at + 14], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [c.at, c.at + 14], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <div
       style={{
@@ -87,15 +137,36 @@ const Case: React.FC<{ readonly c: (typeof CASES)[number] }> = ({ c }) => {
         boxShadow: `0 0 50px ${c.color}33`,
       }}
     >
-      <div style={{ fontFamily: FONT_MONO, fontWeight: 700, fontSize: 40, color: c.color }}>{c.verdict}</div>
-      <div style={{ fontFamily: FONT_MONO, fontSize: 24, color: C.dim, marginTop: 8 }}>{c.note}</div>
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontWeight: 700,
+          fontSize: 40,
+          color: c.color,
+        }}
+      >
+        {c.verdict}
+      </div>
+      <div
+        style={{
+          fontFamily: FONT_MONO,
+          fontSize: 24,
+          color: C.dim,
+          marginTop: 8,
+        }}
+      >
+        {c.note}
+      </div>
     </div>
   );
 };
 
 export const VerifyGate: React.FC = () => {
   const frame = useCurrentFrame();
-  const endLine = interpolate(frame, [236, 252], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const endLine = interpolate(frame, [236, 252], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <AbsoluteFill>
       <div style={{ position: "absolute", left: 150, top: 96 }}>
@@ -117,7 +188,16 @@ export const VerifyGate: React.FC = () => {
         ))}
       </div>
 
-      <div style={{ position: "absolute", left: 150, right: 150, top: 650, display: "flex", gap: 28 }}>
+      <div
+        style={{
+          position: "absolute",
+          left: 150,
+          right: 150,
+          top: 650,
+          display: "flex",
+          gap: 28,
+        }}
+      >
         {CASES.map((c) => (
           <Case key={c.verdict} c={c} />
         ))}

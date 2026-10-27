@@ -1,17 +1,27 @@
-import { AbsoluteFill, Easing, Img, interpolate, staticFile, useCurrentFrame } from "remotion";
+import {
+  AbsoluteFill,
+  Easing,
+  Img,
+  interpolate,
+  staticFile,
+  useCurrentFrame,
+} from "remotion";
 import { Appear } from "../components/kit";
 import { C, CLAMP, FONT_DISPLAY, FONT_MONO } from "../theme";
 
 const EASE_OUT = Easing.bezier(0.16, 1, 0.3, 1);
 const EASE_POP = Easing.bezier(0.34, 1.56, 0.64, 1);
 
-const TagWord: React.FC<{ readonly children: string; readonly at: number; readonly color: string }> = ({
-  children,
-  at,
-  color,
-}) => {
+const TagWord: React.FC<{
+  readonly children: string;
+  readonly at: number;
+  readonly color: string;
+}> = ({ children, at, color }) => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [at, at + 16], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 16], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <span
       style={{
@@ -31,9 +41,15 @@ export const LogoReveal: React.FC = () => {
   const frame = useCurrentFrame();
 
   // Banner wipes in left→right, then briefly chromatic-glitches on landing.
-  const wipe = interpolate(frame, [6, 34], [100, 0], { ...CLAMP, easing: EASE_OUT });
+  const wipe = interpolate(frame, [6, 34], [100, 0], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const glitch = interpolate(frame, [34, 38, 48], [0, 1, 0], CLAMP);
-  const mascotP = interpolate(frame, [14, 38], [0, 1], { ...CLAMP, easing: EASE_POP });
+  const mascotP = interpolate(frame, [14, 38], [0, 1], {
+    ...CLAMP,
+    easing: EASE_POP,
+  });
   const bob = Math.sin(frame / 9) * 8;
   const glow = interpolate(frame, [30, 60], [0, 1], CLAMP);
 
@@ -58,7 +74,11 @@ export const LogoReveal: React.FC = () => {
         >
           <Img
             src={staticFile("brand/mascot_hero.png")}
-            style={{ width: 292 * 1.3, height: 323 * 1.3, imageRendering: "pixelated" }}
+            style={{
+              width: 292 * 1.3,
+              height: 323 * 1.3,
+              imageRendering: "pixelated",
+            }}
           />
         </div>
         <div
@@ -69,12 +89,24 @@ export const LogoReveal: React.FC = () => {
         >
           <Img
             src={staticFile("brand/banner_alpha.png")}
-            style={{ width: 752 * 1.5, height: 215 * 1.5, imageRendering: "pixelated" }}
+            style={{
+              width: 752 * 1.5,
+              height: 215 * 1.5,
+              imageRendering: "pixelated",
+            }}
           />
         </div>
       </div>
 
-      <div style={{ position: "absolute", top: 700, left: 0, right: 0, textAlign: "center" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: 700,
+          left: 0,
+          right: 0,
+          textAlign: "center",
+        }}
+      >
         <div
           style={{
             fontFamily: FONT_DISPLAY,
@@ -94,7 +126,14 @@ export const LogoReveal: React.FC = () => {
           </TagWord>
         </div>
         <Appear from={82} style={{ marginTop: 28 }}>
-          <div style={{ fontFamily: FONT_MONO, fontSize: 36, color: C.dim, letterSpacing: 1 }}>
+          <div
+            style={{
+              fontFamily: FONT_MONO,
+              fontSize: 36,
+              color: C.dim,
+              letterSpacing: 1,
+            }}
+          >
             The AI security agent that proves its fixes.
           </div>
         </Appear>

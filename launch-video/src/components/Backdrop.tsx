@@ -1,4 +1,9 @@
-import { AbsoluteFill, interpolate, useCurrentFrame, useVideoConfig } from "remotion";
+import {
+  AbsoluteFill,
+  interpolate,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
 import { C } from "../theme";
 
 // Persistent cinematic background: dark base, slow-drifting coral/violet
@@ -19,9 +24,10 @@ export const Backdrop: React.FC = () => {
       />
       <AbsoluteFill
         style={{
-          backgroundImage: `linear-gradient(${C.line}55 1px, transparent 1px), linear-gradient(90deg, ${C.line}55 1px, transparent 1px)`,
-          backgroundSize: "96px 96px",
-          backgroundPosition: `${(frame * 0.25) % 96}px ${(frame * 0.15) % 96}px`,
+          // midnight-grid dot grid: 2px dots on a 40px pitch, slow lagging drift
+          backgroundImage: `radial-gradient(circle, ${C.faint} 2px, transparent 2.5px)`,
+          backgroundSize: "40px 40px",
+          backgroundPosition: `${(frame * 0.2) % 40}px ${(frame * 0.12) % 40}px`,
           maskImage:
             "radial-gradient(ellipse at 50% 50%, black 10%, transparent 75%)",
           WebkitMaskImage:
@@ -33,7 +39,12 @@ export const Backdrop: React.FC = () => {
       <svg
         width={width}
         height={height}
-        style={{ position: "absolute", inset: 0, opacity: 0.07, mixBlendMode: "screen" }}
+        style={{
+          position: "absolute",
+          inset: 0,
+          opacity: 0.07,
+          mixBlendMode: "screen",
+        }}
       >
         <filter id="grain">
           <feTurbulence
@@ -46,12 +57,6 @@ export const Backdrop: React.FC = () => {
         </filter>
         <rect width="100%" height="100%" filter="url(#grain)" />
       </svg>
-      <AbsoluteFill
-        style={{
-          backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, transparent 1px, transparent 4px)",
-        }}
-      />
       <AbsoluteFill
         style={{
           background:

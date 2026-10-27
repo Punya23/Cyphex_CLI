@@ -1,8 +1,14 @@
 import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
 import { loadFont as loadDisplay } from "@remotion/google-fonts/SpaceGrotesk";
 
-const mono = loadMono("normal", { weights: ["400", "500", "700"], subsets: ["latin"] });
-const display = loadDisplay("normal", { weights: ["500", "700"], subsets: ["latin"] });
+const mono = loadMono("normal", {
+  weights: ["400", "500", "700"],
+  subsets: ["latin"],
+});
+const display = loadDisplay("normal", {
+  weights: ["500", "700"],
+  subsets: ["latin"],
+});
 
 export const FONT_MONO = mono.fontFamily;
 export const FONT_DISPLAY = display.fontFamily;

@@ -18,7 +18,10 @@ const PHASES = [
   "COMPLETE",
 ];
 
-const PhaseLine: React.FC<{ readonly index: number; readonly at: number }> = ({ index, at }) => {
+const PhaseLine: React.FC<{ readonly index: number; readonly at: number }> = ({
+  index,
+  at,
+}) => {
   const frame = useCurrentFrame();
   const p = interpolate(frame, [at, at + 6], [0, 1], CLAMP);
   const last = index === PHASES.length - 1;
@@ -36,7 +39,9 @@ const PhaseLine: React.FC<{ readonly index: number; readonly at: number }> = ({ 
       }}
     >
       <span style={{ color: C.green }}>✓</span>
-      <span style={{ color: C.violet }}>{String(index + 1).padStart(2, "0")}/10</span>
+      <span style={{ color: C.violet }}>
+        {String(index + 1).padStart(2, "0")}/10
+      </span>
       <span style={{ fontWeight: last ? 700 : 400 }}>{PHASES[index]}</span>
     </div>
   );

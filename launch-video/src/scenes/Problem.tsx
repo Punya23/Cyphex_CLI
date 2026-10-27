@@ -10,8 +10,14 @@ const Word: React.FC<{
   readonly strike?: boolean;
 }> = ({ children, at, strike }) => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [at, at + 14], [0, 1], { ...CLAMP, easing: EASE_OUT });
-  const bar = interpolate(frame, [68, 80], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 14], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+  const bar = interpolate(frame, [68, 80], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   return (
     <span
       style={{
@@ -45,7 +51,10 @@ const Word: React.FC<{
 
 const Claim: React.FC<{ readonly at: number }> = ({ at }) => {
   const frame = useCurrentFrame();
-  const p = interpolate(frame, [at, at + 12], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const p = interpolate(frame, [at, at + 12], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   // At frame 80 the confident green "FIXED" claims lose their proof.
   const turn = interpolate(frame, [80, 90], [0, 1], CLAMP);
   const color = turn > 0.5 ? C.amber : C.green;
@@ -60,8 +69,14 @@ const Claim: React.FC<{ readonly at: number }> = ({ at }) => {
 export const Problem: React.FC = () => {
   const frame = useCurrentFrame();
 
-  const dim = interpolate(frame, [96, 112], [1, 0.16], { ...CLAMP, easing: EASE_OUT });
-  const punch = interpolate(frame, [98, 116], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const dim = interpolate(frame, [96, 112], [1, 0.16], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+  const punch = interpolate(frame, [98, 116], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
 
   return (
     <AbsoluteFill style={{ paddingLeft: 150, paddingTop: 130 }}>

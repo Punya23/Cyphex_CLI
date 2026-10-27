@@ -1,4 +1,11 @@
-import { AbsoluteFill, Easing, Img, interpolate, staticFile, useCurrentFrame } from "remotion";
+import {
+  AbsoluteFill,
+  Easing,
+  Img,
+  interpolate,
+  staticFile,
+  useCurrentFrame,
+} from "remotion";
 import { Appear, Cursor, TypeText } from "../components/kit";
 import { C, CLAMP, FONT_DISPLAY, FONT_MONO } from "../theme";
 
@@ -6,8 +13,14 @@ const EASE_OUT = Easing.bezier(0.16, 1, 0.3, 1);
 
 export const CTA: React.FC = () => {
   const frame = useCurrentFrame();
-  const logo = interpolate(frame, [0, 20], [0, 1], { ...CLAMP, easing: EASE_OUT });
-  const line = interpolate(frame, [70, 88], [0, 1], { ...CLAMP, easing: EASE_OUT });
+  const logo = interpolate(frame, [0, 20], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
+  const line = interpolate(frame, [70, 88], [0, 1], {
+    ...CLAMP,
+    easing: EASE_OUT,
+  });
   const fadeOut = interpolate(frame, [150, 180], [0, 1], CLAMP);
 
   return (
@@ -23,8 +36,14 @@ export const CTA: React.FC = () => {
           translate: `0px ${(1 - logo) * 30}px`,
         }}
       >
-        <Img src={staticFile("brand/mascot_hero.png")} style={{ width: 292, height: 323, imageRendering: "pixelated" }} />
-        <Img src={staticFile("brand/banner_alpha.png")} style={{ width: 752, height: 215, imageRendering: "pixelated" }} />
+        <Img
+          src={staticFile("brand/mascot_hero.png")}
+          style={{ width: 292, height: 323, imageRendering: "pixelated" }}
+        />
+        <Img
+          src={staticFile("brand/banner_alpha.png")}
+          style={{ width: 752, height: 215, imageRendering: "pixelated" }}
+        />
       </div>
 
       <div
@@ -58,11 +77,14 @@ export const CTA: React.FC = () => {
           translate: `0px ${(1 - line) * 30}px`,
         }}
       >
-        Point it at a repo. <span style={{ color: C.coral }}>It proves the rest.</span>
+        Point it at a repo.{" "}
+        <span style={{ color: C.coral }}>It proves the rest.</span>
       </div>
 
       <Appear from={96} style={{ position: "absolute", top: 880 }}>
-        <div style={{ fontFamily: FONT_MONO, fontSize: 34, color: C.dim }}>github.com/vedant91/Cyphex_CLI</div>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 34, color: C.dim }}>
+          github.com/vedant91/Cyphex_CLI
+        </div>
       </Appear>
 
       <AbsoluteFill style={{ backgroundColor: "#000", opacity: fadeOut }} />

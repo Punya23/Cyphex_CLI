@@ -30,10 +30,10 @@ export const Appear: React.FC<{
   );
 };
 
-export const Cursor: React.FC<{ readonly color?: string; readonly size?: number }> = ({
-  color = C.coral,
-  size = 40,
-}) => {
+export const Cursor: React.FC<{
+  readonly color?: string;
+  readonly size?: number;
+}> = ({ color = C.coral, size = 40 }) => {
   const frame = useCurrentFrame();
   const on = Math.floor(frame / 15) % 2 === 0;
   return (
@@ -58,7 +58,10 @@ export const TypeText: React.FC<{
   readonly charsPerFrame?: number;
 }> = ({ text, from, charsPerFrame = 0.6 }) => {
   const frame = useCurrentFrame();
-  const n = Math.max(0, Math.min(text.length, Math.floor((frame - from) * charsPerFrame)));
+  const n = Math.max(
+    0,
+    Math.min(text.length, Math.floor((frame - from) * charsPerFrame)),
+  );
   return <>{text.slice(0, n)}</>;
 };
 
@@ -91,10 +94,10 @@ export const Pill: React.FC<{
   </div>
 );
 
-export const Eyebrow: React.FC<{ readonly children: React.ReactNode; readonly color?: string }> = ({
-  children,
-  color = C.coral,
-}) => (
+export const Eyebrow: React.FC<{
+  readonly children: React.ReactNode;
+  readonly color?: string;
+}> = ({ children, color = C.coral }) => (
   <div
     style={{
       fontFamily: FONT_MONO,
@@ -159,9 +162,30 @@ export const TerminalWindow: React.FC<{
         borderBottom: `2px solid ${C.line}`,
       }}
     >
-      <div style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: C.red }} />
-      <div style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: C.amber }} />
-      <div style={{ width: 16, height: 16, borderRadius: 8, backgroundColor: C.green }} />
+      <div
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 8,
+          backgroundColor: C.red,
+        }}
+      />
+      <div
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 8,
+          backgroundColor: C.amber,
+        }}
+      />
+      <div
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 8,
+          backgroundColor: C.green,
+        }}
+      />
       <div
         style={{
           marginLeft: 16,
